@@ -5,6 +5,7 @@ use store_core::{
     rank_variants, AppVariant, CanonicalApp, ProviderStatus, SearchParams, SearchResponse,
     SourceKind, TrustLevel,
 };
+use std::time::Duration;
 use tokio::process::Command;
 
 #[derive(Clone)]
@@ -43,70 +44,39 @@ impl CatalogManager {
             }
         }
 
-        if wanted.contains(&SourceKind::Flathub) {
-            match flatpak_search(&query).await {
-                Ok(mut apps) => {
-                    providers.push(ProviderStatus {
-                        source: SourceKind::Flathub,
-                        state: "ready".to_string(),
-                        message: Some("Flatpak read-only search completed".to_string()),
-                    });
-                    results.append(&mut apps);
-                }
-                Err(err) => {
-                    let message = err.to_string();
-                    let state = if message.contains("Flathub remote is not configured") {
-                        "misconfigured"
-                    } else {
-                        "failed"
-                    };
-                    providers.push(ProviderStatus {
-                        source: SourceKind::Flathub,
-                        state: state.to_string(),
-                        message: Some(message),
-                    });
-                }
-            }
-        }
+        // Fan out the three subprocess-backed providers concurrently; each is
+        // wrapped in a timeout so one slow source cannot stall the whole search.
+        let want_flathub = wanted.contains(&SourceKind::Flathub);
+        let want_system = wanted.contains(&SourceKind::System);
+        let want_github = wanted.contains(&SourceKind::Github);
 
-        if wanted.contains(&SourceKind::System) {
-            match apt_search(&query).await {
-                Ok(mut apps) => {
-                    providers.push(ProviderStatus {
-                        source: SourceKind::System,
-                        state: "ready".to_string(),
-                        message: Some("APT read-only search completed".to_string()),
-                    });
-                    results.append(&mut apps);
+        let (flathub, system, github) = tokio::join!(
+            async {
+                if want_flathub {
+                    flathub_provider(&query).await
+                } else {
+                    (Vec::new(), Vec::new())
                 }
-                Err(err) => providers.push(ProviderStatus {
-                    source: SourceKind::System,
-                    state: "failed".to_string(),
-                    message: Some(err.to_string()),
-                }),
-            }
-        }
+            },
+            async {
+                if want_system {
+                    system_provider(&query).await
+                } else {
+                    (Vec::new(), Vec::new())
+                }
+            },
+            async {
+                if want_github {
+                    github_provider(&query, &wanted).await
+                } else {
+                    (Vec::new(), Vec::new())
+                }
+            },
+        );
 
-        if wanted.contains(&SourceKind::Github) {
-            match uni_search(&query, &wanted).await {
-                Ok((mut apps, uni_providers)) => {
-                    for provider in uni_providers
-                        .into_iter()
-                        .filter(|provider| provider.source == SourceKind::Github)
-                    {
-                        push_provider(&mut providers, provider);
-                    }
-                    results.append(&mut apps);
-                }
-                Err(err) => push_provider(
-                    &mut providers,
-                    ProviderStatus {
-                        source: SourceKind::Github,
-                        state: "failed".to_string(),
-                        message: Some(err.to_string()),
-                    },
-                ),
-            }
+        for (mut apps, mut provs) in [flathub, system, github] {
+            results.append(&mut apps);
+            providers.append(&mut provs);
         }
 
         if wanted.contains(&SourceKind::Appimage) {
@@ -270,6 +240,105 @@ async fn apt_search(query: &str) -> Result<Vec<CanonicalApp>> {
             ))
         })
         .collect())
+}
+
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(8);
+
+async fn flathub_provider(query: &str) -> (Vec<CanonicalApp>, Vec<ProviderStatus>) {
+    match tokio::time::timeout(SEARCH_TIMEOUT, flatpak_search(query)).await {
+        Ok(Ok(apps)) => (
+            apps,
+            vec![ProviderStatus {
+                source: SourceKind::Flathub,
+                state: "ready".to_string(),
+                message: Some("Flatpak read-only search completed".to_string()),
+            }],
+        ),
+        Ok(Err(err)) => {
+            let message = err.to_string();
+            let state = if message.contains("Flathub remote is not configured") {
+                "misconfigured"
+            } else {
+                "failed"
+            };
+            (
+                Vec::new(),
+                vec![ProviderStatus {
+                    source: SourceKind::Flathub,
+                    state: state.to_string(),
+                    message: Some(message),
+                }],
+            )
+        }
+        Err(_) => (
+            Vec::new(),
+            vec![ProviderStatus {
+                source: SourceKind::Flathub,
+                state: "failed".to_string(),
+                message: Some("Flatpak search timed out".to_string()),
+            }],
+        ),
+    }
+}
+
+async fn system_provider(query: &str) -> (Vec<CanonicalApp>, Vec<ProviderStatus>) {
+    match tokio::time::timeout(SEARCH_TIMEOUT, apt_search(query)).await {
+        Ok(Ok(apps)) => (
+            apps,
+            vec![ProviderStatus {
+                source: SourceKind::System,
+                state: "ready".to_string(),
+                message: Some("APT read-only search completed".to_string()),
+            }],
+        ),
+        Ok(Err(err)) => (
+            Vec::new(),
+            vec![ProviderStatus {
+                source: SourceKind::System,
+                state: "failed".to_string(),
+                message: Some(err.to_string()),
+            }],
+        ),
+        Err(_) => (
+            Vec::new(),
+            vec![ProviderStatus {
+                source: SourceKind::System,
+                state: "failed".to_string(),
+                message: Some("APT search timed out".to_string()),
+            }],
+        ),
+    }
+}
+
+async fn github_provider(
+    query: &str,
+    wanted: &[SourceKind],
+) -> (Vec<CanonicalApp>, Vec<ProviderStatus>) {
+    match tokio::time::timeout(SEARCH_TIMEOUT, uni_search(query, wanted)).await {
+        Ok(Ok((apps, provs))) => (
+            apps,
+            provs
+                .into_iter()
+                .filter(|provider| provider.source == SourceKind::Github)
+                .collect(),
+        ),
+        Ok(Err(err)) => (
+            Vec::new(),
+            vec![ProviderStatus {
+                source: SourceKind::Github,
+                state: "failed".to_string(),
+                message: Some(err.to_string()),
+            }],
+        ),
+        Err(_) => (
+            Vec::new(),
+            vec![ProviderStatus {
+                source: SourceKind::Github,
+                state: "failed".to_string(),
+                message: Some("uni search timed out".to_string()),
+            }],
+        ),
+    }
 }
 
 async fn uni_search(
