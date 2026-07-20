@@ -7,6 +7,7 @@ use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use store_catalog::CatalogManager;
 use store_core::{
     AppVariant, CanonicalApp, EnqueueOperation, Operation, OperationLog, OperationState,
@@ -73,6 +74,17 @@ struct InstalledItem {
     source: String,
     version: Option<String>,
     detail: String,
+    managed_by_uni: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateItem {
+    id: String,
+    name: String,
+    source: String,
+    current_version: Option<String>,
+    available_version: Option<String>,
     managed_by_uni: bool,
 }
 
@@ -288,7 +300,7 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
             }
         }
         "installed.list" => Ok(json!({ "items": installed_list().await })),
-        "updates.list" => Ok(json!({ "items": [] })),
+        "updates.list" => Ok(json!({ "items": updates_list().await })),
         "operations.list" => {
             let operations = state.db.lock().await.list_operations()?;
             Ok(json!({ "items": operations }))
@@ -665,9 +677,255 @@ fn dedupe_installed(items: Vec<InstalledItem>) -> Vec<InstalledItem> {
     deduped
 }
 
+const UPDATES_TIMEOUT: Duration = Duration::from_secs(8);
+const GITHUB_UPDATE_CONCURRENCY: usize = 4;
+
+/// Discover available updates from apt, flatpak, and GitHub-tracked
+/// installs concurrently, mirroring `CatalogManager::search`'s per-provider
+/// timeout fan-out so one slow/misbehaving source can't stall the others.
+async fn updates_list() -> Vec<UpdateItem> {
+    let (apt, flatpak, github) = tokio::join!(
+        async {
+            tokio::time::timeout(UPDATES_TIMEOUT, read_apt_updates())
+                .await
+                .unwrap_or_default()
+        },
+        async {
+            tokio::time::timeout(UPDATES_TIMEOUT, read_flatpak_updates())
+                .await
+                .unwrap_or_default()
+        },
+        async {
+            tokio::time::timeout(UPDATES_TIMEOUT, read_github_updates())
+                .await
+                .unwrap_or_default()
+        },
+    );
+
+    let mut items = Vec::new();
+    items.extend(apt);
+    items.extend(flatpak);
+    items.extend(github);
+    items.sort_by_key(|item| item.name.to_lowercase());
+    items
+}
+
+/// Read-only `apt list --upgradable` — no dpkg lock, no root, no mutation.
+async fn read_apt_updates() -> Vec<UpdateItem> {
+    let output = match Command::new("apt")
+        .args(["list", "--upgradable"])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_apt_upgradable_line)
+        .collect()
+}
+
+/// Parses one line of `apt list --upgradable` output, e.g.
+/// `firefox/jammy-updates 118.0-0ubuntu1 amd64 [upgradable from: 117.0-0ubuntu1]`.
+fn parse_apt_upgradable_line(line: &str) -> Option<UpdateItem> {
+    if !line.contains("[upgradable from:") {
+        return None;
+    }
+
+    let mut parts = line.split_whitespace();
+    let pkg = parts.next()?.split('/').next()?.trim();
+    if pkg.is_empty() {
+        return None;
+    }
+    let available_version = parts.next()?.to_string();
+    let _arch = parts.next();
+    let remainder = parts.collect::<Vec<_>>().join(" ");
+    let current_version = remainder
+        .rsplit("from:")
+        .next()
+        .map(|s| s.trim_end_matches(']').trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    Some(UpdateItem {
+        id: format!("apt:{pkg}"),
+        name: pkg.to_string(),
+        source: "apt".to_string(),
+        current_version,
+        available_version: Some(available_version),
+        managed_by_uni: false,
+    })
+}
+
+/// Read-only `flatpak remote-ls --updates` — no repo mutation.
+async fn read_flatpak_updates() -> Vec<UpdateItem> {
+    let output = match Command::new("flatpak")
+        .args([
+            "remote-ls",
+            "--updates",
+            "--user",
+            "--columns=application,name,version",
+        ])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_flatpak_update_line)
+        .collect()
+}
+
+fn parse_flatpak_update_line(line: &str) -> Option<UpdateItem> {
+    let columns = line.split('\t').collect::<Vec<_>>();
+    let app_id = columns.first()?.trim();
+    if app_id.is_empty() {
+        return None;
+    }
+    let name = columns.get(1).map(|s| s.trim()).unwrap_or(app_id);
+    // `remote-ls` only reports the remote (available) version; the
+    // currently-installed version isn't in this table, so it's left unset
+    // rather than shelling out to a second `flatpak list` per row.
+    let available_version = columns
+        .get(2)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    Some(UpdateItem {
+        id: format!("flatpak:{app_id}"),
+        name: name.to_string(),
+        source: "flatpak".to_string(),
+        current_version: None,
+        available_version,
+        managed_by_uni: false,
+    })
+}
+
+/// For every UNI-registry entry installed via GitHub, ask the GitHub API for
+/// the latest release tag. The registry only records `{backend, id}` (no
+/// installed version), so this is always the documented best-effort case:
+/// `currentVersion` is null and `availableVersion` is the latest tag.
+/// Concurrency is capped (not unbounded `tokio::join!`) to avoid hammering
+/// the API when a user has many GitHub-sourced installs.
+async fn read_github_updates() -> Vec<UpdateItem> {
+    let registry = match store_uni::registry::load().await {
+        Ok(registry) => registry,
+        Err(err) => {
+            tracing::warn!("reading UNI registry for updates failed: {err:#}");
+            return Vec::new();
+        }
+    };
+
+    let github_entries: Vec<(String, String)> = registry
+        .into_iter()
+        .filter(|(_, entry)| entry.backend == "github")
+        .map(|(name, entry)| (name, entry.id))
+        .collect();
+
+    if github_entries.is_empty() {
+        return Vec::new();
+    }
+
+    let client = match reqwest::Client::builder()
+        .user_agent("thallium-store")
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!("building GitHub client for updates failed: {err:#}");
+            return Vec::new();
+        }
+    };
+
+    let semaphore = Arc::new(Semaphore::new(GITHUB_UPDATE_CONCURRENCY));
+    let mut tasks = Vec::new();
+    for (name, repo_id) in github_entries {
+        let client = client.clone();
+        let semaphore = semaphore.clone();
+        tasks.push(tokio::spawn(async move {
+            let _permit = semaphore.acquire_owned().await.ok();
+            tokio::time::timeout(UPDATES_TIMEOUT, fetch_github_latest(&client, &name, &repo_id))
+                .await
+                .ok()
+                .flatten()
+        }));
+    }
+
+    let mut items = Vec::new();
+    for task in tasks {
+        if let Ok(Some(item)) = task.await {
+            items.push(item);
+        }
+    }
+    items
+}
+
+async fn fetch_github_latest(
+    client: &reqwest::Client,
+    name: &str,
+    repo_id: &str,
+) -> Option<UpdateItem> {
+    let (owner, repo) = repo_id.split_once('/')?;
+    let mut request = client.get(format!(
+        "https://api.github.com/repos/{owner}/{repo}/releases/latest"
+    ));
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        request = request.bearer_auth(token);
+    }
+    let release: Value = request.send().await.ok()?.error_for_status().ok()?.json().await.ok()?;
+    let tag_name = release.get("tag_name").and_then(Value::as_str)?.to_string();
+
+    Some(UpdateItem {
+        id: format!("uni:github:{repo_id}"),
+        name: name.to_string(),
+        source: "github".to_string(),
+        current_version: None,
+        available_version: Some(tag_name),
+        managed_by_uni: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_apt_line_extracts_current_and_available_versions() {
+        let line = "firefox/jammy-updates 118.0+build1-0ubuntu0.22.04.1 amd64 [upgradable from: 117.0+build2-0ubuntu0.22.04.1]";
+        let item = parse_apt_upgradable_line(line).expect("parses upgradable line");
+        assert_eq!(item.id, "apt:firefox");
+        assert_eq!(item.name, "firefox");
+        assert_eq!(item.source, "apt");
+        assert_eq!(
+            item.available_version.as_deref(),
+            Some("118.0+build1-0ubuntu0.22.04.1")
+        );
+        assert_eq!(
+            item.current_version.as_deref(),
+            Some("117.0+build2-0ubuntu0.22.04.1")
+        );
+        assert!(!item.managed_by_uni);
+    }
+
+    #[test]
+    fn parse_apt_line_ignores_non_upgrade_output() {
+        assert!(parse_apt_upgradable_line("Listing... Done").is_none());
+        assert!(parse_apt_upgradable_line("").is_none());
+    }
+
+    #[test]
+    fn parse_flatpak_update_line_reads_columns() {
+        let item = parse_flatpak_update_line("org.gimp.GIMP\tGIMP\t2.10.36")
+            .expect("parses flatpak update line");
+        assert_eq!(item.id, "flatpak:org.gimp.GIMP");
+        assert_eq!(item.name, "GIMP");
+        assert_eq!(item.available_version.as_deref(), Some("2.10.36"));
+        assert!(item.current_version.is_none());
+    }
 
     #[test]
     fn dedupe_collapses_case_insensitive_names_and_sorts() {

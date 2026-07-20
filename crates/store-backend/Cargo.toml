@@ -13,6 +13,7 @@ store-catalog = { path = "../store-catalog" }
 store-core = { path = "../store-core" }
 store-db = { path = "../store-db" }
 store-uni = { path = "../store-uni" }
+reqwest.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
