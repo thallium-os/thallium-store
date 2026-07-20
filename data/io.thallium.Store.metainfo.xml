@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.thallium.Store</id>
+  <name>Thallium Store</name>
+  <summary>Install applications on Thallium OS</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>Thallium Store is a graphical application store for Thallium OS. It searches system packages, Flathub, and curated GitHub releases, then delegates package changes to UNI.</p>
+  </description>
+  <launchable type="desktop-id">io.thallium.Store.desktop</launchable>
+  <provides>
+    <binary>thallium-store-backend</binary>
+  </provides>
+</component>
+

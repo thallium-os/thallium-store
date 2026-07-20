@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+if [ -f "$HOME/.cargo/env" ]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+
+cargo build
+
+export PATH="$PWD/target/debug:$PATH"
+export LANG="${LANG:-C.UTF-8}"
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+export UNI_PRIVILEGE_BACKEND="${UNI_PRIVILEGE_BACKEND:-pkexec}"
+if [ -x "$PWD/vendor/uni/uni" ]; then
+  export THALLIUM_STORE_UNI="${THALLIUM_STORE_UNI:-$PWD/vendor/uni/uni}"
+fi
+export THALLIUM_STORE_FAKE_UNI="${THALLIUM_STORE_FAKE_UNI:-0}"
+
+exec quickshell --path ui/shell.qml

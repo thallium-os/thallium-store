@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+if [ -f "$HOME/.cargo/env" ]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+
+version="${THALLIUM_STORE_VERSION:-0.1.0}"
+arch="$(dpkg --print-architecture)"
+pkg="thallium-store"
+build_root="$PWD/target/deb-root"
+out_dir="$PWD/dist"
+pkg_dir="$build_root/${pkg}_${version}_${arch}"
+
+cargo build --release
+
+rm -rf "$pkg_dir"
+mkdir -p \
+  "$pkg_dir/DEBIAN" \
+  "$pkg_dir/usr/bin" \
+  "$pkg_dir/usr/lib/thallium-store/uni" \
+  "$pkg_dir/usr/share/thallium-store/ui" \
+  "$pkg_dir/usr/share/thallium-store/data" \
+  "$pkg_dir/usr/share/applications" \
+  "$pkg_dir/usr/share/metainfo" \
+  "$pkg_dir/usr/share/doc/thallium-store"
+
+install -m 0755 target/release/thallium-store-backend "$pkg_dir/usr/bin/thallium-store-backend"
+install -m 0755 scripts/thallium-store "$pkg_dir/usr/bin/thallium-store"
+install -m 0755 vendor/uni/uni "$pkg_dir/usr/lib/thallium-store/uni/uni"
+install -m 0644 ui/shell.qml "$pkg_dir/usr/share/thallium-store/ui/shell.qml"
+install -m 0644 data/github-apps.json "$pkg_dir/usr/share/thallium-store/data/github-apps.json"
+install -m 0644 data/appimages.json "$pkg_dir/usr/share/thallium-store/data/appimages.json"
+install -m 0644 data/canonical-aliases.json "$pkg_dir/usr/share/thallium-store/data/canonical-aliases.json"
+install -m 0644 data/io.thallium.Store.desktop "$pkg_dir/usr/share/applications/io.thallium.Store.desktop"
+install -m 0644 data/io.thallium.Store.metainfo.xml "$pkg_dir/usr/share/metainfo/io.thallium.Store.metainfo.xml"
+install -m 0644 README.md "$pkg_dir/usr/share/doc/thallium-store/README.md"
+install -m 0644 docs/known-limitations.md "$pkg_dir/usr/share/doc/thallium-store/known-limitations.md"
+
+cat > "$pkg_dir/DEBIAN/control" <<EOF
+Package: thallium-store
+Version: $version
+Section: admin
+Priority: optional
+Architecture: $arch
+Maintainer: Thallium OS <maintainers@thallium.local>
+Depends: python3, curl, flatpak, apt, dpkg, sudo, pkexec
+Recommends: aria2
+Description: Graphical application store for Thallium OS
+ Thallium Store searches system packages, Flathub, and curated GitHub
+ applications, then delegates package changes to a JSON-capable UNI backend.
+EOF
+
+cat > "$pkg_dir/DEBIAN/postinst" <<'EOF'
+#!/usr/bin/env sh
+set -e
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+fi
+
+exit 0
+EOF
+chmod 0755 "$pkg_dir/DEBIAN/postinst"
+
+mkdir -p "$out_dir"
+dpkg-deb --root-owner-group --build "$pkg_dir" "$out_dir/${pkg}_${version}_${arch}.deb"
+
+echo "$out_dir/${pkg}_${version}_${arch}.deb"

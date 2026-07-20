@@ -1,0 +1,24 @@
+[
+  {
+    "id": "zen-browser-appimage",
+    "name": "Zen Browser",
+    "summary": "Privacy-focused browser distributed as an AppImage",
+    "repository": "zen-browser/desktop",
+    "asset_pattern": "*x86_64.AppImage",
+    "verified": true,
+    "homepage": "https://zen-browser.app",
+    "license": "MPL-2.0",
+    "tags": ["browser", "web", "appimage"]
+  },
+  {
+    "id": "appimagelauncher",
+    "name": "AppImageLauncher",
+    "summary": "Integrate AppImages with the desktop",
+    "repository": "TheAssassin/AppImageLauncher",
+    "asset_pattern": "*x86_64.AppImage",
+    "verified": true,
+    "homepage": "https://github.com/TheAssassin/AppImageLauncher",
+    "license": "MIT",
+    "tags": ["appimage", "utility", "desktop"]
+  }
+]

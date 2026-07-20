@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Thallium Store
+Comment=Install applications on Thallium OS
+Exec=thallium-store
+Icon=io.thallium.Store
+Terminal=false
+Categories=System;PackageManager;
+StartupNotify=true

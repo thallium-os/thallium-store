@@ -1,0 +1,16 @@
+[
+  {
+    "id": "dev.zed.Zed",
+    "name": "Zed",
+    "repository": "zed-industries/zed",
+    "verified": true,
+    "assets": {
+      "amd64": "*x86_64.deb",
+      "arm64": "*aarch64.deb"
+    },
+    "desktop_file": "dev.zed.Zed.desktop",
+    "homepage": "https://zed.dev",
+    "license": "GPL-3.0-or-later"
+  }
+]
+

@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release
+
+override_dh_auto_install:
+	install -Dm755 target/release/thallium-store-backend debian/thallium-store/usr/bin/thallium-store-backend
+	install -Dm755 scripts/thallium-store debian/thallium-store/usr/bin/thallium-store
+	install -Dm644 data/io.thallium.Store.desktop debian/thallium-store/usr/share/applications/io.thallium.Store.desktop
+	install -Dm644 data/io.thallium.Store.metainfo.xml debian/thallium-store/usr/share/metainfo/io.thallium.Store.metainfo.xml
+	install -Dm644 ui/shell.qml debian/thallium-store/usr/share/thallium-store/ui/shell.qml
+	install -Dm644 data/github-apps.json debian/thallium-store/usr/share/thallium-store/data/github-apps.json
+	install -Dm644 data/appimages.json debian/thallium-store/usr/share/thallium-store/data/appimages.json
+	install -Dm644 data/canonical-aliases.json debian/thallium-store/usr/share/thallium-store/data/canonical-aliases.json

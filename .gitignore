@@ -1,0 +1,8 @@
+/target/
+/.cache/
+/.runtime/
+/dist/
+*.db
+*.db-shm
+*.db-wal
+.claude/settings.local.json

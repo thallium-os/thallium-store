@@ -1,0 +1,23 @@
+#!/usr/bin/env sh
+set -eu
+
+cmd="${1:-help}"
+
+case "$cmd" in
+  version)
+    echo "fake-uni 0.1.0"
+    ;;
+  install|remove|update)
+    pkg="${2:-unknown}"
+    echo "{\"event\":\"resolving\",\"package\":\"$pkg\",\"progress\":5,\"message\":\"Resolving\"}"
+    echo "{\"event\":\"download_progress\",\"package\":\"$pkg\",\"progress\":35,\"message\":\"Downloading\"}"
+    echo "{\"event\":\"installing\",\"package\":\"$pkg\",\"progress\":70,\"message\":\"Installing\"}"
+    echo "{\"event\":\"finalizing\",\"package\":\"$pkg\",\"progress\":90,\"message\":\"Finalizing\"}"
+    echo "{\"event\":\"succeeded\",\"package\":\"$pkg\",\"progress\":100,\"message\":\"Completed\"}"
+    ;;
+  *)
+    echo "fake-uni supports version/install/remove/update" >&2
+    exit 2
+    ;;
+esac
+

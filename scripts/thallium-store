@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -f "$HOME/.cargo/env" ]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+
+data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
+ui_path="$data_home/thallium-store/ui/shell.qml"
+uni_path="$data_home/thallium-store/uni/uni"
+
+if [ ! -f "$ui_path" ]; then
+  if [ -f "/usr/share/thallium-store/ui/shell.qml" ]; then
+    ui_path="/usr/share/thallium-store/ui/shell.qml"
+  else
+    ui_path="$repo_dir/ui/shell.qml"
+  fi
+fi
+
+if [ ! -x "$uni_path" ]; then
+  if [ -x "/usr/lib/thallium-store/uni/uni" ]; then
+    uni_path="/usr/lib/thallium-store/uni/uni"
+  elif [ -x "$repo_dir/vendor/uni/uni" ]; then
+    uni_path="$repo_dir/vendor/uni/uni"
+  fi
+fi
+
+export PATH="$HOME/.local/bin:$repo_dir/target/debug:$PATH"
+export LANG="${LANG:-C.UTF-8}"
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+export UNI_PRIVILEGE_BACKEND="${UNI_PRIVILEGE_BACKEND:-pkexec}"
+if [ -x "$uni_path" ]; then
+  export THALLIUM_STORE_UNI="${THALLIUM_STORE_UNI:-$uni_path}"
+fi
+export THALLIUM_STORE_FAKE_UNI="${THALLIUM_STORE_FAKE_UNI:-0}"
+
+exec quickshell --path "$ui_path"

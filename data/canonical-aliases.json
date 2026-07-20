@@ -1,0 +1,15 @@
+[
+  {
+    "canonical_id": "org.gimp.GIMP",
+    "aliases": ["gimp", "GNU Image Manipulation Program", "org.gimp.GIMP"]
+  },
+  {
+    "canonical_id": "com.obsproject.Studio",
+    "aliases": ["obs", "obs-studio", "OBS Studio"]
+  },
+  {
+    "canonical_id": "dev.zed.Zed",
+    "aliases": ["zed", "zed-editor", "zed-industries/zed"]
+  }
+]
+

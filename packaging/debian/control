@@ -1,0 +1,14 @@
+Source: thallium-store
+Section: admin
+Priority: optional
+Maintainer: Thallium OS <maintainers@thallium.local>
+Build-Depends: debhelper-compat (= 13), cargo, rustc
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+
+Package: thallium-store
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, quickshell, uni, flatpak, pkexec
+Description: Graphical application store for Thallium OS
+ Thallium Store searches system packages, Flathub, and curated GitHub
+ applications, then delegates installs and removals to UNI.

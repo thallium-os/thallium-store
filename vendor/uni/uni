@@ -1,0 +1,2324 @@
+#!/usr/bin/env bash
+# ============================================================
+#  uni — Universal Package Manager Wrapper v0.5.0
+#  Commands: uni install | uni remove | uni purge | uni list
+#            uni update  | uni self-update | uni intercept
+#            uni uninstall | uni help | uni version
+#
+#  📚 Tutorial moved to walkthrough-installer.sh (run after installation)
+#  ⚠️  Code improved with AI assistance
+# ============================================================
+
+set -u
+
+UNI_VERSION="0.5.0"
+UNI_REPO="dronzer-tb/UNI"   # ← set this to your GitHub repo
+UNI_RAW_URL="https://raw.githubusercontent.com/dronzer-tb/UNI/refs/heads/master/uni"
+
+if [[ -n "${SUDO_USER:-}" ]]; then
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+else
+    REAL_HOME="$HOME"
+fi
+
+UNI_REGISTRY="$REAL_HOME/.local/share/uni/installed.json"
+UNI_APPIMAGE_DIR="$REAL_HOME/.local/share/uni/appimages"
+UNI_DESKTOP_DIR="$REAL_HOME/.local/share/applications"
+UNI_ICON_DIR="$REAL_HOME/.local/share/uni/icons"
+UNI_CACHE_DIR="$REAL_HOME/.cache/uni"
+UNI_CACHE_TTL=3600          # 1 hour for search cache
+UNI_UPDATE_CHECK_TTL=86400  # 24 hours for update-notifier check
+UNI_JSON_SCHEMA_VERSION=1
+
+# ── Colors ───────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+# ── UI Helpers ───────────────────────────────────────────────
+info()    { echo -e "${CYAN}${BOLD} → ${RESET} $*"; }
+success() { echo -e "${GREEN}${BOLD} ✓ ${RESET} $*"; }
+warn()    { echo -e "${YELLOW}${BOLD} ! ${RESET} $*"; }
+error()   { echo -e "${RED}${BOLD} ✗ ${RESET} $*" >&2; }
+die()     { error "$*"; exit 1; }
+step()    { echo -e "${MAGENTA}${BOLD} ⠿ ${RESET}${DIM}$*${RESET}"; }
+divider() { echo -e "${DIM}────────────────────────────────────────${RESET}"; }
+header()  { echo ""; echo -e "${BOLD}${BLUE}$*${RESET}"; divider; }
+
+# ── Spinner ──────────────────────────────────────────────────
+_SPIN_PID=""
+spin_start() {
+    local msg="$1"
+    {
+        local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+        local i=0
+        while true; do
+            printf "\r${CYAN}${BOLD} %s ${RESET}${DIM}%s${RESET}   " "${frames[$((i % ${#frames[@]}))]}" "$msg"
+            sleep 0.08
+            ((i++))
+        done
+    } &
+    _SPIN_PID=$!
+}
+
+spin_stop() {
+    if [[ -n "$_SPIN_PID" ]]; then
+        kill "$_SPIN_PID" 2>/dev/null || true
+        _SPIN_PID=""
+        printf "\r\033[2K"
+    fi
+}
+
+trap 'spin_stop' EXIT INT TERM
+
+in_array() {
+    local needle="$1"; shift
+    local e
+    for e in "$@"; do [[ "$e" == "$needle" ]] && return 0; done
+    return 1
+}
+
+# ── Dependency Checks ────────────────────────────────────────
+command -v python3 &>/dev/null || die "python3 is required but not installed."
+command -v curl    &>/dev/null || die "curl is required but not installed."
+
+if [[ -n "${SUDO_USER:-}" ]]; then
+    warn "Running uni with sudo is not recommended."
+    warn "User-level backends (Flatpak) may not be found under root's environment."
+fi
+
+# ── aria2c / parallel download helper ────────────────────────
+has_aria2c() { command -v aria2c &>/dev/null; }
+
+download_file() {
+    local url="$1" dest="$2"
+    if has_aria2c; then
+        aria2c -x 8 -s 8 --allow-overwrite=true \
+               -d "$(dirname "$dest")" \
+               -o "$(basename "$dest")" \
+               --console-log-level=warn \
+               --summary-interval=0 \
+               "$url" || return 1
+    else
+        curl -Lf# "$url" -o "$dest" || return 1
+    fi
+}
+
+# ── Init registry ────────────────────────────────────────────
+init_registry() {
+    mkdir -p "$(dirname "$UNI_REGISTRY")" "$UNI_APPIMAGE_DIR" "$UNI_DESKTOP_DIR" \
+             "$UNI_ICON_DIR" "$UNI_CACHE_DIR"
+    [[ -f "$UNI_REGISTRY" ]] || echo '{}' > "$UNI_REGISTRY"
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        chown -R "$SUDO_USER:$SUDO_USER" "$(dirname "$UNI_REGISTRY")" 2>/dev/null || true
+    fi
+}
+
+# ── Registry helpers ─────────────────────────────────────────
+registry_add() {
+    local name="$1" backend="$2" id="$3"
+    if command -v flock &>/dev/null; then
+        (
+            flock -x 200
+            python3 - "$name" "$backend" "$id" "$UNI_REGISTRY" << 'PYEOF'
+import json, sys
+import os
+import tempfile
+name, backend, id_val, reg_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    with open(reg_path) as f: d = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    d = {}
+d[name] = {'backend': backend, 'id': id_val}
+dirpath = os.path.dirname(reg_path) or '.'
+fd, tmp = tempfile.mkstemp(dir=dirpath)
+with os.fdopen(fd, 'w') as f:
+    json.dump(d, f, indent=2)
+os.replace(tmp, reg_path)
+PYEOF
+        ) 200>"${UNI_REGISTRY}.lock"
+    else
+        python3 - "$name" "$backend" "$id" "$UNI_REGISTRY" << 'PYEOF'
+import json, sys
+import os
+import tempfile
+name, backend, id_val, reg_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    with open(reg_path) as f: d = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    d = {}
+d[name] = {'backend': backend, 'id': id_val}
+dirpath = os.path.dirname(reg_path) or '.'
+fd, tmp = tempfile.mkstemp(dir=dirpath)
+with os.fdopen(fd, 'w') as f:
+    json.dump(d, f, indent=2)
+os.replace(tmp, reg_path)
+PYEOF
+    fi
+}
+
+registry_remove() {
+    local name="$1"
+    if command -v flock &>/dev/null; then
+        (
+            flock -x 200
+            python3 - "$name" "$UNI_REGISTRY" << 'PYEOF'
+import json, sys
+import os
+import tempfile
+name, reg_path = sys.argv[1], sys.argv[2]
+try:
+    with open(reg_path) as f: d = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    d = {}
+d.pop(name, None)
+dirpath = os.path.dirname(reg_path) or '.'
+fd, tmp = tempfile.mkstemp(dir=dirpath)
+with os.fdopen(fd, 'w') as f:
+    json.dump(d, f, indent=2)
+os.replace(tmp, reg_path)
+PYEOF
+        ) 200>"${UNI_REGISTRY}.lock"
+    else
+        python3 - "$name" "$UNI_REGISTRY" << 'PYEOF'
+import json, sys
+import os
+import tempfile
+name, reg_path = sys.argv[1], sys.argv[2]
+try:
+    with open(reg_path) as f: d = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    d = {}
+d.pop(name, None)
+dirpath = os.path.dirname(reg_path) or '.'
+fd, tmp = tempfile.mkstemp(dir=dirpath)
+with os.fdopen(fd, 'w') as f:
+    json.dump(d, f, indent=2)
+os.replace(tmp, reg_path)
+PYEOF
+    fi
+}
+
+registry_get() {
+    local name="$1" field="$2"
+    python3 - "$name" "$field" "$UNI_REGISTRY" << 'PYEOF'
+import json, sys
+name, field, reg_path = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(reg_path) as f: d = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    d = {}
+print(d.get(name, {}).get(field, ''))
+PYEOF
+}
+
+registry_list() {
+    python3 - "$UNI_REGISTRY" << 'PYEOF'
+import json, sys
+reg_path = sys.argv[1]
+try:
+    with open(reg_path) as f: d = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    d = {}
+if not d:
+    print('  No packages installed via uni.')
+else:
+    for name, info in sorted(d.items()):
+        print(f"  {name:<32} [{info['backend']:<10}]  {info['id']}")
+PYEOF
+}
+
+# ── JSON helpers ─────────────────────────────────────────────
+json_event() {
+    local event="$1" state="$2" progress="$3" message="$4" package="${5:-}" source="${6:-}" exit_code="${7:-}"
+    python3 - "$event" "$state" "$progress" "$message" "$package" "$source" "$exit_code" << 'PYEOF'
+import json, re, sys, time
+event, state, progress, message, package, source, exit_code = sys.argv[1:8]
+ansi = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+message = ansi.sub("", message)
+obj = {
+    "schemaVersion": 1,
+    "event": event,
+    "state": state,
+    "progress": int(progress),
+    "message": message,
+    "timestamp": int(time.time()),
+}
+if package:
+    obj["package"] = package
+if source:
+    obj["source"] = source
+if exit_code:
+    obj["exitCode"] = int(exit_code)
+print(json.dumps(obj, separators=(",", ":")), flush=True)
+PYEOF
+}
+
+cmd_installed_json() {
+    init_registry
+    python3 - "$UNI_REGISTRY" << 'PYEOF'
+import json, os, subprocess, sys
+reg_path = sys.argv[1]
+items = []
+
+try:
+    with open(reg_path) as f:
+        registry = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    registry = {}
+
+for name, info in sorted(registry.items()):
+    items.append({
+        "name": name,
+        "id": info.get("id", ""),
+        "source": info.get("backend", ""),
+        "managedByUni": True,
+        "installed": True,
+    })
+
+try:
+    fp = subprocess.run(
+        ["flatpak", "list", "--app", "--columns=application,name,version,origin"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False
+    )
+    if fp.returncode == 0:
+        for line in fp.stdout.splitlines():
+            cols = line.split("\t")
+            if not cols or not cols[0].strip():
+                continue
+            app_id = cols[0].strip()
+            if any(i["id"] == app_id or i["name"].lower() == app_id.lower() for i in items):
+                continue
+            items.append({
+                "name": (cols[1].strip() if len(cols) > 1 and cols[1].strip() else app_id),
+                "id": app_id,
+                "source": "flatpak",
+                "version": (cols[2].strip() if len(cols) > 2 and cols[2].strip() else None),
+                "origin": (cols[3].strip() if len(cols) > 3 and cols[3].strip() else None),
+                "managedByUni": False,
+                "installed": True,
+            })
+except FileNotFoundError:
+    pass
+
+print(json.dumps({
+    "schemaVersion": 1,
+    "items": sorted(items, key=lambda item: item["name"].lower()),
+}, separators=(",", ":")))
+PYEOF
+}
+
+cmd_search_json() {
+    local query="" sources="apt,flatpak,github"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) shift ;;
+            --source|-s)
+                shift
+                sources="${1:-}"
+                shift || true
+                ;;
+            --source=*)
+                sources="${1#*=}"
+                shift
+                ;;
+            *)
+                if [[ -z "$query" ]]; then
+                    query="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+    [[ -z "$query" ]] && die "Usage: uni search <query> --json [--source apt|flatpak|github|snap]"
+
+    python3 - "$query" "$sources" << 'PYEOF'
+import json, subprocess, sys, urllib.parse, urllib.request
+
+query = sys.argv[1]
+sources = {s.strip().lower() for s in sys.argv[2].replace(";", ",").split(",") if s.strip()}
+if "system" in sources:
+    sources.add("apt")
+if "flathub" in sources:
+    sources.add("flatpak")
+if not sources:
+    sources = {"apt", "flatpak", "github"}
+
+results = []
+providers = []
+
+def add_provider(source, state, message=None):
+    providers.append({"source": source, "state": state, "message": message})
+
+def run(cmd):
+    try:
+        return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=8)
+    except FileNotFoundError:
+        return None
+    except subprocess.TimeoutExpired as exc:
+        return exc
+
+if "apt" in sources:
+    policy = run(["apt-cache", "policy", query])
+    if policy is None:
+        add_provider("apt", "missing", "apt-cache not found")
+    elif isinstance(policy, subprocess.TimeoutExpired):
+        add_provider("apt", "failed", "apt-cache timed out")
+    else:
+        candidate = ""
+        for line in policy.stdout.splitlines():
+            if "Candidate:" in line:
+                candidate = line.split("Candidate:", 1)[1].strip()
+                break
+        if candidate and candidate != "(none)":
+            show = run(["apt-cache", "show", query])
+            summary = "System package"
+            if show and not isinstance(show, subprocess.TimeoutExpired):
+                for line in show.stdout.splitlines():
+                    if line.startswith("Description:"):
+                        summary = line.split(":", 1)[1].strip()
+                        break
+            results.append({
+                "id": query,
+                "name": query,
+                "summary": summary,
+                "source": "apt",
+                "packageId": query,
+                "version": candidate,
+                "verified": True,
+                "trust": "system_access",
+                "command": ["uni", "install", query, "--source", "apt"],
+            })
+        add_provider("apt", "ready")
+
+if "flatpak" in sources:
+    fp = run(["flatpak", "search", "--columns=application,name,description", query])
+    if fp is None:
+        add_provider("flatpak", "missing", "flatpak not found")
+    elif isinstance(fp, subprocess.TimeoutExpired):
+        add_provider("flatpak", "failed", "flatpak search timed out")
+    else:
+        if fp.returncode == 0:
+            for line in fp.stdout.splitlines():
+                cols = line.split("\t")
+                if len(cols) < 1 or not cols[0].strip():
+                    continue
+                app_id = cols[0].strip()
+                if app_id.lower() == "no matches found":
+                    continue
+                name = cols[1].strip() if len(cols) > 1 and cols[1].strip() else app_id
+                summary = cols[2].strip() if len(cols) > 2 and cols[2].strip() else "Flatpak application"
+                results.append({
+                    "id": app_id,
+                    "name": name,
+                    "summary": summary,
+                    "source": "flatpak",
+                    "packageId": app_id,
+                    "verified": True,
+                    "trust": "sandboxed",
+                    "command": ["uni", "install", app_id, "--source", "flatpak"],
+                })
+            add_provider("flatpak", "ready")
+        else:
+            add_provider("flatpak", "failed", fp.stderr.strip() or "flatpak search failed")
+
+if "snap" in sources:
+    snap = run(["snap", "find", query])
+    if snap is None:
+        add_provider("snap", "missing", "snap not found")
+    elif isinstance(snap, subprocess.TimeoutExpired):
+        add_provider("snap", "failed", "snap find timed out")
+    else:
+        if snap.returncode == 0:
+            for line in snap.stdout.splitlines()[1:6]:
+                cols = line.split()
+                if cols:
+                    results.append({
+                        "id": cols[0],
+                        "name": cols[0],
+                        "summary": "Snap package",
+                        "source": "snap",
+                        "packageId": cols[0],
+                        "verified": False,
+                        "trust": "system_access",
+                        "command": ["uni", "install", cols[0], "--source", "snap"],
+                    })
+            add_provider("snap", "ready")
+        else:
+            add_provider("snap", "failed", snap.stderr.strip() or "snap find failed")
+
+if "github" in sources:
+    try:
+        url = "https://api.github.com/search/repositories?q=" + urllib.parse.quote(query + " in:name") + "&sort=stars&per_page=5"
+        req = urllib.request.Request(url, headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "uni-json/1",
+        })
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        for item in data.get("items", [])[:5]:
+            repo = item.get("full_name", "")
+            if not repo:
+                continue
+            results.append({
+                "id": repo,
+                "name": item.get("name") or repo,
+                "summary": item.get("description") or "GitHub release",
+                "source": "github",
+                "packageId": repo,
+                "verified": False,
+                "trust": "unverified",
+                "stars": item.get("stargazers_count", 0),
+                "homepage": item.get("homepage") or item.get("html_url"),
+                "command": ["uni", "install", repo, "--source", "github"],
+            })
+        add_provider("github", "ready")
+    except Exception as exc:
+        add_provider("github", "failed", str(exc))
+
+print(json.dumps({
+    "schemaVersion": 1,
+    "query": query,
+    "results": results,
+    "providers": providers,
+}, separators=(",", ":")))
+PYEOF
+}
+
+cmd_info_json() {
+    local pkg="" source=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) shift ;;
+            --source|-s)
+                shift
+                source="${1:-}"
+                shift || true
+                ;;
+            --source=*)
+                source="${1#*=}"
+                shift
+                ;;
+            *)
+                if [[ -z "$pkg" ]]; then
+                    pkg="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+    [[ -z "$pkg" ]] && die "Usage: uni info <id> --source <source> --json"
+    [[ -z "$source" ]] && source="auto"
+
+    python3 - "$pkg" "$source" << 'PYEOF'
+import json, subprocess, sys, urllib.request
+
+pkg, source = sys.argv[1], sys.argv[2].lower()
+obj = {
+    "schemaVersion": 1,
+    "id": pkg,
+    "packageId": pkg,
+    "source": source,
+    "name": pkg,
+    "installed": False,
+    "metadata": {},
+}
+
+def run(cmd):
+    try:
+        return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=8)
+    except Exception:
+        return None
+
+if source in ("apt", "system", "auto"):
+    dpkg = run(["dpkg-query", "-W", "-f=${Package}\t${Version}\t${binary:Summary}\n", pkg])
+    if dpkg and dpkg.returncode == 0 and dpkg.stdout.strip():
+        cols = dpkg.stdout.split("\t")
+        obj.update({"source": "apt", "installed": True, "version": cols[1].strip() if len(cols) > 1 else None})
+        obj["summary"] = cols[2].strip() if len(cols) > 2 else "System package"
+    show = run(["apt-cache", "show", pkg])
+    if show and show.returncode == 0:
+        for line in show.stdout.splitlines():
+            if line.startswith("Description:") and "summary" not in obj:
+                obj["summary"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Homepage:"):
+                obj["homepage"] = line.split(":", 1)[1].strip()
+            elif line.startswith("License:"):
+                obj["license"] = line.split(":", 1)[1].strip()
+
+if source in ("flatpak", "flathub", "auto"):
+    fp = run(["flatpak", "info", pkg])
+    if fp and fp.returncode == 0:
+        obj.update({"source": "flatpak", "installed": True, "trust": "sandboxed"})
+        for line in fp.stdout.splitlines():
+            if ":" not in line:
+                continue
+            key, value = [part.strip() for part in line.split(":", 1)]
+            obj["metadata"][key] = value
+            if key.lower() == "version":
+                obj["version"] = value
+    if source in ("flatpak", "flathub") and "summary" not in obj:
+        search = run(["flatpak", "search", "--columns=application,name,description", pkg])
+        if search and search.returncode == 0:
+            for line in search.stdout.splitlines():
+                cols = line.split("\t")
+                if cols and cols[0].strip() == pkg:
+                    obj["name"] = cols[1].strip() if len(cols) > 1 and cols[1].strip() else pkg
+                    obj["summary"] = cols[2].strip() if len(cols) > 2 and cols[2].strip() else "Flatpak application"
+                    obj["source"] = "flatpak"
+                    obj["trust"] = "sandboxed"
+                    break
+
+if source in ("github", "gh"):
+    obj.update({"source": "github", "trust": "unverified"})
+    try:
+        req = urllib.request.Request(f"https://api.github.com/repos/{pkg}/releases/latest", headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "uni-json/1",
+        })
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        obj["version"] = data.get("tag_name")
+        obj["summary"] = data.get("name") or "Latest GitHub release"
+        obj["assets"] = [
+            {
+                "name": a.get("name"),
+                "size": a.get("size"),
+                "downloadUrl": a.get("browser_download_url"),
+            }
+            for a in data.get("assets", [])
+        ]
+    except Exception as exc:
+        obj["error"] = str(exc)
+
+print(json.dumps(obj, separators=(",", ":")))
+PYEOF
+}
+
+cmd_updates_json() {
+    python3 - << 'PYEOF'
+import json
+print(json.dumps({
+    "schemaVersion": 1,
+    "items": [],
+    "providers": [
+        {"source": "apt", "state": "not_implemented", "message": "Structured update discovery is not implemented yet"},
+        {"source": "flatpak", "state": "not_implemented", "message": "Structured update discovery is not implemented yet"},
+        {"source": "github", "state": "not_implemented", "message": "Structured update discovery is not implemented yet"},
+    ],
+}, separators=(",", ":")))
+PYEOF
+}
+
+cmd_json_events_wrapper() {
+    local action="$1"
+    shift
+
+    local args=()
+    local pkg="" source=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json-events)
+                shift
+                ;;
+            --source|-s)
+                args+=("$1")
+                shift
+                source="${1:-}"
+                args+=("${1:-}")
+                shift || true
+                ;;
+            --source=*)
+                source="${1#*=}"
+                args+=("$1")
+                shift
+                ;;
+            *)
+                [[ -z "$pkg" ]] && pkg="$1"
+                args+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    json_event "queued" "queued" 0 "Queued ${action}" "$pkg" "$source"
+    json_event "started" "running" 5 "Starting ${action}" "$pkg" "$source"
+
+    local tmp rc
+    tmp=$(mktemp)
+    if "$0" "$action" "${args[@]}" >"$tmp" 2>&1; then
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && json_event "log" "running" 50 "$line" "$pkg" "$source"
+        done < "$tmp"
+        rm -f "$tmp"
+        json_event "succeeded" "succeeded" 100 "${action} completed" "$pkg" "$source" 0
+        return 0
+    else
+        rc=$?
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && json_event "log" "failed" 90 "$line" "$pkg" "$source"
+        done < "$tmp"
+        rm -f "$tmp"
+        json_event "failed" "failed" 100 "${action} failed" "$pkg" "$source" "$rc"
+        return "$rc"
+    fi
+}
+
+# ── Backend detection ────────────────────────────────────────
+has_nala()    { command -v nala    &>/dev/null; }
+has_apt()     { command -v apt     &>/dev/null; }
+has_flatpak() { command -v flatpak &>/dev/null; }
+has_snap()    { command -v snap    &>/dev/null; }
+has_dpkg()    { command -v dpkg    &>/dev/null; }
+
+apt_cmd() { has_nala && echo "nala" || echo "apt"; }
+apt_fix_cmd() { command -v apt-get &>/dev/null && echo "apt-get" || echo "apt"; }
+
+privilege_runner() {
+    case "${UNI_PRIVILEGE_BACKEND:-auto}" in
+        pkexec)
+            command -v pkexec &>/dev/null || die "UNI_PRIVILEGE_BACKEND=pkexec but pkexec is not installed."
+            echo "pkexec"
+            return
+            ;;
+        sudo)
+            command -v sudo &>/dev/null || die "UNI_PRIVILEGE_BACKEND=sudo but sudo is not installed."
+            echo "sudo"
+            return
+            ;;
+        auto|"")
+            if [[ ! -t 0 && -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]] && command -v pkexec &>/dev/null; then
+                echo "pkexec"
+                return
+            fi
+            command -v sudo &>/dev/null || die "sudo is required for privileged package operations."
+            echo "sudo"
+            return
+            ;;
+        *)
+            die "Unsupported UNI_PRIVILEGE_BACKEND='${UNI_PRIVILEGE_BACKEND}'. Use auto, pkexec, or sudo."
+            ;;
+    esac
+}
+
+run_privileged() {
+    local runner cmd
+    runner=$(privilege_runner)
+    cmd="$1"
+    shift
+
+    if [[ "$runner" == "pkexec" ]]; then
+        if [[ "$cmd" != /* ]]; then
+            cmd=$(command -v "$cmd" 2>/dev/null || true)
+            [[ -n "$cmd" ]] || die "Privileged command not found."
+        fi
+        pkexec "$cmd" "$@"
+    else
+        sudo "$cmd" "$@"
+    fi
+}
+
+# ── System arch ──────────────────────────────────────────────
+sys_arch() {
+    case "$(uname -m)" in
+        x86_64)  echo "amd64" ;;
+        aarch64) echo "arm64" ;;
+        armv7l)  echo "armhf" ;;
+        *)       uname -m ;;
+    esac
+}
+
+arch_patterns() {
+    case "$(uname -m)" in
+        x86_64)  echo "x86_64 amd64 x64" ;;
+        aarch64) echo "aarch64 arm64" ;;
+        armv7l)  echo "armv7l armhf arm" ;;
+        *)       uname -m ;;
+    esac
+}
+
+# ── Version comparison ───────────────────────────────────────
+# Returns 0 if $1 > $2 (semver)
+version_gt() {
+    python3 -c "
+import sys
+a = tuple(int(x) for x in sys.argv[1].lstrip('v').split('.'))
+b = tuple(int(x) for x in sys.argv[2].lstrip('v').split('.'))
+sys.exit(0 if a > b else 1)
+" "$1" "$2" 2>/dev/null
+}
+
+fetch_uni_latest_version() {
+    local timeout="${1:-10}"
+    local release_json latest_ver raw_script
+
+    release_json=$(curl -sS --max-time "$timeout" \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "https://api.github.com/repos/${UNI_REPO}/releases/latest" 2>/dev/null || true)
+
+    latest_ver=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); tag=d.get('tag_name',''); print(tag.lstrip('v') if tag else '')" \
+        "$release_json" 2>/dev/null || echo "")
+    if [[ -n "$latest_ver" ]]; then
+        echo "$latest_ver"
+        return 0
+    fi
+
+    raw_script=$(curl -sS --max-time "$timeout" "$UNI_RAW_URL" 2>/dev/null) || return 1
+    latest_ver=$(printf '%s\n' "$raw_script" | sed -n 's/^UNI_VERSION="\([^"]*\)".*/\1/p' | head -n1)
+    [[ -n "$latest_ver" ]] || return 2
+
+    echo "$latest_ver"
+}
+
+# ── Update notifier ──────────────────────────────────────────
+# Runs a background check once per day. If a newer version is found,
+# prints a banner at the end of the current command.
+_UPDATE_BANNER=""
+
+check_for_update() {
+    mkdir -p "$UNI_CACHE_DIR"
+    local cache_file="$UNI_CACHE_DIR/latest_version.txt"
+    local now
+    now=$(date +%s)
+
+    # Refresh cache if stale
+    local cached_age=99999
+    if [[ -f "$cache_file" ]]; then
+        cached_age=$(( now - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0) ))
+    fi
+
+    if (( cached_age >= UNI_UPDATE_CHECK_TTL )); then
+        # Background fetch — doesn't block the user
+        {
+            local latest
+            latest=$(fetch_uni_latest_version 6 2>/dev/null || true)
+            [[ -n "$latest" ]] && echo "$latest" > "$cache_file"
+        } &
+        disown $! 2>/dev/null || true
+        return
+    fi
+
+    # Read cached version and compare
+    local latest_ver
+    latest_ver=$(cat "$cache_file" 2>/dev/null | tr -d '[:space:]')
+    [[ -z "$latest_ver" ]] && return
+
+    if version_gt "$latest_ver" "$UNI_VERSION"; then
+        _UPDATE_BANNER="${YELLOW}${BOLD}  ╔══════════════════════════════════════════╗
+  ║  uni ${latest_ver} is available  (you have ${UNI_VERSION})  ║
+  ║  Run: uni self-update                    ║
+  ╚══════════════════════════════════════════╝${RESET}"
+    fi
+}
+
+print_update_banner() {
+    [[ -n "$_UPDATE_BANNER" ]] && echo -e "\n$_UPDATE_BANNER"
+    return 0
+}
+
+# ── GitHub integration ───────────────────────────────────────
+parse_github_repo() {
+    local input="$1"
+    if [[ "$input" =~ ^https?://github\.com/([^/]+/[^/]+) ]]; then
+        echo "${BASH_REMATCH[1]}" | sed 's|/releases.*||; s|\.git$||'
+    elif [[ "$input" =~ ^([a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+)$ ]]; then
+        echo "$input"
+    else
+        echo ""
+    fi
+}
+
+gh_release_json() {
+    local repo="$1"
+    curl -sf --max-time 10 \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null
+}
+
+# Score an asset name — higher = better match for this system
+score_asset() {
+    local name="${1,,}"
+    local score=0
+
+    for pat in $(arch_patterns); do
+        if [[ "$name" == *"${pat,,}"* ]]; then
+            score=$((score + 50)); break
+        fi
+    done
+
+    local other_arches="x86_64 amd64 x64 aarch64 arm64 armv7l armhf i386 i686"
+    for pat in $other_arches; do
+        local is_ours=0
+        for mine in $(arch_patterns); do
+            [[ "${pat,,}" == "${mine,,}" ]] && is_ours=1 && break
+        done
+        [[ $is_ours -eq 1 ]] && continue
+        [[ "$name" == *"${pat,,}"* ]] && score=$((score - 200))
+    done
+
+    [[ "$name" == *.deb      ]] && score=$((score + 40))
+    [[ "$name" == *.appimage ]] && score=$((score + 30))
+    [[ "$name" == *.tar.gz   ]] && score=$((score + 10))
+    [[ "$name" == *.tar.xz   ]] && score=$((score + 10))
+    [[ "$name" == *.zip      ]] && score=$((score + 5))
+    [[ "$name" == *linux*    ]] && score=$((score + 20))
+    [[ "$name" == *.rpm      ]] && score=$((score - 100))
+    [[ "$name" == *.sha256   ]] && score=$((score - 500))
+    [[ "$name" == *.sha512   ]] && score=$((score - 500))
+    [[ "$name" == *.asc      ]] && score=$((score - 500))
+    [[ "$name" == *source*   ]] && score=$((score - 100))
+    [[ "$name" == *debug*    ]] && score=$((score - 100))
+    [[ "$name" == *.exe      ]] && score=$((score - 300))
+    [[ "$name" == *.dmg      ]] && score=$((score - 300))
+    [[ "$name" == *windows*  ]] && score=$((score - 300))
+    [[ "$name" == *darwin*   ]] && score=$((score - 300))
+    [[ "$name" == *macos*    ]] && score=$((score - 300))
+
+    echo "$score"
+}
+
+pick_best_asset() {
+    local json="$1"
+    python3 - "$json" << 'PYEOF'
+import json, sys
+data = json.loads(sys.argv[1])
+assets = data.get('assets', [])
+if not assets:
+    sys.exit(1)
+for a in assets:
+    print(f"{a['browser_download_url']}\t{a['name']}")
+PYEOF
+}
+
+pick_matching_asset() {
+    local json="$1" pattern="$2"
+    python3 - "$json" "$pattern" << 'PYEOF'
+import fnmatch, json, sys
+data = json.loads(sys.argv[1])
+pattern = sys.argv[2]
+for asset in data.get("assets", []):
+    name = asset.get("name", "")
+    if fnmatch.fnmatch(name, pattern):
+        print(f"{asset.get('browser_download_url','')}\t{name}")
+PYEOF
+}
+
+install_appimage_from_github_spec() {
+    local spec="$1"
+    local repo_pattern="${spec#github:}"
+    local repo="${repo_pattern%%#*}"
+    local pattern="${repo_pattern#*#}"
+
+    [[ -z "$repo" || "$repo" == "$repo_pattern" || -z "$pattern" ]] \
+        && die "Invalid AppImage GitHub spec. Use: github:owner/repo#*x86_64.AppImage"
+
+    header "AppImage  →  ${repo}"
+    spin_start "Fetching latest release..."
+    local json
+    json=$(gh_release_json "$repo")
+    spin_stop
+    [[ -z "$json" ]] && die "Could not fetch release info for ${repo}."
+
+    local asset_lines
+    asset_lines=$(pick_matching_asset "$json" "$pattern") \
+        || die "No AppImage asset matched '${pattern}' in ${repo} latest release."
+    [[ -z "$asset_lines" ]] && die "No AppImage asset matched '${pattern}' in ${repo} latest release."
+
+    local best_url="" best_name="" best_score=-9999
+    while IFS=$'\t' read -r url name; do
+        [[ -z "$url" || -z "$name" ]] && continue
+        local s
+        s=$(score_asset "$name")
+        if (( s > best_score )); then
+            best_score=$s
+            best_url="$url"
+            best_name="$name"
+        fi
+    done <<< "$asset_lines"
+
+    [[ -z "$best_url" ]] && die "No usable AppImage asset matched '${pattern}'."
+    info "Selected ${BOLD}${best_name}${RESET}"
+    install_appimage "$best_url"
+}
+
+install_from_github() {
+    local repo="$1"
+
+    header "GitHub  →  ${repo}"
+    spin_start "Fetching latest release..."
+    local json
+    json=$(gh_release_json "$repo")
+    spin_stop
+
+    [[ -z "$json" ]] && die "Could not fetch release info for ${repo}. Check the repo name and your connection."
+
+    local tag
+    tag=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('tag_name','unknown'))" "$json" 2>/dev/null || echo "unknown")
+    info "Latest release: ${BOLD}${tag}${RESET}"
+
+    local asset_lines
+    asset_lines=$(pick_best_asset "$json") || die "No release assets found for ${repo}."
+
+    local best_url="" best_name="" best_score=-9999
+    local all_urls=() all_names=()
+    while IFS=$'\t' read -r url name; do
+        all_urls+=("$url")
+        all_names+=("$name")
+        local s
+        s=$(score_asset "$name")
+        if (( s > best_score )); then
+            best_score=$s
+            best_url="$url"
+            best_name="$name"
+        fi
+    done <<< "$asset_lines"
+
+    if (( best_score < 0 )) || [[ -z "$best_url" ]]; then
+        warn "Could not auto-detect asset for $(uname -m). Please select:"
+        echo ""
+        local i=1
+        for name in "${all_names[@]}"; do
+            echo -e "  ${BOLD}${i})${RESET} ${name}"
+            ((i++))
+        done
+        echo ""
+        local choice
+        read -rp "$(echo -e "${CYAN}${BOLD}Select asset [1-${#all_names[@]}]:${RESET} ")" choice
+        local idx=$(( choice - 1 ))
+        best_url="${all_urls[$idx]}"
+        best_name="${all_names[$idx]}"
+    else
+        echo ""
+        local i=1
+        for name in "${all_names[@]}"; do
+            if [[ "$name" == "$best_name" ]]; then
+                echo -e "  ${GREEN}${BOLD}${i})${RESET} ${GREEN}${name}${RESET}  ${DIM}← auto-selected${RESET}"
+            else
+                echo -e "  ${DIM}${i}) ${name}${RESET}"
+            fi
+            ((i++))
+        done
+        echo ""
+        local choice
+        read -rp "$(echo -e "${CYAN}${BOLD}Press Enter to confirm, or pick another [1-${#all_names[@]}]:${RESET} ")" choice
+        if [[ -n "$choice" && "$choice" =~ ^[0-9]+$ ]]; then
+            local idx=$(( choice - 1 ))
+            if (( idx >= 0 && idx < ${#all_names[@]} )); then
+                best_url="${all_urls[$idx]}"
+                best_name="${all_names[$idx]}"
+            fi
+        fi
+    fi
+
+    info "Downloading ${BOLD}${best_name}${RESET}..."
+    has_aria2c && info "${DIM}Using aria2c (parallel connections)${RESET}"
+    local lower="${best_name,,}"
+
+    if [[ "$lower" == *.deb ]]; then
+        local tmp_deb
+        tmp_deb=$(mktemp --suffix=.deb)
+        download_file "$best_url" "$tmp_deb" || { rm -f "$tmp_deb"; die "Download failed."; }
+        install_deb "$tmp_deb"
+        rm -f "$tmp_deb"
+    elif [[ "$lower" == *.appimage ]]; then
+        install_appimage "$best_url"
+    elif [[ "$lower" == *.tar.gz || "$lower" == *.tar.xz || "$lower" == *.zip ]]; then
+        install_archive "$best_url" "$best_name" "$repo"
+    else
+        die "Unsupported asset type: ${best_name}\nDownload manually: ${best_url}"
+    fi
+}
+
+# ── Install binary from archive ──────────────────────────────
+install_archive() {
+    local url="$1" filename="$2" repo="$3"
+    local pkg_name
+    pkg_name=$(basename "$repo")
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    download_file "$url" "$tmpdir/$filename" || { rm -rf "$tmpdir"; die "Download failed."; }
+
+    step "Extracting..."
+    if [[ "$filename" == *.zip ]]; then
+        command -v unzip &>/dev/null || { rm -rf "$tmpdir"; die "unzip required: sudo apt install unzip"; }
+        unzip -q "$tmpdir/$filename" -d "$tmpdir/extracted"
+    else
+        mkdir -p "$tmpdir/extracted"
+        tar -xf "$tmpdir/$filename" -C "$tmpdir/extracted"
+    fi
+
+    local bins=()
+    while IFS= read -r -d '' f; do
+        bins+=("$f")
+    done < <(find "$tmpdir/extracted" -maxdepth 3 -type f -executable \
+        -not -name "*.so" -not -name "*.sh" -print0 2>/dev/null)
+
+    [[ ${#bins[@]} -eq 0 ]] && { rm -rf "$tmpdir"; die "No executable found in archive."; }
+
+    local chosen_bin="${bins[0]}"
+    if [[ ${#bins[@]} -gt 1 ]]; then
+        echo ""
+        header "Multiple executables found"
+        local i=1
+        for b in "${bins[@]}"; do
+            echo -e "  ${BOLD}${i})${RESET} $(basename "$b")  ${DIM}${b}${RESET}"
+            ((i++))
+        done
+        echo ""
+        local choice
+        read -rp "$(echo -e "${CYAN}${BOLD}Which to install? [1-${#bins[@]}]:${RESET} ")" choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#bins[@]} )); then
+            chosen_bin="${bins[$((choice-1))]}"
+        fi
+    fi
+
+    local install_dir="$REAL_HOME/.local/bin"
+    mkdir -p "$install_dir" || die "Could not create ${install_dir}"
+    local bin_name
+    bin_name=$(basename "$chosen_bin")
+    cp "$chosen_bin" "$install_dir/$bin_name" \
+        || { rm -rf "$tmpdir"; die "Could not copy binary to ${install_dir}"; }
+    chmod +x "$install_dir/$bin_name" \
+        || { rm -rf "$tmpdir"; die "Could not set executable bit on ${install_dir}/${bin_name}"; }
+    rm -rf "$tmpdir"
+
+    registry_add "$pkg_name" "archive" "$install_dir/$bin_name"
+    success "Installed ${BOLD}${bin_name}${RESET} → ${install_dir}/${bin_name}"
+
+    if [[ ":$PATH:" != *":$install_dir:"* ]]; then
+        warn "~/.local/bin is not in PATH. Add to ~/.bashrc or ~/.zshrc:"
+        echo -e "  ${DIM}export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}"
+    fi
+}
+
+# ── Search functions ─────────────────────────────────────────
+search_apt() {
+    command -v apt-cache &>/dev/null || return 1
+    local candidate
+    candidate=$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/{print $2}')
+    [[ -n "$candidate" && "$candidate" != "(none)" ]] && echo "apt"
+}
+
+search_flatpak() {
+    has_flatpak && flatpak search --columns=application "$1" 2>/dev/null | grep -qi "$1" && echo "flatpak"
+}
+
+search_snap() {
+    has_snap && snap find "$1" 2>/dev/null | grep -qi "$1" && echo "snap"
+}
+
+search_github() {
+    local pkg="$1"
+    local cache_file="$UNI_CACHE_DIR/gh_search_${pkg}.txt"
+
+    if [[ -f "$cache_file" ]]; then
+        local age=$(( $(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0) ))
+        if (( age < UNI_CACHE_TTL )); then
+            local cached
+            cached=$(cat "$cache_file")
+            [[ -n "$cached" ]] && { echo "$cached"; return 0; } || return 1
+        fi
+    fi
+
+    local json
+    json=$(curl -sf --max-time 8 \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/search/repositories?q=${pkg}+in:name&sort=stars&per_page=5" 2>/dev/null) || return 1
+    [[ -z "$json" ]] && return 1
+
+    local result
+    result=$(python3 - "$json" "$pkg" << 'PYEOF'
+import json, sys
+data = json.loads(sys.argv[1])
+query = sys.argv[2].lower()
+items = data.get('items', [])
+if not items:
+    sys.exit(1)
+for item in items:
+    if item['name'].lower() == query:
+        print(item['full_name'])
+        sys.exit(0)
+print(items[0]['full_name'])
+PYEOF
+) || return 1
+
+    mkdir -p "$UNI_CACHE_DIR"
+    echo "$result" > "$cache_file"
+    echo "$result"
+}
+
+# ── Parallel search ──────────────────────────────────────────
+parallel_search() {
+    local pkg="$1"
+    local tmp
+    tmp=$(mktemp -d)
+
+    search_apt     "$pkg" > "$tmp/apt"     2>/dev/null &
+    local pid_apt=$!
+    search_flatpak "$pkg" > "$tmp/flatpak" 2>/dev/null &
+    local pid_flatpak=$!
+    search_snap    "$pkg" > "$tmp/snap"    2>/dev/null &
+    local pid_snap=$!
+    search_github  "$pkg" > "$tmp/gh"      2>/dev/null &
+    local pid_gh=$!
+
+    spin_start "Searching all sources in parallel..."
+    wait $pid_apt $pid_flatpak $pid_snap $pid_gh
+    spin_stop
+
+    apt_result=$(cat "$tmp/apt"     2>/dev/null || true)
+    flatpak_result=$(cat "$tmp/flatpak" 2>/dev/null || true)
+    snap_result=$(cat "$tmp/snap"   2>/dev/null || true)
+    gh_result=$(cat "$tmp/gh"       2>/dev/null || true)
+
+    rm -rf "$tmp"
+}
+
+# ── Single-source search (for --source flag) ─────────────────
+single_source_search() {
+    local pkg="$1" source="$2"
+    apt_result="" flatpak_result="" snap_result="" gh_result=""
+    case "$source" in
+        apt)
+            spin_start "Searching apt..."
+            apt_result=$(search_apt "$pkg" 2>/dev/null) || true
+            spin_stop
+            ;;
+        flatpak)
+            spin_start "Searching flatpak..."
+            flatpak_result=$(search_flatpak "$pkg" 2>/dev/null) || true
+            spin_stop
+            ;;
+        snap)
+            spin_start "Searching snap..."
+            snap_result=$(search_snap "$pkg" 2>/dev/null) || true
+            spin_stop
+            ;;
+        github|gh)
+            spin_start "Searching GitHub..."
+            gh_result=$(search_github "$pkg" 2>/dev/null) || true
+            spin_stop
+            ;;
+        appimage)
+            ;;
+        *)
+            die "Unknown source '${source}'. Valid: apt, flatpak, snap, github, appimage"
+            ;;
+    esac
+}
+
+# ── AppImage helpers ─────────────────────────────────────────
+install_appimage() {
+    local src="$1"
+    local name
+
+    if [[ "$src" =~ ^https?:// ]]; then
+        name=$(basename "$src" | sed 's/\.AppImage$//i; s/\.appimage$//i')
+        info "Downloading AppImage..."
+        has_aria2c && info "${DIM}Using aria2c (parallel connections)${RESET}"
+        download_file "$src" "$UNI_APPIMAGE_DIR/${name}.AppImage" \
+            || die "Failed to download AppImage"
+        src="$UNI_APPIMAGE_DIR/${name}.AppImage"
+    else
+        [[ -f "$src" ]] || die "File not found: $src"
+        name=$(basename "$src" | sed 's/\.AppImage$//i; s/\.appimage$//i')
+        cp "$src" "$UNI_APPIMAGE_DIR/${name}.AppImage"
+    fi
+
+    chmod +x "$UNI_APPIMAGE_DIR/${name}.AppImage"
+
+    local icon_path=""
+    step "Extracting icon..."
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    pushd "$tmpdir" &>/dev/null || die "mktemp failed"
+
+    if "$UNI_APPIMAGE_DIR/${name}.AppImage" --appimage-extract &>/dev/null; then
+        local extracted_icon
+        extracted_icon=$(find squashfs-root -name "*.png" -o -name "*.svg" 2>/dev/null \
+            | xargs ls -S 2>/dev/null | head -1)
+        if [[ -n "$extracted_icon" ]]; then
+            local icon_ext="${extracted_icon##*.}"
+            cp "$extracted_icon" "$UNI_ICON_DIR/${name}.${icon_ext}"
+            icon_path="$UNI_ICON_DIR/${name}.${icon_ext}"
+        fi
+    fi
+    popd &>/dev/null || true
+    rm -rf "$tmpdir"
+
+    [[ -z "$icon_path" ]] && icon_path="application-x-executable"
+
+    cat > "$UNI_DESKTOP_DIR/${name}.desktop" <<EOF
+[Desktop Entry]
+Name=${name}
+Exec=$UNI_APPIMAGE_DIR/${name}.AppImage
+Icon=${icon_path}
+Type=Application
+Categories=Utility;
+Comment=Installed via uni
+EOF
+
+    registry_add "$name" "appimage" "$UNI_APPIMAGE_DIR/${name}.AppImage"
+    success "AppImage installed: ${BOLD}${name}${RESET}"
+    success "Desktop entry: ${UNI_DESKTOP_DIR}/${name}.desktop"
+}
+
+remove_appimage() {
+    local name="$1"
+    local appimage_path
+    appimage_path=$(registry_get "$name" "id")
+
+    if [[ -f "$appimage_path" ]]; then
+        rm -f "$appimage_path" || die "Could not remove AppImage: ${appimage_path}"
+        success "Removed AppImage: ${appimage_path}"
+    else
+        warn "AppImage not found at recorded path: ${appimage_path}"
+    fi
+
+    if [[ -f "$UNI_DESKTOP_DIR/${name}.desktop" ]]; then
+        rm -f "$UNI_DESKTOP_DIR/${name}.desktop" \
+            && success "Removed desktop entry" \
+            || warn "Could not remove desktop entry"
+    fi
+
+    for ext in png svg; do
+        local icon="$UNI_ICON_DIR/${name}.${ext}"
+        [[ -f "$icon" ]] && rm -f "$icon"
+    done
+
+    registry_remove "$name"
+}
+
+# ── Install deb ──────────────────────────────────────────────
+install_deb() {
+    local file="$1"
+    [[ -f "$file" ]] || die "File not found: $file"
+
+    local deb_arch sys
+    deb_arch=$(dpkg-deb --field "$file" Architecture 2>/dev/null || true)
+    sys=$(sys_arch)
+    if [[ -n "$deb_arch" && "$deb_arch" != "all" && "$deb_arch" != "$sys" ]]; then
+        spin_stop
+        die "Architecture mismatch: package is ${BOLD}${deb_arch}${RESET} but system is ${BOLD}${sys}${RESET}.\nDownload the ${sys} build instead."
+    fi
+
+    local name
+    name=$(dpkg-deb --field "$file" Package 2>/dev/null || basename "$file" .deb)
+    info "Installing .deb: ${BOLD}${name}${RESET}"
+
+    if run_privileged dpkg -i "$file"; then
+        registry_add "$name" "dpkg" "$name"
+        success "Installed ${BOLD}${name}${RESET} via dpkg"
+    else
+        warn "dpkg errors — fixing dependencies..."
+        run_privileged "$(apt_fix_cmd)" -f install -y \
+            || die "Dependency fix failed for ${BOLD}${name}${RESET}. Run: sudo apt -f install"
+        if dpkg -s "$name" 2>/dev/null | grep -q "^Status: install ok installed"; then
+            registry_add "$name" "dpkg" "$name"
+            success "Installed ${BOLD}${name}${RESET} via dpkg (after fix)"
+        else
+            die "Installation of ${BOLD}${name}${RESET} failed even after dependency fix."
+        fi
+    fi
+}
+
+# ── Installed detection ──────────────────────────────────────
+is_installed_apt() {
+    dpkg -s "$1" &>/dev/null && dpkg -s "$1" 2>/dev/null | grep -q "^Status: install ok installed"
+}
+
+is_installed_flatpak() {
+    has_flatpak && flatpak list --columns=application,name 2>/dev/null | grep -qi "$1"
+}
+
+is_installed_snap() {
+    has_snap && snap list "$1" &>/dev/null
+}
+
+# ── Post-install / post-remove verification ──────────────────
+verify_apt_installed() {
+    local pkg="$1"
+    is_installed_apt "$pkg" \
+        || die "Installation of ${BOLD}${pkg}${RESET} failed — package not found after install."
+}
+
+verify_apt_removed() {
+    local pkg="$1"
+    is_installed_apt "$pkg" \
+        && die "Removal of ${BOLD}${pkg}${RESET} failed — package still installed after remove."
+    return 0
+}
+
+UNI_INSTALLED_IN=()
+detect_installed_backends() {
+    local pkg="$1"
+    UNI_INSTALLED_IN=()
+    { is_installed_apt     "$pkg" && UNI_INSTALLED_IN+=("apt");     } 2>/dev/null || true
+    { is_installed_flatpak "$pkg" && UNI_INSTALLED_IN+=("flatpak"); } 2>/dev/null || true
+    { is_installed_snap    "$pkg" && UNI_INSTALLED_IN+=("snap");    } 2>/dev/null || true
+    local reg_backend
+    reg_backend=$(registry_get "$pkg" "backend") || true
+    if [[ -n "$reg_backend" ]] && ! in_array "$reg_backend" "${UNI_INSTALLED_IN[@]:-}"; then
+        UNI_INSTALLED_IN+=("${reg_backend}(uni)")
+    fi
+}
+
+# ── Already-installed prompt ─────────────────────────────────
+UNI_DECISION=""
+handle_already_installed() {
+    local pkg="$1"; shift
+    local installed_str
+    installed_str=$(IFS=', '; echo "$*")
+
+    echo ""
+    echo -e "${YELLOW}${BOLD} ⚠  ${pkg}${RESET}${YELLOW} already installed${RESET} via ${BOLD}${installed_str}${RESET}"
+    divider
+
+    PS3="$(echo -e "${CYAN}${BOLD}What to do?${RESET} [1-3]: ")"
+    select _ in "Reinstall / refresh" "Install from a different source" "Exit — keep as is"; do
+        case "$REPLY" in
+            1) UNI_DECISION="reinstall"; break ;;
+            2) UNI_DECISION="alongside"; break ;;
+            3) UNI_DECISION="exit";      break ;;
+            *) warn "Enter 1, 2, or 3." ;;
+        esac
+    done
+}
+
+# ── Source selection menu ────────────────────────────────────
+select_source() {
+    local pkg="$1"; shift
+    echo "" >&2
+    echo -e "${BOLD}${BLUE}${pkg}${RESET} found in multiple sources:" >&2
+    divider >&2
+    PS3="$(echo -e "${CYAN}${BOLD}Select source${RESET} [1-$#]: ")"
+    local chosen
+    select chosen in "$@"; do
+        if [[ -n "$chosen" ]]; then
+            echo "$chosen"
+            return
+        fi
+        warn "Invalid choice." >&2
+    done
+}
+
+# ── Resolve flatpak App ID ───────────────────────────────────
+resolve_flatpak_id() {
+    local pkg="$1"
+    [[ "$pkg" == *.*.* ]] && { echo "$pkg"; return 0; }
+
+    local results
+    results=$(flatpak search --columns=application,name "$pkg" 2>/dev/null) || true
+    [[ -z "$results" ]] && return 1
+
+    local filtered
+    filtered=$(echo "$results" | grep -iv "plugin\|runtime\|extension" | grep -i "$pkg") || true
+    [[ -z "$filtered" ]] && filtered=$(echo "$results" | grep -i "$pkg")
+    [[ -z "$filtered" ]] && return 1
+
+    local exact
+    exact=$(echo "$filtered" | awk -F'\t' -v p="${pkg,,}" 'tolower($2)==p{print $1}' | head -1)
+    [[ -n "$exact" ]] && { echo "$exact"; return 0; }
+
+    local id_match
+    id_match=$(echo "$filtered" | awk -F'\t' -v p="${pkg,,}" 'tolower($1)~("\\."p"$"){print $1}' | head -1)
+    [[ -n "$id_match" ]] && { echo "$id_match"; return 0; }
+
+    local ids=() names=()
+    while IFS=$'\t' read -r appid appname _; do
+        [[ -z "$appid" ]] && continue
+        ids+=("$appid")
+        names+=("${appname:-$appid}")
+    done <<< "$filtered"
+    [[ ${#ids[@]} -eq 1 ]] && { echo "${ids[0]}"; return 0; }
+
+    echo "" >&2
+    echo -e "${BOLD}${BLUE}Multiple flatpak matches for '${pkg}':${RESET}" >&2
+    divider >&2
+    PS3="$(echo -e "${CYAN}${BOLD}Select:${RESET} ")"
+    local fchoice
+    select fchoice in "${names[@]}"; do
+        [[ -n "$fchoice" ]] && { echo "${ids[$((REPLY-1))]}"; return 0; }
+        warn "Invalid choice." >&2
+    done
+}
+
+# ── apt parallel-download install ────────────────────────────
+do_apt_install_many() {
+    local pkgs=("$@")
+    [[ ${#pkgs[@]} -eq 0 ]] && return 0
+
+    if has_aria2c; then
+        step "Resolving download URLs via apt..."
+        local urls
+        urls=$(apt-get install --print-uris -qq "${pkgs[@]}" 2>/dev/null \
+            | grep -oP "(?<=')[^']+" | grep -E '\.deb$') || true
+
+        if [[ -n "$urls" ]]; then
+            local tmpdir
+            tmpdir=$(mktemp -d)
+            step "Downloading packages in parallel (aria2c)..."
+            echo "$urls" | aria2c \
+                --input-file=- \
+                -d "$tmpdir" \
+                -j 8 \
+                --console-log-level=warn \
+                --summary-interval=0 \
+                --allow-overwrite=true 2>/dev/null
+
+            local debs=()
+            while IFS= read -r -d '' f; do
+                debs+=("$f")
+            done < <(find "$tmpdir" -name "*.deb" -print0 2>/dev/null)
+
+            if [[ ${#debs[@]} -gt 0 ]]; then
+                run_privileged dpkg -i "${debs[@]}" 2>/dev/null || true
+                run_privileged "$(apt_fix_cmd)" -f install -y
+                local rc=$?
+                rm -rf "$tmpdir"
+                return $rc
+            fi
+            rm -rf "$tmpdir"
+            # aria2c path produced no debs — fall through to regular apt
+        fi
+    fi
+
+    run_privileged "$(apt_cmd)" install -y "${pkgs[@]}"
+    return $?
+}
+
+do_apt_install() {
+    local pkg="$1"
+    do_apt_install_many "$pkg"
+}
+
+install_many_github_parallel() {
+    local repos=("$@")
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    local pids=() names=() logs=()
+    local pkg safe_name log
+    local n=0
+
+    for pkg in "${repos[@]}"; do
+        ((n++))
+        safe_name=$(printf '%s' "$pkg" | tr -c '[:alnum:]_.:-' '_')
+        log="${tmpdir}/${n}_${safe_name}.log"
+        (
+            cmd_install_one "$pkg" "github"
+        ) >"$log" 2>&1 &
+        pids+=("$!")
+        names+=("$pkg")
+        logs+=("$log")
+    done
+
+    local idx=0
+    local rc=0
+    while (( idx < ${#pids[@]} )); do
+        if wait "${pids[$idx]}"; then
+            success "Installed ${BOLD}${names[$idx]}${RESET} via GitHub"
+        else
+            error "Failed to install ${names[$idx]} via GitHub"
+            sed 's/^/  /' "${logs[$idx]}" | head -n 120
+            rc=1
+        fi
+        ((idx++))
+    done
+
+    rm -rf "$tmpdir"
+    return "$rc"
+}
+
+# ── Install executor ─────────────────────────────────────────
+do_install() {
+    local pkg="$1" chosen_source="$2"
+    case "$chosen_source" in
+        apt)
+            do_apt_install "$pkg" || die "Failed to install ${BOLD}${pkg}${RESET} via $(apt_cmd)."
+            verify_apt_installed "$pkg"
+            registry_add "$pkg" "apt" "$pkg"
+            success "Installed ${BOLD}${pkg}${RESET} via $(apt_cmd)"
+            ;;
+        flatpak)
+            local appid
+            appid=$(resolve_flatpak_id "$pkg")
+            [[ -z "$appid" ]] && die "Could not resolve flatpak ID for '${pkg}'"
+            flatpak install --noninteractive -y --or-update "$appid" \
+                || die "Failed to install flatpak ${appid}"
+            registry_add "$pkg" "flatpak" "$appid"
+            success "Installed ${BOLD}${pkg}${RESET} via flatpak (${appid})"
+            ;;
+        snap)
+            run_privileged snap install "$pkg" || die "Failed to install snap ${pkg}"
+            registry_add "$pkg" "snap" "$pkg"
+            success "Installed ${BOLD}${pkg}${RESET} via snap"
+            ;;
+    esac
+}
+
+# ── INSTALL ──────────────────────────────────────────────────
+GH_REPO=""
+cmd_install_one() {
+    local pkg="$1"
+    local forced_source="${2:-}"
+
+    # GitHub URL or user/repo shorthand
+    local maybe_repo
+    maybe_repo=$(parse_github_repo "$pkg")
+    if [[ -n "$maybe_repo" ]]; then
+        GH_REPO="$maybe_repo"
+        install_from_github "$GH_REPO"
+        return
+    fi
+
+    if [[ "$forced_source" == "appimage" ]]; then
+        if [[ "$pkg" == github:*#* ]]; then
+            install_appimage_from_github_spec "$pkg"
+        elif [[ "$pkg" == *.AppImage || "$pkg" == *.appimage ]] || \
+             [[ "$pkg" =~ ^https?://.+\.(AppImage|appimage)$ ]]; then
+            install_appimage "$pkg"
+        else
+            die "AppImage source requires a .AppImage file/URL or github:owner/repo#asset-pattern."
+        fi
+        return
+    fi
+
+    # Local or remote .deb
+    if [[ "$pkg" == *.deb ]]; then
+        if [[ "$pkg" =~ ^https?:// ]]; then
+            local tmp_deb
+            tmp_deb=$(mktemp --suffix=.deb)
+            info "Downloading .deb..."
+            has_aria2c && info "${DIM}Using aria2c (parallel connections)${RESET}"
+            download_file "$pkg" "$tmp_deb" || { rm -f "$tmp_deb"; die "Download failed."; }
+            install_deb "$tmp_deb"
+            rm -f "$tmp_deb"
+        else
+            install_deb "$pkg"
+        fi
+        return
+    fi
+
+    # AppImage
+    if [[ "$pkg" == *.AppImage || "$pkg" == *.appimage ]] || \
+       [[ "$pkg" =~ ^https?://.+\.(AppImage|appimage)$ ]]; then
+        install_appimage "$pkg"; return
+    fi
+
+    # Check already installed (skip if --source is forcing a specific backend)
+    if [[ -z "$forced_source" ]]; then
+        spin_start "Checking existing installations..."
+        detect_installed_backends "$pkg"
+        spin_stop
+    fi
+
+    local exclude_sources=()
+
+    if [[ -z "$forced_source" && ${#UNI_INSTALLED_IN[@]} -gt 0 ]]; then
+        handle_already_installed "$pkg" "${UNI_INSTALLED_IN[@]}"
+        case "$UNI_DECISION" in
+            exit)
+                info "Nothing changed."
+                return 0
+                ;;
+            reinstall)
+                local pb="${UNI_INSTALLED_IN[0]}"
+                pb="${pb%(uni)}"
+                info "Reinstalling ${BOLD}${pkg}${RESET} from ${pb}..."
+                case "$pb" in
+                    apt)
+                        do_apt_install "$pkg" --reinstall 2>/dev/null \
+                            || run_privileged "$(apt_cmd)" install --reinstall -y "$pkg"
+                        registry_add "$pkg" "apt" "$pkg"
+                        success "Reinstalled ${BOLD}${pkg}${RESET}"
+                        ;;
+                    flatpak)
+                        local appid
+                        appid=$(registry_get "$pkg" "id")
+                        [[ -z "$appid" ]] && appid=$(resolve_flatpak_id "$pkg")
+                        flatpak update --noninteractive -y "$appid" || \
+                            flatpak install --noninteractive -y "$appid"
+                        registry_add "$pkg" "flatpak" "$appid"
+                        success "Reinstalled ${BOLD}${pkg}${RESET}"
+                        ;;
+                    snap)
+                        run_privileged snap refresh "$pkg" || run_privileged snap install "$pkg"
+                        registry_add "$pkg" "snap" "$pkg"
+                        success "Reinstalled ${BOLD}${pkg}${RESET}"
+                        ;;
+                    dpkg|archive|appimage)
+                        warn "Re-run: uni install <url-or-file> to reinstall this package."
+                        ;;
+                esac
+                return 0
+                ;;
+            alongside)
+                for b in "${UNI_INSTALLED_IN[@]}"; do
+                    exclude_sources+=("${b%(uni)}")
+                done
+                info "Searching other sources (excluding: ${exclude_sources[*]})..."
+                ;;
+        esac
+    fi
+
+    # Search — either single forced source or parallel across all
+    local apt_result="" flatpak_result="" snap_result="" gh_result=""
+    if [[ -n "$forced_source" ]]; then
+        info "Searching ${BOLD}${forced_source}${RESET} only (--source)..."
+        single_source_search "$pkg" "$forced_source"
+    else
+        parallel_search "$pkg"
+    fi
+
+    local sources=()
+    [[ -n "$apt_result"     ]] && ! in_array "apt"     "${exclude_sources[@]:-}" && sources+=("apt")
+    [[ -n "$flatpak_result" ]] && ! in_array "flatpak" "${exclude_sources[@]:-}" && sources+=("flatpak")
+    [[ -n "$snap_result"    ]] && ! in_array "snap"    "${exclude_sources[@]:-}" && sources+=("snap")
+    [[ -n "$gh_result"      ]] && sources+=("github (${gh_result})")
+
+    if [[ ${#sources[@]} -eq 0 ]]; then
+        if [[ -n "$forced_source" ]]; then
+            die "Package '${pkg}' not found in ${forced_source}."
+        elif [[ ${#exclude_sources[@]} -gt 0 ]]; then
+            warn "No other sources found for '${pkg}'."
+        else
+            warn "Package '${pkg}' not found in apt, flatpak, snap, or GitHub."
+            echo -e "  ${DIM}Try: uni install user/repo  |  uni install <url.deb>  |  uni install <url.AppImage>${RESET}"
+        fi
+        exit 1
+    fi
+
+    local chosen_source
+    if [[ ${#sources[@]} -eq 1 ]]; then
+        chosen_source="${sources[0]}"
+        info "Found in ${BOLD}${chosen_source}${RESET}"
+    else
+        chosen_source=$(select_source "$pkg" "${sources[@]}")
+    fi
+
+    if [[ "$chosen_source" == github* ]]; then
+        GH_REPO="$gh_result"
+        install_from_github "$GH_REPO"
+    else
+        do_install "$pkg" "$chosen_source"
+    fi
+}
+
+cmd_install() {
+    # Parse flags: uni install <pkg...> [--source apt|flatpak|snap|github|appimage] [--parallel]
+    local forced_source=""
+    local install_parallel=0
+    local pkgs=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --source|-s)
+                shift
+                forced_source="${1:-}"
+                [[ -z "$forced_source" ]] && die "--source requires a value: apt, flatpak, snap, github, appimage"
+                shift
+                ;;
+            --source=*)
+                forced_source="${1#*=}"
+                [[ -z "$forced_source" ]] && die "--source requires a value: apt, flatpak, snap, github, appimage"
+                shift
+                ;;
+            --parallel|-p)
+                install_parallel=1
+                shift
+                ;;
+            *)
+                pkgs+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    forced_source="${forced_source,,}"
+    [[ ${#pkgs[@]} -eq 0 ]] && die "Usage: uni install <package...|user/repo|github-url|file.deb|file.appimage|url> [--source apt|flatpak|snap|github|appimage]"
+
+    init_registry
+
+    local total="${#pkgs[@]}"
+    local pkg
+
+    # Batch apt installs in one transaction when source is explicitly apt.
+    if (( total > 1 )) && [[ "$forced_source" == "apt" ]]; then
+        info "Installing (${total}) packages via ${BOLD}apt${RESET} in one batch..."
+        do_apt_install_many "${pkgs[@]}" || die "Batch apt install failed."
+        local any_failed=0
+        for pkg in "${pkgs[@]}"; do
+            if is_installed_apt "$pkg"; then
+                registry_add "$pkg" "apt" "$pkg"
+                success "Installed ${BOLD}${pkg}${RESET} via $(apt_cmd)"
+            else
+                error "Failed to install ${BOLD}${pkg}${RESET} — not found after apt run."
+                any_failed=1
+            fi
+        done
+        [[ $any_failed -eq 1 ]] && exit 1
+        return
+    fi
+
+    if (( total > 1 )) && (( install_parallel == 1 )); then
+        case "$forced_source" in
+            github|gh)
+                info "Installing (${total}) GitHub packages in parallel..."
+                install_many_github_parallel "${pkgs[@]}"
+                return $?
+                ;;
+            "")
+                die "--parallel for multiple packages requires --source github (or use --source apt for batched apt installs)."
+                ;;
+            *)
+                warn "--parallel is currently supported for --source github only; running sequentially for ${forced_source}."
+                ;;
+        esac
+    fi
+
+    local i=0
+    for pkg in "${pkgs[@]}"; do
+        ((i++))
+        if (( total > 1 )); then
+            info "Installing (${i}/${total}): ${BOLD}${pkg}${RESET}"
+        fi
+        cmd_install_one "$pkg" "$forced_source"
+    done
+}
+
+# ── REMOVE ───────────────────────────────────────────────────
+cmd_remove() {
+    local pkg="${1:-}"
+    [[ -z "$pkg" ]] && die "Usage: uni remove <package>"
+    init_registry
+
+    local backend id
+    backend=$(registry_get "$pkg" "backend")
+    id=$(registry_get "$pkg" "id")
+
+    if [[ -z "$backend" ]]; then
+        warn "'${pkg}' not in uni registry — trying all backends..."
+        if is_installed_apt "$pkg"; then
+            run_privileged "$(apt_cmd)" remove -y "$pkg" || die "apt remove failed for ${BOLD}${pkg}${RESET}."
+            verify_apt_removed "$pkg"
+            success "Removed ${BOLD}${pkg}${RESET}"
+        elif is_installed_flatpak "$pkg"; then
+            local appid
+            appid=$(flatpak list --columns=application,name 2>/dev/null | grep -i "$pkg" | head -1 | awk '{print $1}')
+            if [[ -n "$appid" ]]; then
+                flatpak uninstall --noninteractive -y "$appid" \
+                    || die "flatpak uninstall failed for ${BOLD}${pkg}${RESET}."
+            else
+                flatpak uninstall -y "$pkg" \
+                    || die "flatpak uninstall failed for ${BOLD}${pkg}${RESET}."
+            fi
+            success "Removed ${BOLD}${pkg}${RESET}"
+        elif is_installed_snap "$pkg"; then
+            run_privileged snap remove "$pkg" || die "snap remove failed for ${BOLD}${pkg}${RESET}."
+            success "Removed ${BOLD}${pkg}${RESET}"
+        else
+            die "'${pkg}' not found in any backend."
+        fi
+        return
+    fi
+
+    info "Removing ${BOLD}${pkg}${RESET} [${backend}]..."
+
+    case "$backend" in
+        apt)
+            run_privileged "$(apt_cmd)" remove -y "$id" || die "apt remove failed for ${BOLD}${pkg}${RESET}."
+            verify_apt_removed "$id"
+            ;;
+        dpkg)
+            run_privileged dpkg -r "$id" || run_privileged "$(apt_cmd)" remove -y "$id" \
+                || die "Failed to remove ${BOLD}${pkg}${RESET}."
+            verify_apt_removed "$id"
+            ;;
+        flatpak)
+            flatpak uninstall --noninteractive -y "$id" \
+                || die "flatpak uninstall failed for ${BOLD}${pkg}${RESET}."
+            ;;
+        snap)
+            run_privileged snap remove "$id" \
+                || die "snap remove failed for ${BOLD}${pkg}${RESET}."
+            ;;
+        appimage) remove_appimage "$pkg"; return ;;
+        archive)
+            if [[ -f "$id" ]]; then
+                rm -f "$id" || die "Could not remove binary: ${id}"
+                success "Removed binary: ${id}"
+            else
+                warn "Binary not found at recorded path: ${id}"
+            fi
+            registry_remove "$pkg"; return
+            ;;
+    esac
+
+    registry_remove "$pkg"
+    success "Removed ${BOLD}${pkg}${RESET}"
+}
+
+# ── PURGE ────────────────────────────────────────────────────
+cmd_purge() {
+    local pkg="${1:-}"
+    [[ -z "$pkg" ]] && die "Usage: uni purge <package>"
+    init_registry
+
+    local backend id
+    backend=$(registry_get "$pkg" "backend")
+    id=$(registry_get "$pkg" "id")
+
+    if [[ -z "$backend" ]]; then
+        warn "'${pkg}' not in uni registry — trying all backends..."
+        if is_installed_apt "$pkg"; then
+            run_privileged "$(apt_cmd)" purge -y "$pkg" || die "apt purge failed for ${BOLD}${pkg}${RESET}."
+            verify_apt_removed "$pkg"
+            run_privileged "$(apt_cmd)" autoremove -y || warn "autoremove encountered errors (non-fatal)."
+            success "Purged ${BOLD}${pkg}${RESET}"
+        elif is_installed_flatpak "$pkg"; then
+            local appid
+            appid=$(flatpak list --columns=application,name 2>/dev/null | grep -i "$pkg" | head -1 | awk '{print $1}')
+            if [[ -n "$appid" ]]; then
+                flatpak uninstall --noninteractive -y "$appid" \
+                    || die "flatpak uninstall failed for ${BOLD}${pkg}${RESET}."
+                rm -rf "$REAL_HOME/.var/app/$appid" || true
+                success "Purged ${BOLD}${pkg}${RESET}"
+            else
+                die "Could not resolve flatpak ID for '${pkg}'."
+            fi
+        elif is_installed_snap "$pkg"; then
+            run_privileged snap remove --purge "$pkg" || die "snap remove --purge failed for ${BOLD}${pkg}${RESET}."
+            success "Purged ${BOLD}${pkg}${RESET}"
+        else
+            die "'${pkg}' not found in any backend."
+        fi
+        return
+    fi
+
+    info "Purging ${BOLD}${pkg}${RESET} [${backend}] + config/data..."
+
+    case "$backend" in
+        apt|dpkg)
+            run_privileged "$(apt_cmd)" purge -y "$id" || die "apt purge failed for ${BOLD}${pkg}${RESET}."
+            verify_apt_removed "$id"
+            run_privileged "$(apt_cmd)" autoremove -y || warn "autoremove encountered errors (non-fatal)."
+            ;;
+        flatpak)
+            flatpak uninstall --noninteractive -y "$id" \
+                || die "flatpak uninstall failed for ${BOLD}${pkg}${RESET}."
+            local flatpak_data="$REAL_HOME/.var/app/$id"
+            if [[ -d "$flatpak_data" ]]; then
+                rm -rf "$flatpak_data" \
+                    && success "Removed app data: ${flatpak_data}" \
+                    || warn "Could not remove app data: ${flatpak_data}"
+            fi
+            ;;
+        snap)
+            run_privileged snap remove --purge "$id" \
+                || die "snap remove --purge failed for ${BOLD}${pkg}${RESET}."
+            ;;
+        appimage) remove_appimage "$pkg"; return ;;
+        archive)
+            if [[ -f "$id" ]]; then
+                rm -f "$id" || die "Could not remove binary: ${id}"
+                success "Removed binary: ${id}"
+            else
+                warn "Binary not found at recorded path: ${id}"
+            fi
+            registry_remove "$pkg"; return
+            ;;
+    esac
+
+    registry_remove "$pkg"
+    success "Purged ${BOLD}${pkg}${RESET}"
+}
+
+# ── LIST ─────────────────────────────────────────────────────
+cmd_list() {
+    init_registry
+    header "Packages installed via uni"
+    registry_list
+    divider
+    echo ""
+}
+
+# ── UPDATE ───────────────────────────────────────────────────
+cmd_update() {
+    init_registry
+    header "Updating all backends"
+
+    if has_apt; then
+        info "$(apt_cmd)..."
+        run_privileged "$(apt_cmd)" update && run_privileged "$(apt_cmd)" upgrade -y
+        echo ""
+    fi
+
+    local fp_pid="" snap_pid=""
+
+    if has_flatpak; then
+        info "Flatpak... ${DIM}(background)${RESET}"
+        flatpak update --noninteractive -y &
+        fp_pid=$!
+    fi
+
+    if has_snap; then
+        info "Snap... ${DIM}(background)${RESET}"
+        run_privileged snap refresh &
+        snap_pid=$!
+    fi
+
+    if [[ -n "$fp_pid" ]]; then
+        wait "$fp_pid" && success "Flatpak updated." || warn "Flatpak update encountered errors."
+    fi
+    if [[ -n "$snap_pid" ]]; then
+        wait "$snap_pid" && success "Snap updated." || warn "Snap update encountered errors."
+    fi
+
+    success "All backends updated."
+}
+
+# ── UNINSTALL ────────────────────────────────────────────────
+cmd_uninstall() {
+    header "uni uninstall"
+    
+    warn "This will completely remove uni and its data."
+    echo ""
+    echo -e "  ${DIM}Directories that will be removed:${RESET}"
+    echo -e "  ${DIM}• uni binary${RESET}"
+    echo -e "  ${DIM}• $HOME/.local/share/uni/  (registry, appimages, icons)${RESET}"
+    echo -e "  ${DIM}• $HOME/.cache/uni/  (cache)${RESET}"
+    echo -e "  ${DIM}• PATH entries in shell configs${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Packages installed via uni will ${CYAN}NOT${RESET}${BOLD} be removed.${RESET}"
+    echo ""
+    
+    read -p "$(echo -e "${RED}${BOLD}Uninstall uni? Type 'yes' to confirm:${RESET} ")" -r confirm
+    if [[ "$confirm" != "yes" ]]; then
+        warn "Uninstall cancelled."
+        return 1
+    fi
+    
+    echo ""
+    info "Removing uni..."
+    
+    local uni_path
+    uni_path=$(command -v uni 2>/dev/null || echo "$REAL_HOME/.local/bin/uni")
+    
+    # Remove binary
+    if [[ -f "$uni_path" ]]; then
+        rm -f "$uni_path" && success "Removed: $uni_path" || warn "Could not remove $uni_path"
+    fi
+    
+    # Remove uni directories
+    if [[ -d "$REAL_HOME/.local/share/uni" ]]; then
+        rm -rf "$REAL_HOME/.local/share/uni" && success "Removed: $REAL_HOME/.local/share/uni/" || warn "Could not remove uni data"
+    fi
+    
+    if [[ -d "$REAL_HOME/.cache/uni" ]]; then
+        rm -rf "$REAL_HOME/.cache/uni" && success "Removed: $REAL_HOME/.cache/uni/" || warn "Could not remove cache"
+    fi
+    
+    # Remove PATH entries from shell configs
+    for rc_file in ~/.bashrc ~/.zshrc ~/.bash_profile ~/.zprofile; do
+        if [[ -f "$rc_file" ]]; then
+            if grep -q "\.local/bin.*# uni" "$rc_file"; then
+                sed -i '/\.local\/bin.*# uni/d' "$rc_file"
+                success "Updated: $rc_file"
+            fi
+        fi
+    done
+    
+    echo ""
+    success "uni has been completely removed."
+    echo -e "  ${DIM}Run: ${CYAN}source ~/.bashrc${RESET}${DIM} to update your shell${RESET}"
+    echo ""
+}
+
+# ── SELF-UPDATE ──────────────────────────────────────────────
+cmd_self_update() {
+    header "uni self-update"
+
+    local force=0
+    for arg in "$@"; do
+        case "$arg" in
+            -f|--force) force=1 ;;
+        esac
+    done
+
+    local self_path
+    self_path=$(command -v uni 2>/dev/null || echo "$REAL_HOME/.local/bin/uni")
+
+    info "Checking latest version..."
+    local latest_ver fetch_status
+    latest_ver=$(fetch_uni_latest_version 10); fetch_status=$?
+    case "$fetch_status" in
+        0) ;;
+        1) die "Could not reach GitHub. Check your connection." ;;
+        *) die "Could not determine latest version from GitHub." ;;
+    esac
+
+    local tmp
+    tmp=$(mktemp)
+    curl -fsSL "$UNI_RAW_URL" -o "$tmp" \
+        || { rm -f "$tmp"; die "Download failed."; }
+
+    # Sanity check
+    if ! head -1 "$tmp" | grep -q "bash"; then
+        rm -f "$tmp"
+        die "Downloaded file doesn't look right. Aborting."
+    fi
+
+    if cmp -s "$tmp" "$self_path"; then
+        rm -f "$tmp"
+        success "Already up to date (v${UNI_VERSION})."
+        return 0
+    fi
+
+    if version_gt "$UNI_VERSION" "$latest_ver"; then
+        if (( force )); then
+            warn "Remote version (v${latest_ver}) is older than installed (v${UNI_VERSION}). Forcing as requested."
+        else
+            rm -f "$tmp"
+            die "Remote version (v${latest_ver}) is older than installed (v${UNI_VERSION}). Aborting. (Use 'uni self-update --force' to override.)"
+        fi
+    fi
+
+    if version_gt "$latest_ver" "$UNI_VERSION"; then
+        info "Updating ${BOLD}v${UNI_VERSION}${RESET} → ${BOLD}v${latest_ver}${RESET}..."
+    else
+        info "Updating to latest commit on ${BOLD}master${RESET} (version unchanged: v${UNI_VERSION})..."
+    fi
+
+    chmod +x "$tmp"
+    
+    # Try to write directly, if that fails (permissions), try with sudo
+    if ! mv "$tmp" "$self_path" 2>/dev/null; then
+        if sudo -n true 2>/dev/null; then
+            sudo mv "$tmp" "$self_path" || { rm -f "$tmp"; die "Could not write to ${self_path}. Try: sudo uni self-update"; }
+        else
+            rm -f "$tmp"
+            die "Permission denied: ${self_path}. Try: sudo uni self-update"
+        fi
+    fi
+
+    # Bust the update-check cache so the banner doesn't linger
+    rm -f "$UNI_CACHE_DIR/latest_version.txt"
+
+    success "uni updated to v${latest_ver}"
+}
+
+
+# ── INTERCEPT ────────────────────────────────────────────────
+# Writes shell functions to the user's rc file that wrap apt/nala/snap/flatpak
+# so they all route through uni. `uni intercept off` removes them.
+
+_UNI_INTERCEPT_BLOCK_START="# >>> uni intercept begin <<<"
+_UNI_INTERCEPT_BLOCK_END="# >>> uni intercept end <<<"
+
+_intercept_shell_functions() {
+    cat << 'SHELLEOF'
+# Intercept apt / nala / snap / flatpak → uni
+apt()     { command uni install "$@" 2>/dev/null || command apt "$@"; }
+nala()    { command uni install "$@" 2>/dev/null || command nala "$@"; }
+snap()    {
+    case "${1:-}" in
+        install) shift; command uni install --source snap "$@" ;;
+        remove)  shift; command uni remove "$@" ;;
+        *)       command snap "$@" ;;
+    esac
+}
+flatpak() {
+    case "${1:-}" in
+        install) shift; command uni install --source flatpak "$@" ;;
+        uninstall|remove) shift; command uni remove "$@" ;;
+        *)       command flatpak "$@" ;;
+    esac
+}
+SHELLEOF
+}
+
+_detect_rc_file() {
+    case "${SHELL:-}" in
+        */zsh)  echo "$REAL_HOME/.zshrc" ;;
+        */fish) echo "$REAL_HOME/.config/fish/config.fish" ;;
+        *)      echo "$REAL_HOME/.bashrc" ;;
+    esac
+}
+
+cmd_intercept() {
+    local action="${1:-status}"
+    local rc_file
+    rc_file=$(_detect_rc_file)
+
+    case "$action" in
+        on)
+            if grep -q "$_UNI_INTERCEPT_BLOCK_START" "$rc_file" 2>/dev/null; then
+                warn "Intercept already enabled in ${rc_file}"
+                return 0
+            fi
+
+            {
+                echo ""
+                echo "$_UNI_INTERCEPT_BLOCK_START"
+                _intercept_shell_functions
+                echo "$_UNI_INTERCEPT_BLOCK_END"
+            } >> "$rc_file"
+
+            success "Intercept enabled in ${BOLD}${rc_file}${RESET}"
+            warn "Reload your shell: ${BOLD}source ${rc_file}${RESET}"
+            echo ""
+            echo -e "  ${DIM}apt install htop  →  uni install htop --source apt${RESET}"
+            echo -e "  ${DIM}flatpak install X →  uni install X --source flatpak${RESET}"
+            echo -e "  ${DIM}snap install X    →  uni install X --source snap${RESET}"
+            ;;
+
+        off)
+            if ! grep -q "$_UNI_INTERCEPT_BLOCK_START" "$rc_file" 2>/dev/null; then
+                warn "Intercept is not currently enabled in ${rc_file}"
+                return 0
+            fi
+
+            # Remove the block between the markers (inclusive)
+            local tmp
+            tmp=$(mktemp)
+            python3 - "$rc_file" "$_UNI_INTERCEPT_BLOCK_START" "$_UNI_INTERCEPT_BLOCK_END" "$tmp" << 'PYEOF'
+import sys
+src, start_marker, end_marker, dst = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+with open(src) as f:
+    lines = f.readlines()
+out, skip = [], False
+for line in lines:
+    if start_marker in line:
+        skip = True
+    if not skip:
+        out.append(line)
+    if end_marker in line:
+        skip = False
+# Strip trailing blank lines left by the removed block
+while out and out[-1].strip() == '':
+    out.pop()
+out.append('\n')
+with open(dst, 'w') as f:
+    f.writelines(out)
+PYEOF
+            mv "$tmp" "$rc_file"
+            success "Intercept removed from ${BOLD}${rc_file}${RESET}"
+            warn "Reload your shell: ${BOLD}source ${rc_file}${RESET}"
+            ;;
+
+        status)
+            if grep -q "$_UNI_INTERCEPT_BLOCK_START" "$rc_file" 2>/dev/null; then
+                success "Intercept is ${BOLD}ON${RESET} ${DIM}(${rc_file})${RESET}"
+            else
+                info "Intercept is ${BOLD}OFF${RESET}"
+            fi
+            ;;
+
+        *)
+            die "Usage: uni intercept [on|off|status]"
+            ;;
+    esac
+}
+
+
+# ── HELP ─────────────────────────────────────────────────────
+cmd_help() {
+    echo ""
+    echo -e "${BOLD}uni${RESET} ${DIM}v${UNI_VERSION}${RESET} — Universal Package Manager"
+    echo -e "${DIM}by Dronzer Studios / Kasniya${RESET}"
+    divider
+    echo -e "  ${BOLD}uni install${RESET} <package...>             Search apt · flatpak · snap · GitHub"
+    echo -e "  ${BOLD}uni install${RESET} <pkg> ${CYAN}--source${RESET} <src>     Force a specific backend"
+    echo -e "  ${BOLD}uni install${RESET} <pkg...> ${CYAN}--source${RESET} apt     Batch install apt packages in one transaction"
+    echo -e "  ${BOLD}uni install${RESET} <repo...> ${CYAN}--source${RESET} github ${CYAN}--parallel${RESET}  Parallel GitHub installs"
+    echo -e "  ${BOLD}uni install${RESET} user/repo                Install from GitHub latest release"
+    echo -e "  ${BOLD}uni install${RESET} <github-url>             Install from GitHub repo URL"
+    echo -e "  ${BOLD}uni install${RESET} <file.deb>               Install local .deb"
+    echo -e "  ${BOLD}uni install${RESET} <url.deb>                Download & install .deb"
+    echo -e "  ${BOLD}uni install${RESET} <file.appimage>          Install AppImage + desktop entry"
+    echo -e "  ${BOLD}uni install${RESET} <url.AppImage>           Download & install AppImage"
+    echo -e "  ${BOLD}uni install${RESET} github:user/repo#*.AppImage ${CYAN}--source${RESET} appimage  Install matching GitHub AppImage asset"
+    echo -e "  ${BOLD}uni remove${RESET}  <package>                Remove (keep config)"
+    echo -e "  ${BOLD}uni purge${RESET}   <package>                Remove + all config/data"
+    echo -e "  ${BOLD}uni list${RESET}                             List uni-managed packages"
+    echo -e "  ${BOLD}uni search${RESET} <query> ${CYAN}--json${RESET}             Search sources as JSON"
+    echo -e "  ${BOLD}uni info${RESET} <id> ${CYAN}--source${RESET} <src> ${CYAN}--json${RESET}  Show package info as JSON"
+    echo -e "  ${BOLD}uni installed${RESET} ${CYAN}--json${RESET}                  List installed apps as JSON"
+    echo -e "  ${BOLD}uni updates${RESET} ${CYAN}--json${RESET}                    List available updates as JSON"
+    echo -e "  ${BOLD}uni install${RESET} <pkg> ${CYAN}--json-events${RESET}       Emit JSON lifecycle events"
+    echo -e "  ${BOLD}uni update${RESET}                           Update all backends"
+    echo -e "  ${BOLD}uni self-update${RESET}                      Update uni itself"
+    echo -e "  ${BOLD}uni uninstall${RESET}                        Remove uni completely"
+    echo -e "  ${BOLD}uni intercept${RESET} [on|off|status]        Route apt/snap/flatpak through uni"
+    echo -e "  ${BOLD}uni version${RESET}                          Print version"
+    divider
+    echo -e "  ${DIM}--source values: apt  flatpak  snap  github  appimage${RESET}"
+    echo -e "  ${DIM}Backends: $(apt_cmd) · flatpak · snap · dpkg · appimage · github · archive${RESET}"
+    echo -e "  ${DIM}Optional: aria2c (parallel downloads) — sudo apt install aria2${RESET}"
+    echo ""
+}
+
+# ── Entry point ──────────────────────────────────────────────
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    # Machine-readable commands must not print banners, colors, or update notices.
+    case "$cmd" in
+        search)
+            if [[ " $* " == *" --json "* ]]; then cmd_search_json "$@"; return; fi
+            ;;
+        info)
+            if [[ " $* " == *" --json "* ]]; then cmd_info_json "$@"; return; fi
+            ;;
+        installed)
+            if [[ $# -eq 0 || " $* " == *" --json "* ]]; then cmd_installed_json "$@"; return; fi
+            ;;
+        updates)
+            if [[ $# -eq 0 || " $* " == *" --json "* ]]; then cmd_updates_json "$@"; return; fi
+            ;;
+        list)
+            if [[ " $* " == *" --json "* ]]; then cmd_installed_json "$@"; return; fi
+            ;;
+        install|remove|update)
+            if [[ " $* " == *" --json-events "* ]]; then cmd_json_events_wrapper "$cmd" "$@"; return; fi
+            ;;
+    esac
+
+    # Kick off background update check on human-readable runs only.
+    check_for_update
+
+    case "$cmd" in
+        install)                cmd_install "$@" ;;
+        remove)                 cmd_remove  "$@" ;;
+        purge)                  cmd_purge   "$@" ;;
+        list)                   cmd_list ;;
+        search)                 [[ $# -gt 0 ]] && cmd_search_json "$@" --json || die "Usage: uni search <query> --json" ;;
+        info)                   [[ $# -gt 0 ]] && cmd_info_json "$@" --json || die "Usage: uni info <id> --source <source> --json" ;;
+        installed)              cmd_installed_json ;;
+        updates)                cmd_updates_json ;;
+        update)                 cmd_update ;;
+        self-update|--update)   cmd_self_update "$@" ;;
+        uninstall)              cmd_uninstall ;;
+        intercept)              cmd_intercept "$@" ;;
+        
+        version|--version|-V)   echo "uni v${UNI_VERSION}"; return 0 ;;
+        help|--help|-h)         cmd_help ;;
+        *) error "Unknown command: ${cmd}"; cmd_help; exit 1 ;;
+    esac
+
+    # Print update banner after the command finishes (if one was found)
+    print_update_banner
+}
+
+main "$@"

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+if [ -f "$HOME/.cargo/env" ]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+
+cargo fmt --check
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+cargo build
+
