@@ -67,7 +67,7 @@ impl CatalogManager {
             },
             async {
                 if want_github {
-                    github_provider(&query, &wanted).await
+                    github_provider(&query).await
                 } else {
                     (Vec::new(), Vec::new())
                 }
@@ -111,8 +111,14 @@ impl CatalogManager {
         let variants = std::mem::take(&mut app.variants);
         let mut enriched_variants = Vec::with_capacity(variants.len());
         for mut variant in variants {
-            if let Ok(value) = uni_info(&variant.package_id, variant.source).await {
-                apply_info(&mut app, &mut variant, value);
+            let info = match variant.source {
+                SourceKind::Github => github_info(&variant.package_id).await,
+                SourceKind::Flathub => flathub_info(&variant.package_id).await,
+                SourceKind::System => apt_info(&variant.package_id).await,
+                SourceKind::Appimage => None,
+            };
+            if let Some(info) = info {
+                apply_info(&mut app, &mut variant, info);
             }
             enriched_variants.push(variant);
         }
@@ -310,17 +316,15 @@ async fn system_provider(query: &str) -> (Vec<CanonicalApp>, Vec<ProviderStatus>
     }
 }
 
-async fn github_provider(
-    query: &str,
-    wanted: &[SourceKind],
-) -> (Vec<CanonicalApp>, Vec<ProviderStatus>) {
-    match tokio::time::timeout(SEARCH_TIMEOUT, uni_search(query, wanted)).await {
-        Ok(Ok((apps, provs))) => (
+async fn github_provider(query: &str) -> (Vec<CanonicalApp>, Vec<ProviderStatus>) {
+    match tokio::time::timeout(SEARCH_TIMEOUT, github_search(query)).await {
+        Ok(Ok(apps)) => (
             apps,
-            provs
-                .into_iter()
-                .filter(|provider| provider.source == SourceKind::Github)
-                .collect(),
+            vec![ProviderStatus {
+                source: SourceKind::Github,
+                state: "ready".to_string(),
+                message: Some("GitHub repository search completed".to_string()),
+            }],
         ),
         Ok(Err(err)) => (
             Vec::new(),
@@ -335,124 +339,94 @@ async fn github_provider(
             vec![ProviderStatus {
                 source: SourceKind::Github,
                 state: "failed".to_string(),
-                message: Some("uni search timed out".to_string()),
+                message: Some("GitHub search timed out".to_string()),
             }],
         ),
     }
 }
 
-async fn uni_search(
-    query: &str,
-    wanted: &[SourceKind],
-) -> Result<(Vec<CanonicalApp>, Vec<ProviderStatus>)> {
-    if query.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
-    }
-
-    let output = Command::new(uni_binary())
-        .args(["search", query, "--json"])
-        .output()
-        .await?;
-    if !output.status.success() {
-        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-
-    let value: Value = serde_json::from_slice(&output.stdout)?;
-    let empty = Vec::new();
-    let provider_values = value
-        .get("providers")
-        .and_then(Value::as_array)
-        .unwrap_or(&empty);
-    let providers = provider_values
-        .iter()
-        .filter_map(|provider| {
-            let source = source_from_uni(provider.get("source")?.as_str()?)?;
-            if !wanted.contains(&source) {
-                return None;
-            }
-            Some(ProviderStatus {
-                source,
-                state: provider
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .unwrap_or("ready")
-                    .to_string(),
-                message: provider
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string),
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let empty = Vec::new();
-    let result_values = value
-        .get("results")
-        .and_then(Value::as_array)
-        .unwrap_or(&empty);
-    let apps = result_values
-        .iter()
-        .filter_map(|item| app_from_uni_result(item, wanted))
-        .collect::<Vec<_>>();
-
-    Ok((apps, providers))
+/// Build a reqwest client with the standard GitHub UA, and attach a bearer
+/// token from `GITHUB_TOKEN` when present (raises the unauthenticated rate
+/// limit; absence just means lower-throughput anonymous access).
+fn github_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .user_agent("thallium-store")
+        .build()?)
 }
 
-fn app_from_uni_result(item: &Value, wanted: &[SourceKind]) -> Option<CanonicalApp> {
-    let source = source_from_uni(item.get("source")?.as_str()?)?;
-    if !wanted.contains(&source) {
-        return None;
+fn github_request(client: &reqwest::Client, url: String) -> reqwest::RequestBuilder {
+    let mut request = client.get(url);
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        request = request.bearer_auth(token);
     }
-    let package_id = item
-        .get("packageId")
-        .or_else(|| item.get("package_id"))
-        .and_then(Value::as_str)
-        .or_else(|| item.get("id").and_then(Value::as_str))?;
+    request
+}
+
+async fn github_search(query: &str) -> Result<Vec<CanonicalApp>> {
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let client = github_client()?;
+    let request = github_request(
+        &client,
+        "https://api.github.com/search/repositories".to_string(),
+    )
+    .query(&[("q", query), ("per_page", "15")]);
+    let value: Value = request.send().await?.error_for_status()?.json().await?;
+
+    let empty = Vec::new();
+    let items = value.get("items").and_then(Value::as_array).unwrap_or(&empty);
+    Ok(items.iter().filter_map(github_repo_to_app).collect())
+}
+
+fn github_repo_to_app(item: &Value) -> Option<CanonicalApp> {
+    let package_id = item.get("full_name").and_then(Value::as_str)?;
     let name = item
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or(package_id);
     let summary = item
-        .get("summary")
+        .get("description")
         .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
         .unwrap_or("No summary provided");
-    let trust = match item.get("trust").and_then(Value::as_str).unwrap_or("") {
-        "sandboxed" => TrustLevel::Sandboxed,
-        "verified" => TrustLevel::Verified,
-        "system_access" => TrustLevel::SystemAccess,
-        _ if source == SourceKind::System => TrustLevel::SystemAccess,
-        _ if source == SourceKind::Flathub => TrustLevel::Sandboxed,
-        _ => TrustLevel::Unverified,
-    };
-    let verified = item
-        .get("verified")
-        .and_then(Value::as_bool)
-        .unwrap_or(source == SourceKind::Flathub || source == SourceKind::System);
+
     let mut app = single_variant_app(
-        &format!("{}:{package_id}", source_key(source)),
+        &format!("github:{package_id}"),
         name,
         summary,
-        source,
+        SourceKind::Github,
         package_id,
-        trust,
-        verified,
+        TrustLevel::Unverified,
+        false,
     );
     app.homepage = item
         .get("homepage")
         .and_then(Value::as_str)
-        .map(ToString::to_string);
-    app.repository = (source == SourceKind::Github)
-        .then(|| package_id.to_string())
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
         .or_else(|| {
-            item.get("repository")
+            item.get("html_url")
                 .and_then(Value::as_str)
                 .map(ToString::to_string)
         });
+    app.repository = Some(package_id.to_string());
     app.rating = item
-        .get("stars")
+        .get("stargazers_count")
         .and_then(Value::as_f64)
         .map(|stars| stars as f32);
-    app.tags = default_tags(source, name, summary);
+
+    let mut tags = default_tags(SourceKind::Github, name, summary);
+    if let Some(topics) = item.get("topics").and_then(Value::as_array) {
+        for topic in topics.iter().filter_map(Value::as_str) {
+            if !tags.iter().any(|existing| existing == topic) {
+                tags.push(topic.to_string());
+            }
+        }
+    }
+    app.tags = tags;
+
     if let Some(variant) = app.variants.first_mut() {
         variant.repository = app.repository.clone();
     }
@@ -513,59 +487,182 @@ fn appimage_manifest_search(query: &str) -> Vec<CanonicalApp> {
         .collect()
 }
 
-async fn uni_info(package_id: &str, source: SourceKind) -> Result<Value> {
-    let output = Command::new(uni_binary())
-        .args(["info", package_id, "--source", source_arg(source), "--json"])
-        .output()
-        .await?;
-    if !output.status.success() {
-        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(serde_json::from_slice(&output.stdout)?)
+/// Native, best-effort enrichment fields fed into `apply_info`. Any field
+/// left `None` is simply skipped by the caller — a failed lookup never
+/// aborts enrichment for the rest of an app's variants.
+#[derive(Default)]
+struct PackageInfo {
+    description: Option<String>,
+    homepage: Option<String>,
+    license: Option<String>,
+    version: Option<String>,
+    installed_size: Option<u64>,
 }
 
-fn apply_info(app: &mut CanonicalApp, variant: &mut AppVariant, value: Value) {
-    if app.description.is_none() {
-        app.description = value
+/// `GET /repos/{owner}/{repo}` for description/homepage/license, plus a
+/// best-effort `GET /repos/{owner}/{repo}/releases/latest` for the version
+/// tag (skipped on 404 / no releases — repos without releases still enrich).
+async fn github_info(package_id: &str) -> Option<PackageInfo> {
+    let (owner, repo) = package_id.split_once('/')?;
+    let client = github_client().ok()?;
+
+    let repo_json: Value = github_request(
+        &client,
+        format!("https://api.github.com/repos/{owner}/{repo}"),
+    )
+    .send()
+    .await
+    .ok()?
+    .error_for_status()
+    .ok()?
+    .json()
+    .await
+    .ok()?;
+
+    let mut info = PackageInfo {
+        description: repo_json
             .get("description")
             .and_then(Value::as_str)
-            .or_else(|| value.get("summary").and_then(Value::as_str))
-            .map(ToString::to_string);
-    }
-    if app.homepage.is_none() {
-        app.homepage = value
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string),
+        homepage: repo_json
             .get("homepage")
             .and_then(Value::as_str)
-            .map(ToString::to_string);
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .or_else(|| {
+                repo_json
+                    .get("html_url")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            }),
+        license: repo_json
+            .get("license")
+            .and_then(|license| license.get("spdx_id"))
+            .and_then(Value::as_str)
+            .filter(|spdx| *spdx != "NOASSERTION")
+            .map(ToString::to_string),
+        ..Default::default()
+    };
+
+    if let Ok(response) = github_request(
+        &client,
+        format!("https://api.github.com/repos/{owner}/{repo}/releases/latest"),
+    )
+    .send()
+    .await
+    {
+        if let Ok(response) = response.error_for_status() {
+            if let Ok(release_json) = response.json::<Value>().await {
+                info.version = release_json
+                    .get("tag_name")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string);
+            }
+        }
+    }
+
+    Some(info)
+}
+
+/// `flatpak info --user <app_id>`, falling back to `remote-info --user
+/// flathub` when the app isn't installed locally. Best-effort text parse.
+async fn flathub_info(package_id: &str) -> Option<PackageInfo> {
+    if let Some(info) = run_flatpak_info(&["info", "--user", package_id]).await {
+        return Some(info);
+    }
+    run_flatpak_info(&["remote-info", "--user", "flathub", package_id]).await
+}
+
+async fn run_flatpak_info(args: &[&str]) -> Option<PackageInfo> {
+    let output = Command::new("flatpak").args(args).output().await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(parse_flatpak_info(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_flatpak_info(text: &str) -> PackageInfo {
+    let mut info = PackageInfo::default();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        match key.trim().to_ascii_lowercase().as_str() {
+            "version" => info.version = Some(value.to_string()),
+            "license" => info.license = Some(value.to_string()),
+            "homepage" => info.homepage = Some(value.to_string()),
+            "installed" => info.installed_size = parse_size(value),
+            _ => {}
+        }
+    }
+    info
+}
+
+/// `apt-cache show <pkg>` — read-only, never touches the dpkg lock. Only the
+/// first stanza (the newest available version) is parsed.
+async fn apt_info(package_id: &str) -> Option<PackageInfo> {
+    let output = Command::new("apt-cache")
+        .args(["show", package_id])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(parse_apt_cache_show(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_apt_cache_show(text: &str) -> PackageInfo {
+    let mut info = PackageInfo::default();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            break; // end of the first (newest) stanza
+        }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            continue; // continuation of a multi-line field (e.g. description body)
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        match key.trim().to_ascii_lowercase().as_str() {
+            "version" if info.version.is_none() => info.version = Some(value.to_string()),
+            "homepage" if info.homepage.is_none() => info.homepage = Some(value.to_string()),
+            "description" | "description-en" if info.description.is_none() => {
+                info.description = Some(value.to_string())
+            }
+            "installed-size" if info.installed_size.is_none() => {
+                info.installed_size = value.parse::<u64>().ok().map(|kb| kb * 1024)
+            }
+            _ => {}
+        }
+    }
+    info
+}
+
+fn apply_info(app: &mut CanonicalApp, variant: &mut AppVariant, info: PackageInfo) {
+    if app.description.is_none() {
+        app.description = info.description;
+    }
+    if app.homepage.is_none() {
+        app.homepage = info.homepage;
     }
     if app.license.is_none() {
-        app.license = value
-            .get("license")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                value
-                    .get("metadata")
-                    .and_then(|metadata| metadata.get("License"))
-                    .and_then(Value::as_str)
-            })
-            .map(ToString::to_string);
+        app.license = info.license;
     }
     if variant.version.is_none() {
-        variant.version = value
-            .get("version")
-            .and_then(Value::as_str)
-            .map(ToString::to_string);
+        variant.version = info.version;
     }
     if variant.installed_size.is_none() {
-        variant.installed_size = value
-            .get("metadata")
-            .and_then(|metadata| {
-                metadata
-                    .get("Installed")
-                    .or_else(|| metadata.get("Installed-Size"))
-            })
-            .and_then(Value::as_str)
-            .and_then(parse_size);
+        variant.installed_size = info.installed_size;
     }
     if app.tags.is_empty() {
         app.tags = default_tags(variant.source, &app.name, &app.summary);
@@ -663,16 +760,6 @@ fn result_score(app: &CanonicalApp, query: &str) -> u16 {
     text_score + source_score
 }
 
-fn source_from_uni(source: &str) -> Option<SourceKind> {
-    match source {
-        "apt" | "dpkg" | "system" => Some(SourceKind::System),
-        "flatpak" | "flathub" => Some(SourceKind::Flathub),
-        "github" | "gh" => Some(SourceKind::Github),
-        "appimage" => Some(SourceKind::Appimage),
-        _ => None,
-    }
-}
-
 fn source_arg(source: SourceKind) -> &'static str {
     match source {
         SourceKind::System => "apt",
@@ -740,10 +827,6 @@ fn parse_size(value: &str) -> Option<u64> {
         1.0
     };
     Some((number * multiplier) as u64)
-}
-
-fn uni_binary() -> String {
-    std::env::var("THALLIUM_STORE_UNI").unwrap_or_else(|_| "uni".to_string())
 }
 
 fn single_variant_app(
@@ -884,4 +967,129 @@ fn bundled_catalog() -> Vec<CanonicalApp> {
     });
 
     vec![gimp, zed, obs]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_repo_to_app_maps_search_result() {
+        let item = serde_json::json!({
+            "full_name": "zed-industries/zed",
+            "name": "zed",
+            "description": "A high-performance, multiplayer code editor",
+            "html_url": "https://github.com/zed-industries/zed",
+            "homepage": "https://zed.dev",
+            "stargazers_count": 42000,
+            "topics": ["editor", "rust"],
+        });
+
+        let app = github_repo_to_app(&item).expect("mapping should succeed");
+        assert_eq!(app.id, "github:zed-industries/zed");
+        assert_eq!(app.name, "zed");
+        assert_eq!(app.summary, "A high-performance, multiplayer code editor");
+        assert_eq!(app.homepage.as_deref(), Some("https://zed.dev"));
+        assert_eq!(app.repository.as_deref(), Some("zed-industries/zed"));
+        assert_eq!(app.rating, Some(42000.0));
+        assert!(app.tags.contains(&"editor".to_string()));
+        assert!(app.tags.contains(&"rust".to_string()));
+
+        let variant = app.variants.first().expect("single variant");
+        assert_eq!(variant.source, SourceKind::Github);
+        assert_eq!(variant.package_id, "zed-industries/zed");
+        assert_eq!(variant.repository.as_deref(), Some("zed-industries/zed"));
+    }
+
+    #[test]
+    fn github_repo_to_app_falls_back_to_html_url_and_default_summary() {
+        let item = serde_json::json!({
+            "full_name": "octocat/hello-world",
+        });
+
+        let app = github_repo_to_app(&item).expect("mapping should succeed");
+        assert_eq!(app.name, "octocat/hello-world");
+        assert_eq!(app.summary, "No summary provided");
+        assert_eq!(app.homepage, None);
+        assert_eq!(app.rating, None);
+    }
+
+    #[test]
+    fn github_repo_to_app_rejects_missing_full_name() {
+        let item = serde_json::json!({ "name": "hello-world" });
+        assert!(github_repo_to_app(&item).is_none());
+    }
+
+    #[test]
+    fn parse_flatpak_info_extracts_known_fields() {
+        let text = "\
+          ID: org.gimp.GIMP
+        Branch: stable
+       Version: 2.10.36
+       License: GPL-3.0-or-later
+     Installed: 350.2 MB
+";
+        let info = parse_flatpak_info(text);
+        assert_eq!(info.version.as_deref(), Some("2.10.36"));
+        assert_eq!(info.license.as_deref(), Some("GPL-3.0-or-later"));
+        assert_eq!(info.installed_size, Some((350.2 * 1024.0 * 1024.0) as u64));
+        assert_eq!(info.homepage, None);
+    }
+
+    #[test]
+    fn parse_apt_cache_show_parses_first_stanza_only() {
+        let text = "\
+Package: gimp
+Version: 2.10.34-1
+Installed-Size: 12345
+Homepage: https://www.gimp.org
+Description-en: GNU Image Manipulation Program
+ A longer wrapped description line.
+
+Package: gimp
+Version: 2.10.30-1
+Installed-Size: 9999
+";
+        let info = parse_apt_cache_show(text);
+        assert_eq!(info.version.as_deref(), Some("2.10.34-1"));
+        assert_eq!(info.homepage.as_deref(), Some("https://www.gimp.org"));
+        assert_eq!(
+            info.description.as_deref(),
+            Some("GNU Image Manipulation Program")
+        );
+        assert_eq!(info.installed_size, Some(12345 * 1024));
+    }
+
+    #[test]
+    fn apply_info_only_fills_unset_fields() {
+        let mut app = single_variant_app(
+            "test:app",
+            "App",
+            "summary",
+            SourceKind::System,
+            "app",
+            TrustLevel::SystemAccess,
+            true,
+        );
+        app.license = Some("Existing".to_string());
+        let mut variant = app.variants.remove(0);
+
+        apply_info(
+            &mut app,
+            &mut variant,
+            PackageInfo {
+                description: Some("New description".to_string()),
+                homepage: Some("https://example.com".to_string()),
+                license: Some("Should be ignored".to_string()),
+                version: Some("1.0.0".to_string()),
+                installed_size: Some(1024),
+            },
+        );
+
+        assert_eq!(app.description.as_deref(), Some("New description"));
+        assert_eq!(app.homepage.as_deref(), Some("https://example.com"));
+        assert_eq!(app.license.as_deref(), Some("Existing"));
+        assert_eq!(variant.version.as_deref(), Some("1.0.0"));
+        assert_eq!(variant.installed_size, Some(1024));
+    }
 }
