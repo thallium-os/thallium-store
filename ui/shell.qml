@@ -24,18 +24,21 @@ ShellRoot {
     property string uniHealth: ""
     property int activityFrame: 0
 
-    readonly property color cBase: "#0d0d0f"
-    readonly property color cDim: "#1e2326"
-    readonly property color cPanel: "#15191b"
-    readonly property color cLine: "#3a464c"
-    readonly property color cDead: "#232a2e"
-    readonly property color cGreen: "#a7c080"
-    readonly property color cGreenSoft: "#83c092"
-    readonly property color cFg: "#d3c6aa"
-    readonly property color cMuted: "#8f9a91"
-    readonly property color cRed: "#e67e80"
-    readonly property color cWarn: "#dbbc7f"
-    readonly property string fontBrand: "Unbounded"
+    readonly property color cBase: "#242628"
+    readonly property color cDim: "#35383c"
+    readonly property color cPanel: "#2d3033"
+    readonly property color cLine: "#45494f"
+    readonly property color cDead: "#202225"
+    readonly property color cGreen: "#0a84ff"
+    readonly property color cGreenSoft: "#31d158"
+    readonly property color cFg: "#f4f5f7"
+    readonly property color cMuted: "#a8afb8"
+    readonly property color cRed: "#ff453a"
+    readonly property color cWarn: "#ffb340"
+    readonly property color cBlue: "#0a84ff"
+    readonly property color cBlueSoft: "#263b53"
+    readonly property color cPurple: "#bf5af2"
+    readonly property string fontBrand: "Albert Sans"
     readonly property string fontHuman: "Albert Sans"
     readonly property string fontMono: "JetBrains Mono"
 
@@ -45,16 +48,16 @@ ShellRoot {
     }
 
     function pagePad() {
-        return Math.round(22 * uiScale())
+        return Math.round(28 * uiScale())
     }
 
     function actionColumnWidth() {
         const w = window && window.width ? window.width : 1180
-        return Math.max(190, Math.min(320, Math.round((w - 238) * 0.30)))
+        return Math.max(154, Math.min(230, Math.round((w - 238) * 0.22)))
     }
 
     function cardHeight() {
-        return Math.round(116 * uiScale())
+        return Math.round(126 * uiScale())
     }
 
     function isBusy() {
@@ -311,6 +314,60 @@ ShellRoot {
         return bytes + " B"
     }
 
+    function sizeLabel(app) {
+        const variant = recommendedVariant(app)
+        if (!variant)
+            return "Not provided"
+        if (variant.download_size && variant.download_size > 0)
+            return formatBytes(variant.download_size)
+        if (variant.installed_size && variant.installed_size > 0)
+            return formatBytes(variant.installed_size)
+        return "Not provided"
+    }
+
+    function compactDeveloper(app) {
+        if (!app)
+            return "Unknown"
+        if (app.developer && app.developer.length > 0)
+            return app.developer
+        const variant = recommendedVariant(app)
+        return variant ? sourceLabel(variant.source) : "Unknown"
+    }
+
+    function sourceAccent(source) {
+        if (source === "system" || source === "apt" || source === "dpkg")
+            return "#30d158"
+        if (source === "flathub" || source === "flatpak")
+            return "#0a84ff"
+        if (source === "github")
+            return "#bf5af2"
+        if (source === "appimage")
+            return "#ff9f0a"
+        return cBlue
+    }
+
+    function sourceSurface(source) {
+        if (source === "system" || source === "apt" || source === "dpkg")
+            return "#20372b"
+        if (source === "flathub" || source === "flatpak")
+            return "#263b53"
+        if (source === "github")
+            return "#382a49"
+        if (source === "appimage")
+            return "#49351f"
+        return cBlueSoft
+    }
+
+    function appAccent(app) {
+        const variant = recommendedVariant(app)
+        return variant ? sourceAccent(variant.source) : cBlue
+    }
+
+    function appSurface(app) {
+        const variant = recommendedVariant(app)
+        return app && app.installed ? "#203b33" : variant ? sourceSurface(variant.source) : cBlueSoft
+    }
+
     function joinTags(tags) {
         return tags && tags.length > 0 ? tags.join(", ") : "Not provided"
     }
@@ -413,41 +470,37 @@ ShellRoot {
         property string view: ""
         property string mark: "·"
         property bool hovered: false
+        readonly property bool selected: root.activeView === view || (view === "discover" && root.activeView === "details")
 
         Layout.fillWidth: true
-        height: 42
-        color: root.activeView === view || (view === "discover" && root.activeView === "details") ? root.cDim : hovered ? "#14191b" : "transparent"
-        border.color: root.activeView === view || (view === "discover" && root.activeView === "details") ? root.cLine : "transparent"
-        radius: 0
-        scale: hovered ? 1.01 : 1.0
+        height: 46
+        color: selected ? root.cBlueSoft : hovered ? root.cDim : "transparent"
+        border.color: selected ? "#3b5e85" : "transparent"
+        radius: 8
+        scale: hovered ? 1.005 : 1.0
 
         Behavior on color { ColorAnimation { duration: 140 } }
         Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
 
-        Rectangle {
-            width: 3
-            height: parent.height
-            color: root.activeView === nav.view || (nav.view === "discover" && root.activeView === "details") ? root.cGreen : "transparent"
-        }
-
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: 12
-            anchors.rightMargin: 10
-            spacing: 10
+            anchors.leftMargin: 14
+            anchors.rightMargin: 14
+            spacing: 12
             Label {
                 text: nav.mark
-                color: root.cGreen
+                color: nav.selected ? root.cBlue : root.cMuted
                 font.family: root.fontMono
-                font.pixelSize: 16
-                Layout.preferredWidth: 20
+                font.pixelSize: 17
+                Layout.preferredWidth: 24
+                horizontalAlignment: Text.AlignHCenter
             }
             Label {
                 text: nav.label
-                color: root.cFg
-                font.family: root.fontMono
-                font.pixelSize: 13
-                font.letterSpacing: 1.6
+                color: nav.selected ? root.cFg : root.cMuted
+                font.family: root.fontHuman
+                font.pixelSize: 14
+                font.bold: nav.selected
                 Layout.fillWidth: true
             }
         }
@@ -478,8 +531,8 @@ ShellRoot {
         Layout.fillWidth: true
         color: root.cPanel
         border.color: root.cLine
-        radius: 0
-        implicitHeight: sectionContent.implicitHeight + 28
+        radius: 8
+        implicitHeight: sectionContent.implicitHeight + 32
 
         default property alias content: sectionContent.data
 
@@ -492,10 +545,10 @@ ShellRoot {
             Label {
                 visible: panel.title.length > 0
                 text: panel.title
-                color: root.cGreen
-                font.family: root.fontMono
-                font.pixelSize: 13
-                font.letterSpacing: 1.8
+                color: root.cFg
+                font.family: root.fontHuman
+                font.pixelSize: 16
+                font.bold: true
                 Layout.fillWidth: true
             }
 
@@ -518,9 +571,9 @@ ShellRoot {
         Label {
             text: name
             color: root.cMuted
-            font.family: root.fontMono
+            font.family: root.fontHuman
             font.pixelSize: 12
-            font.letterSpacing: 1.2
+            font.bold: true
             Layout.preferredWidth: 128
         }
         Label {
@@ -533,6 +586,47 @@ ShellRoot {
         }
     }
 
+    component MetricBlock: ColumnLayout {
+        property string title: ""
+        property string value: ""
+        property string caption: ""
+        spacing: 4
+        Layout.fillWidth: true
+        Layout.minimumWidth: 86
+
+        Label {
+            text: title
+            color: root.cMuted
+            font.family: root.fontHuman
+            font.pixelSize: 11
+            font.bold: true
+            horizontalAlignment: Text.AlignHCenter
+            Layout.fillWidth: true
+            elide: Text.ElideRight
+        }
+
+        Label {
+            text: value && value.length > 0 ? value : "Not provided"
+            color: root.cFg
+            font.family: root.fontBrand
+            font.pixelSize: Math.round(22 * root.uiScale())
+            font.bold: true
+            horizontalAlignment: Text.AlignHCenter
+            Layout.fillWidth: true
+            elide: Text.ElideRight
+        }
+
+        Label {
+            text: caption
+            color: root.cMuted
+            font.family: root.fontHuman
+            font.pixelSize: 11
+            horizontalAlignment: Text.AlignHCenter
+            Layout.fillWidth: true
+            elide: Text.ElideRight
+        }
+    }
+
     component ActionButton: Rectangle {
         id: action
         property string label: ""
@@ -540,14 +634,16 @@ ShellRoot {
         property color textColor: root.cBase
         property bool hovered: false
         property bool pressed: false
+        property bool active: true
         signal clicked()
 
         height: 40
         implicitWidth: actionText.implicitWidth + 28
         color: pressed ? Qt.darker(fill, 1.18) : hovered ? Qt.lighter(fill, 1.08) : fill
-        border.color: fill
-        radius: 0
-        scale: pressed ? 0.985 : hovered ? 1.015 : 1.0
+        border.color: fill === root.cPanel || fill === root.cDim ? root.cLine : fill
+        radius: 8
+        scale: pressed ? 0.985 : hovered ? 1.008 : 1.0
+        opacity: active ? 1.0 : 0.62
 
         Behavior on color { ColorAnimation { duration: 120 } }
         Behavior on scale { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
@@ -559,10 +655,9 @@ ShellRoot {
             anchors.rightMargin: 8
             text: action.label
             color: action.textColor
-            font.family: root.fontMono
-            font.pixelSize: 12
+            font.family: root.fontHuman
+            font.pixelSize: 13
             font.bold: true
-            font.letterSpacing: 1.4
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
             elide: Text.ElideRight
@@ -570,8 +665,9 @@ ShellRoot {
 
         MouseArea {
             anchors.fill: parent
+            enabled: action.active
             hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
+            cursorShape: action.active ? Qt.PointingHandCursor : Qt.ArrowCursor
             onEntered: action.hovered = true
             onExited: {
                 action.hovered = false
@@ -600,32 +696,66 @@ ShellRoot {
                 spacing: 0
 
                 Rectangle {
-                    Layout.preferredWidth: 238
+                    Layout.preferredWidth: 246
                     Layout.fillHeight: true
-                    color: root.cBase
+                    color: root.cPanel
                     border.color: root.cLine
 
                     ColumnLayout {
                         anchors.fill: parent
-                        anchors.margins: 14
-                        spacing: 12
+                        anchors.margins: 18
+                        spacing: 14
 
-                        Label {
-                            text: "THALLIUM"
-                            color: root.cGreen
-                            font.family: root.fontBrand
-                            font.pixelSize: 24
-                            font.letterSpacing: 2.0
+                        RowLayout {
                             Layout.fillWidth: true
+                            spacing: 8
+                            Rectangle { Layout.preferredWidth: 13; Layout.preferredHeight: 13; radius: 7; color: "#ff5f57" }
+                            Rectangle { Layout.preferredWidth: 13; Layout.preferredHeight: 13; radius: 7; color: "#ffbd2e" }
+                            Rectangle { Layout.preferredWidth: 13; Layout.preferredHeight: 13; radius: 7; color: "#28c840" }
+                            Item { Layout.fillWidth: true }
                         }
 
-                        Label {
-                            text: "STORE"
-                            color: root.cFg
-                            font.family: root.fontMono
-                            font.pixelSize: 13
-                            font.letterSpacing: 4.0
+                        RowLayout {
                             Layout.fillWidth: true
+                            spacing: 12
+
+                            Rectangle {
+                                Layout.preferredWidth: 42
+                                Layout.preferredHeight: 42
+                                radius: 8
+                                color: root.cGreen
+
+                                Label {
+                                    anchors.centerIn: parent
+                                    text: "T"
+                                    color: "white"
+                                    font.family: root.fontBrand
+                                    font.pixelSize: 21
+                                    font.bold: true
+                                }
+                            }
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 0
+
+                                Label {
+                                    text: "Thallium"
+                                    color: root.cFg
+                                    font.family: root.fontBrand
+                                    font.pixelSize: 22
+                                    font.bold: true
+                                    Layout.fillWidth: true
+                                }
+
+                                Label {
+                                    text: "Store"
+                                    color: root.cMuted
+                                    font.family: root.fontHuman
+                                    font.pixelSize: 13
+                                    Layout.fillWidth: true
+                                }
+                            }
                         }
 
                         Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
@@ -639,24 +769,64 @@ ShellRoot {
                             Layout.fillWidth: true
                         }
 
-                        NavButton { label: "DISCOVER"; view: "discover"; mark: "▣" }
-                        NavButton { label: "QUEUE"; view: "queue"; mark: "▤" }
-                        NavButton { label: "INSTALLED"; view: "installed"; mark: "◆" }
-                        NavButton { label: "UPDATES"; view: "updates"; mark: "⇧" }
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 38
+                            radius: 8
+                            color: root.cDim
+                            border.color: sidebarSearch.activeFocus ? root.cBlue : "transparent"
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 12
+                                anchors.rightMargin: 12
+                                spacing: 8
+
+                                Label {
+                                    text: "⌕"
+                                    color: root.cMuted
+                                    font.family: root.fontMono
+                                    font.pixelSize: 16
+                                }
+
+                                TextField {
+                                    id: sidebarSearch
+                                    Layout.fillWidth: true
+                                    text: root.query
+                                    placeholderText: "Search"
+                                    color: root.cFg
+                                    placeholderTextColor: root.cMuted
+                                    background: Rectangle { color: "transparent" }
+                                    font.family: root.fontHuman
+                                    font.pixelSize: 14
+                                    onTextChanged: {
+                                        root.query = text
+                                        root.activeView = "discover"
+                                        searchDebounce.restart()
+                                    }
+                                }
+                            }
+                        }
+
+                        NavButton { label: "Discover"; view: "discover"; mark: "⌕" }
+                        NavButton { label: "Queue"; view: "queue"; mark: "▤" }
+                        NavButton { label: "Installed"; view: "installed"; mark: "✓" }
+                        NavButton { label: "Updates"; view: "updates"; mark: "↻" }
 
                         Item { Layout.fillHeight: true }
 
                         Rectangle {
                             Layout.fillWidth: true
-                            height: 170
-                            color: root.cPanel
+                            height: 164
+                            color: root.cBase
                             border.color: root.isBusy() ? root.cGreen : root.cLine
+                            radius: 8
                             clip: true
 
                             ColumnLayout {
                                 anchors.fill: parent
-                                anchors.margins: 12
-                                spacing: 7
+                                anchors.margins: 14
+                                spacing: 8
 
                                 RowLayout {
                                     Layout.fillWidth: true
@@ -669,11 +839,11 @@ ShellRoot {
                                         Layout.preferredWidth: 24
                                     }
                                     Label {
-                                        text: "ACTIVITY"
-                                        color: root.cGreen
-                                        font.family: root.fontMono
-                                        font.pixelSize: 12
-                                        font.letterSpacing: 1.8
+                                        text: "Activity"
+                                        color: root.cFg
+                                        font.family: root.fontHuman
+                                        font.pixelSize: 14
+                                        font.bold: true
                                         Layout.fillWidth: true
                                     }
                                 }
@@ -690,14 +860,15 @@ ShellRoot {
                                 Rectangle {
                                     Layout.fillWidth: true
                                     height: 5
-                                    color: root.cDim
-                                    border.color: root.cLine
+                                    color: root.cDead
+                                    radius: 3
                                     clip: true
 
                                     Rectangle {
                                         width: parent.width * 0.38
                                         height: parent.height
                                         color: root.cGreen
+                                        radius: 3
                                         opacity: root.isBusy() ? 0.9 : 0.25
                                         x: root.isBusy() ? ((root.activityFrame * 17) % Math.max(1, parent.width + width)) - width : 0
 
@@ -708,11 +879,11 @@ ShellRoot {
                                 Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
 
                                 Label {
-                                    text: "MODE"
-                                    color: root.cGreen
-                                    font.family: root.fontMono
-                                    font.pixelSize: 10
-                                    font.letterSpacing: 1.6
+                                    text: "Mode"
+                                    color: root.cFg
+                                    font.family: root.fontHuman
+                                    font.pixelSize: 12
+                                    font.bold: true
                                     Layout.fillWidth: true
                                 }
 
@@ -743,6 +914,31 @@ ShellRoot {
                             Behavior on y { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                         }
                         Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            color: root.cBase
+                        }
+
+                        Rectangle {
+                            width: parent.width * 0.82
+                            height: Math.max(220, parent.height * 0.24)
+                            radius: 24
+                            x: parent.width * 0.10
+                            y: parent.height - height + (root.isBusy() ? Math.sin(root.activityFrame / 5) * 12 : 0)
+                            opacity: root.isBusy() ? 0.30 : 0.14
+                            gradient: Gradient {
+                                orientation: Gradient.Horizontal
+                                GradientStop { position: 0.0; color: "#24d6c8" }
+                                GradientStop { position: 0.34; color: "#7be36f" }
+                                GradientStop { position: 0.68; color: "#0a84ff" }
+                                GradientStop { position: 1.0; color: "#bf5af2" }
+                            }
+
+                            Behavior on y { NumberAnimation { duration: 160; easing.type: Easing.OutSine } }
+                            Behavior on opacity { NumberAnimation { duration: 180 } }
+                        }
+
                         ColumnLayout {
                             anchors.fill: parent
                             anchors.margins: root.pagePad()
@@ -756,25 +952,26 @@ ShellRoot {
                                     Layout.fillWidth: true
                                     spacing: 3
                                     Label {
-                                        text: "Discover Applications"
+                                        text: root.query.length > 0 ? "Search Results" : "Discover"
                                         color: root.cFg
                                         font.family: root.fontBrand
-                                        font.pixelSize: Math.round(28 * root.uiScale())
+                                        font.pixelSize: Math.round(34 * root.uiScale())
+                                        font.bold: true
                                         Layout.fillWidth: true
                                     }
                                     Label {
-                                        text: "APT/System, Flathub, GitHub, and curated AppImage sources merged into one catalog."
+                                        text: root.results.length + " apps found across Thallium sources."
                                         color: root.cMuted
                                         font.family: root.fontHuman
-                                        font.pixelSize: 14
+                                        font.pixelSize: 15
                                         Layout.fillWidth: true
                                     }
                                 }
 
                                 ActionButton {
-                                    label: "REFRESH"
+                                    label: "Refresh"
                                     fill: root.cDim
-                                    textColor: root.cGreen
+                                    textColor: root.cBlue
                                     Layout.preferredWidth: Math.min(120, root.actionColumnWidth())
                                     onClicked: root.searchNow()
                                 }
@@ -782,19 +979,32 @@ ShellRoot {
 
                             Rectangle {
                                 Layout.fillWidth: true
-                                height: 48
+                                height: 52
+                                radius: 8
                                 color: root.cDim
-                                border.color: root.cLine
+                                border.color: searchField.activeFocus ? root.cBlue : root.cLine
+                                clip: true
+
+                                Rectangle {
+                                    width: parent.width * 0.28
+                                    height: parent.height
+                                    radius: 8
+                                    color: "#0a84ff"
+                                    opacity: root.requestRunning && root.activeMethod === "catalog.search" ? 0.16 : 0
+                                    x: root.requestRunning && root.activeMethod === "catalog.search" ? ((root.activityFrame * 20) % Math.max(1, parent.width + width)) - width : -width
+
+                                    Behavior on opacity { NumberAnimation { duration: 160 } }
+                                }
 
                                 RowLayout {
                                     anchors.fill: parent
-                                    anchors.leftMargin: 12
-                                    anchors.rightMargin: 12
-                                    spacing: 10
+                                    anchors.leftMargin: 16
+                                    anchors.rightMargin: 16
+                                    spacing: 12
 
                                     Label {
                                         text: "⌕"
-                                        color: root.cGreen
+                                        color: root.cMuted
                                         font.family: root.fontMono
                                         font.pixelSize: 20
                                     }
@@ -807,7 +1017,7 @@ ShellRoot {
                                         placeholderTextColor: root.cMuted
                                         background: Rectangle { color: "transparent" }
                                         font.family: root.fontHuman
-                                        font.pixelSize: 17
+                                        font.pixelSize: 16
                                         onTextChanged: {
                                             root.query = text
                                             searchDebounce.restart()
@@ -825,16 +1035,17 @@ ShellRoot {
                                     delegate: Rectangle {
                                         height: 26
                                         implicitWidth: providerText.implicitWidth + 18
-                                        color: modelData.state === "ready" ? "#1c2b20" : "#2d2618"
-                                        border.color: modelData.state === "ready" ? root.cGreen : root.cWarn
+                                        radius: 8
+                                        color: modelData.state === "ready" ? "#203b33" : "#493a1f"
+                                        border.color: modelData.state === "ready" ? "#2f6f55" : "#8d6b2f"
                                         Label {
                                             id: providerText
                                             anchors.centerIn: parent
                                             text: root.sourceLabel(modelData.source) + " · " + modelData.state
                                             color: modelData.state === "ready" ? root.cGreen : root.cWarn
-                                            font.family: root.fontMono
-                                            font.pixelSize: 11
-                                            font.letterSpacing: 1.2
+                                            font.family: root.fontHuman
+                                            font.pixelSize: 12
+                                            font.bold: true
                                         }
                                     }
                                 }
@@ -846,25 +1057,40 @@ ShellRoot {
                                 Layout.fillHeight: true
                                 clip: true
 
-                                ListView {
-                                    id: resultList
+                                GridView {
+                                    id: resultGrid
+                                    width: parent.width
+                                    height: parent.height
                                     model: root.results
-                                    spacing: 10
+                                    cellWidth: {
+                                        const columns = Math.max(1, Math.floor(width / 320))
+                                        return Math.floor(width / columns)
+                                    }
+                                    cellHeight: Math.round(132 * root.uiScale())
                                     delegate: Rectangle {
                                         id: appCard
                                         property var app: modelData
 
-                                        width: resultList.width
-                                        height: Math.max(112, root.cardHeight())
+                                        width: resultGrid.cellWidth - 14
+                                        height: Math.round(116 * root.uiScale())
                                         color: root.cPanel
-                                        border.color: resultHover.hovered ? root.cGreen : root.cLine
-                                        radius: 0
+                                        border.color: resultHover.hovered ? "#5c708a" : root.cLine
+                                        radius: 8
                                         opacity: 0
-                                        transform: Translate { id: resultSlide; y: 8 }
+                                        x: 7
+                                        y: 4
+                                        scale: resultHover.hovered ? 1.018 : 1.0
+                                        transform: Translate { id: resultSlide; y: resultHover.hovered ? -4 : 8 }
+                                        clip: true
 
                                         HoverHandler {
                                             id: resultHover
                                         }
+
+                                        Behavior on border.color { ColorAnimation { duration: 140 } }
+                                        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+                                        Behavior on color { ColorAnimation { duration: 140 } }
+                                        Behavior on y { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
 
                                         Component.onCompleted: {
                                             resultFade.start()
@@ -892,41 +1118,56 @@ ShellRoot {
                                         }
 
                                         Rectangle {
-                                            width: resultHover.hovered ? 7 : 3
+                                            width: parent.width
                                             height: parent.height
-                                            color: appCard.app.installed ? root.cGreenSoft : root.cGreen
+                                            opacity: resultHover.hovered ? 0.16 : 0.08
+                                            gradient: Gradient {
+                                                orientation: Gradient.Horizontal
+                                                GradientStop { position: 0.0; color: root.appSurface(appCard.app) }
+                                                GradientStop { position: 1.0; color: "transparent" }
+                                            }
 
-                                            Behavior on width { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+                                            Behavior on opacity { NumberAnimation { duration: 140 } }
+                                        }
+
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            acceptedButtons: Qt.LeftButton
+                                            onClicked: root.selectApp(appCard.app)
                                         }
 
                                         RowLayout {
                                             anchors.fill: parent
-                                            anchors.margins: 14
+                                            anchors.margins: 16
                                             spacing: 14
 
                                             Rectangle {
-                                                Layout.preferredWidth: Math.round(62 * root.uiScale())
-                                                Layout.preferredHeight: Math.round(62 * root.uiScale())
-                                                color: root.cDim
-                                                border.color: root.cLine
+                                                Layout.preferredWidth: Math.round(72 * root.uiScale())
+                                                Layout.preferredHeight: Math.round(72 * root.uiScale())
+                                                radius: 16
+                                                color: root.appSurface(appCard.app)
+                                                border.color: root.appAccent(appCard.app)
                                                 Label {
                                                     anchors.centerIn: parent
                                                     text: appCard.app.name.substring(0, 1).toUpperCase()
-                                                    color: root.cGreen
+                                                    color: root.appAccent(appCard.app)
                                                     font.family: root.fontBrand
-                                                    font.pixelSize: Math.round(24 * root.uiScale())
+                                                    font.pixelSize: Math.round(30 * root.uiScale())
+                                                    font.bold: true
                                                 }
                                             }
 
                                             ColumnLayout {
                                                 Layout.fillWidth: true
                                                 Layout.minimumWidth: 0
-                                                spacing: 5
+                                                Layout.alignment: Qt.AlignVCenter
+                                                spacing: 6
                                                 Label {
                                                     text: appCard.app.name
                                                     color: root.cFg
                                                     font.family: root.fontHuman
-                                                    font.pixelSize: Math.round(18 * root.uiScale())
+                                                    font.pixelSize: Math.round(16 * root.uiScale())
                                                     font.bold: true
                                                     elide: Text.ElideRight
                                                     Layout.fillWidth: true
@@ -935,51 +1176,46 @@ ShellRoot {
                                                     text: appCard.app.summary
                                                     color: root.cMuted
                                                     font.family: root.fontHuman
-                                                    font.pixelSize: Math.round(14 * root.uiScale())
+                                                    font.pixelSize: Math.round(12 * root.uiScale())
+                                                    lineHeight: 0.92
+                                                    maximumLineCount: 2
+                                                    wrapMode: Text.WordWrap
                                                     elide: Text.ElideRight
                                                     Layout.fillWidth: true
                                                 }
-                                                Flow {
+                                                RowLayout {
                                                     Layout.fillWidth: true
                                                     spacing: 8
-                                                    Repeater {
-                                                        model: appCard.app.variants
-                                                        delegate: Rectangle {
-                                                            height: 24
-                                                            implicitWidth: sourceChip.implicitWidth + 16
-                                                            color: modelData.id === appCard.app.recommended_variant_id ? "#1c2b20" : root.cDim
-                                                            border.color: root.cLine
-                                                            Label {
-                                                                id: sourceChip
-                                                                anchors.centerIn: parent
-                                                                text: root.sourceLabel(modelData.source)
-                                                                color: root.cGreen
-                                                                font.family: root.fontMono
-                                                                font.pixelSize: 11
-                                                            }
+                                                    Rectangle {
+                                                        height: 22
+                                                        implicitWidth: sourceChip.implicitWidth + 16
+                                                        radius: 11
+                                                        color: root.cDim
+                                                        border.color: root.cLine
+                                                        Label {
+                                                            id: sourceChip
+                                                            anchors.centerIn: parent
+                                                            text: root.recommendedVariant(appCard.app) ? root.sourceLabel(root.recommendedVariant(appCard.app).source) : "Source"
+                                                            color: root.cMuted
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 10
+                                                            font.bold: true
                                                         }
                                                     }
+                                                    Item { Layout.fillWidth: true }
                                                 }
                                             }
 
-                                            ColumnLayout {
-                                                Layout.preferredWidth: root.actionColumnWidth()
-                                                Layout.maximumWidth: root.actionColumnWidth()
+                                            ActionButton {
+                                                label: appCard.app.installed ? "Installed" : "Get"
+                                                fill: appCard.app.installed ? root.cDim : root.cBlue
+                                                textColor: appCard.app.installed ? root.cMuted : "white"
+                                                active: !appCard.app.installed
+                                                Layout.preferredWidth: 86
                                                 Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
-                                                spacing: 8
-                                                ActionButton {
-                                                    label: "DETAILS"
-                                                    fill: root.cDim
-                                                    textColor: root.cGreen
-                                                    Layout.fillWidth: true
-                                                    onClicked: root.selectApp(appCard.app)
-                                                }
-                                                ActionButton {
-                                                    label: appCard.app.installed ? "OPEN" : "INSTALL"
-                                                    fill: root.cGreen
-                                                    textColor: root.cBase
-                                                    Layout.fillWidth: true
-                                                    onClicked: root.enqueueInstall(appCard.app)
+                                                onClicked: {
+                                                    if (!appCard.app.installed)
+                                                        root.enqueueInstall(appCard.app)
                                                 }
                                             }
                                         }
@@ -1013,91 +1249,141 @@ ShellRoot {
 
                                 Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
 
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 12
-                                    ActionButton {
-                                        label: "BACK"
-                                        fill: root.cDim
-                                        textColor: root.cGreen
-                                        onClicked: root.activeView = "discover"
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                    ActionButton {
-                                        label: root.selectedApp && root.selectedApp.installed ? "UNINSTALL" : "INSTALL RECOMMENDED"
-                                        fill: root.selectedApp && root.selectedApp.installed ? root.cRed : root.cGreen
-                                        textColor: root.cBase
-                                        Layout.preferredWidth: Math.min(260, root.actionColumnWidth())
-                                        onClicked: {
-                                            if (root.selectedApp && root.selectedApp.installed)
-                                                root.enqueueUninstall(root.selectedApp)
-                                            else
-                                                root.enqueueInstall(root.selectedApp)
-                                        }
-                                    }
-                                }
-
                                 Rectangle {
                                     Layout.fillWidth: true
-                                    height: Math.max(154, Math.round(168 * root.uiScale()))
+                                    height: Math.max(292, Math.round(320 * root.uiScale()))
                                     color: root.cPanel
                                     border.color: root.cLine
+                                    radius: 8
                                     clip: true
 
-                                    RowLayout {
+                                    ColumnLayout {
                                         anchors.fill: parent
-                                        anchors.margins: 18
+                                        anchors.margins: 24
                                         spacing: 18
 
-                                        Rectangle {
-                                            Layout.preferredWidth: Math.round(96 * root.uiScale())
-                                            Layout.preferredHeight: Math.round(96 * root.uiScale())
-                                            color: root.cDim
-                                            border.color: root.cLine
-                                            Label {
-                                                anchors.centerIn: parent
-                                                text: root.selectedApp ? root.selectedApp.name.substring(0, 1).toUpperCase() : ""
-                                                color: root.cGreen
-                                                font.family: root.fontBrand
-                                                font.pixelSize: Math.round(34 * root.uiScale())
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 12
+
+                                            ActionButton {
+                                                label: "Back"
+                                                fill: root.cDim
+                                                textColor: root.cFg
+                                                Layout.preferredWidth: 74
+                                                onClicked: root.activeView = "discover"
+                                            }
+
+                                            Item { Layout.fillWidth: true }
+
+                                            ActionButton {
+                                                label: root.selectedApp && root.selectedApp.installed ? "Uninstall" : "Get"
+                                                fill: root.selectedApp && root.selectedApp.installed ? root.cRed : root.cBlue
+                                                textColor: "white"
+                                                Layout.preferredWidth: 116
+                                                onClicked: {
+                                                    if (root.selectedApp && root.selectedApp.installed)
+                                                        root.enqueueUninstall(root.selectedApp)
+                                                    else
+                                                        root.enqueueInstall(root.selectedApp)
+                                                }
                                             }
                                         }
 
-                                        ColumnLayout {
+                                        RowLayout {
                                             Layout.fillWidth: true
-                                            Layout.minimumWidth: 0
-                                            spacing: 8
-                                            Label {
-                                                text: root.selectedApp ? root.selectedApp.name : ""
-                                                color: root.cFg
-                                                font.family: root.fontBrand
-                                                font.pixelSize: Math.round(30 * root.uiScale())
-                                                Layout.fillWidth: true
-                                                elide: Text.ElideRight
+                                            spacing: 28
+
+                                            Rectangle {
+                                                Layout.preferredWidth: Math.round(132 * root.uiScale())
+                                                Layout.preferredHeight: Math.round(132 * root.uiScale())
+                                                radius: 26
+                                                color: root.cBlueSoft
+                                                border.color: "#3b5e85"
+                                                Label {
+                                                    anchors.centerIn: parent
+                                                    text: root.selectedApp ? root.selectedApp.name.substring(0, 1).toUpperCase() : ""
+                                                    color: root.cBlue
+                                                    font.family: root.fontBrand
+                                                    font.pixelSize: Math.round(54 * root.uiScale())
+                                                    font.bold: true
+                                                }
                                             }
-                                            Label {
-                                                text: root.selectedApp ? root.selectedApp.summary : ""
-                                                color: root.cMuted
-                                                font.family: root.fontHuman
-                                                font.pixelSize: 16
-                                                wrapMode: Text.WordWrap
+
+                                            ColumnLayout {
                                                 Layout.fillWidth: true
+                                                Layout.minimumWidth: 0
+                                                Layout.alignment: Qt.AlignVCenter
+                                                spacing: 8
+                                                Label {
+                                                    text: root.selectedApp ? root.selectedApp.name : ""
+                                                    color: root.cFg
+                                                    font.family: root.fontBrand
+                                                    font.pixelSize: Math.round(34 * root.uiScale())
+                                                    font.bold: true
+                                                    Layout.fillWidth: true
+                                                    elide: Text.ElideRight
+                                                }
+                                                Label {
+                                                    text: root.selectedApp ? root.selectedApp.summary : ""
+                                                    color: root.cMuted
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: 17
+                                                    wrapMode: Text.WordWrap
+                                                    Layout.fillWidth: true
+                                                }
+                                                Label {
+                                                    text: root.selectedApp ? root.compactDeveloper(root.selectedApp) : ""
+                                                    color: root.cBlue
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: 14
+                                                    font.bold: true
+                                                    Layout.fillWidth: true
+                                                    elide: Text.ElideRight
+                                                }
                                             }
-                                            Label {
-                                                text: root.selectedApp ? "Recommended source: " + (root.recommendedVariant(root.selectedApp) ? root.sourceLabel(root.recommendedVariant(root.selectedApp).source) : "None") : ""
-                                                color: root.cGreen
-                                                font.family: root.fontMono
-                                                font.pixelSize: 12
-                                                font.letterSpacing: 1.2
-                                                Layout.fillWidth: true
+                                        }
+
+                                        Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
+
+                                        GridLayout {
+                                            Layout.fillWidth: true
+                                            columns: detailsScroll.availableWidth > 860 ? 5 : 3
+                                            rowSpacing: 16
+                                            columnSpacing: 20
+
+                                            MetricBlock {
+                                                title: "Rating"
+                                                value: root.selectedApp && root.selectedApp.rating ? Math.round(root.selectedApp.rating) + "★" : "No rating"
+                                                caption: root.selectedApp && root.selectedApp.rating ? "Catalog" : ""
+                                            }
+                                            MetricBlock {
+                                                title: "Source"
+                                                value: root.recommendedVariant(root.selectedApp) ? root.sourceLabel(root.recommendedVariant(root.selectedApp).source) : "Unknown"
+                                                caption: "Recommended"
+                                            }
+                                            MetricBlock {
+                                                title: "Trust"
+                                                value: root.recommendedVariant(root.selectedApp) ? root.trustLabel(root.recommendedVariant(root.selectedApp).trust) : "Unknown"
+                                                caption: root.recommendedVariant(root.selectedApp) && root.recommendedVariant(root.selectedApp).verified ? "Verified" : "Metadata"
+                                            }
+                                            MetricBlock {
+                                                title: "Package"
+                                                value: root.recommendedVariant(root.selectedApp) ? root.recommendedVariant(root.selectedApp).package_id : ""
+                                                caption: root.recommendedVariant(root.selectedApp) ? root.recommendedVariant(root.selectedApp).version || "Version unknown" : ""
+                                            }
+                                            MetricBlock {
+                                                title: "Size"
+                                                value: root.sizeLabel(root.selectedApp)
+                                                caption: "Download"
                                             }
                                         }
                                     }
                                 }
 
                                 SectionPanel {
-                                    title: "SCREENSHOTS"
-                                    subtitle: "Remote screenshots load when the provider supplies safe HTTPS image metadata."
+                                    title: "Preview"
+                                    subtitle: "Screenshots appear when catalog metadata includes safe HTTPS image links."
                                     Layout.preferredHeight: Math.max(236, Math.round(254 * root.uiScale()))
 
                                     ScrollView {
@@ -1115,6 +1401,7 @@ ShellRoot {
                                                     Layout.preferredHeight: 168
                                                     color: root.cDim
                                                     border.color: root.cLine
+                                                    radius: 8
                                                     clip: true
 
                                                     Image {
@@ -1130,11 +1417,11 @@ ShellRoot {
                                                         width: parent.width - 36
                                                         visible: modelData === "placeholder" || shotImage.status === Image.Error
                                                         Label {
-                                                            text: "NO PREVIEW"
-                                                            color: root.cGreen
-                                                            font.family: root.fontMono
+                                                            text: "No Preview"
+                                                            color: root.cMuted
+                                                            font.family: root.fontHuman
                                                             font.pixelSize: 13
-                                                            font.letterSpacing: 2.0
+                                                            font.bold: true
                                                             horizontalAlignment: Text.AlignHCenter
                                                             Layout.fillWidth: true
                                                         }
@@ -1161,74 +1448,36 @@ ShellRoot {
                                     }
                                 }
 
-                                GridLayout {
-                                    Layout.fillWidth: true
-                                    columns: detailsScroll.availableWidth > 820 ? 2 : 1
-                                    columnSpacing: 16
-                                    rowSpacing: 16
-
-                                    SectionPanel {
-                                        title: "DETAILS"
-                                        Layout.fillWidth: true
-                                        StatRow { name: "DEVELOPER"; value: root.selectedApp ? root.selectedApp.developer : "" }
-                                        StatRow { name: "LICENSE"; value: root.selectedApp ? root.selectedApp.license : "" }
-                                        StatRow { name: "HOMEPAGE"; value: root.selectedApp ? root.selectedApp.homepage : "" }
-                                        StatRow { name: "REPOSITORY"; value: root.selectedApp ? root.selectedApp.repository : "" }
-                                        StatRow { name: "TAGS"; value: root.selectedApp ? root.joinTags(root.selectedApp.tags) : "" }
-                                        StatRow { name: "RATING"; value: root.selectedApp && root.selectedApp.rating ? Math.round(root.selectedApp.rating) + " stars" : "" }
-                                        StatRow { name: "APP ID"; value: root.selectedApp ? root.selectedApp.id : "" }
-                                        StatRow { name: "MERGE"; value: root.selectedApp ? Math.round(root.selectedApp.merge_confidence * 100) + "% confidence" : "" }
-                                    }
-
-                                    SectionPanel {
-                                        title: "SECURITY"
-                                        Layout.fillWidth: true
-                                        Label {
-                                            text: root.recommendedVariant(root.selectedApp) ? root.trustLabel(root.recommendedVariant(root.selectedApp).trust) : "Unknown"
-                                            color: root.trustColor(root.recommendedVariant(root.selectedApp) ? root.recommendedVariant(root.selectedApp).trust : "")
-                                            font.family: root.fontBrand
-                                            font.pixelSize: Math.round(22 * root.uiScale())
-                                            Layout.fillWidth: true
-                                        }
-                                        Label {
-                                            text: root.recommendedVariant(root.selectedApp) && root.recommendedVariant(root.selectedApp).source === "flathub"
-                                                  ? "Flatpak apps are sandboxed by default. Exact permissions require provider metadata."
-                                                  : root.recommendedVariant(root.selectedApp) && root.recommendedVariant(root.selectedApp).source === "system"
-                                                    ? "System packages integrate directly with Debian/Thallium and are not sandboxed."
-                                                    : root.recommendedVariant(root.selectedApp) && root.recommendedVariant(root.selectedApp).source === "appimage"
-                                                      ? "AppImages are portable binaries installed under the user's UNI AppImage directory. Treat them like native desktop apps."
-                                                      : "GitHub releases are shown as unverified unless curated by Thallium metadata."
-                                            color: root.cMuted
-                                            font.family: root.fontHuman
-                                            font.pixelSize: 14
-                                            wrapMode: Text.WordWrap
-                                            Layout.fillWidth: true
-                                        }
-                                    }
+                                SectionPanel {
+                                    title: "App Information"
+                                    subtitle: root.recommendedVariant(root.selectedApp) && root.recommendedVariant(root.selectedApp).source === "flathub"
+                                              ? "Flatpak apps are sandboxed by default. Exact permissions require provider metadata."
+                                              : root.recommendedVariant(root.selectedApp) && root.recommendedVariant(root.selectedApp).source === "system"
+                                                ? "System packages integrate directly with Debian/Thallium and are not sandboxed."
+                                                : root.recommendedVariant(root.selectedApp) && root.recommendedVariant(root.selectedApp).source === "appimage"
+                                                  ? "AppImages are portable binaries installed under the user's UNI AppImage directory."
+                                                  : "GitHub releases are shown as unverified unless curated by Thallium metadata."
+                                    StatRow { name: "Source"; value: root.recommendedVariant(root.selectedApp) ? root.sourceLabel(root.recommendedVariant(root.selectedApp).source) : "" }
+                                    StatRow { name: "Package"; value: root.recommendedVariant(root.selectedApp) ? root.recommendedVariant(root.selectedApp).package_id : "" }
+                                    StatRow { name: "Version"; value: root.recommendedVariant(root.selectedApp) ? root.recommendedVariant(root.selectedApp).version || "" : "" }
+                                    StatRow { name: "Trust"; value: root.recommendedVariant(root.selectedApp) ? root.trustLabel(root.recommendedVariant(root.selectedApp).trust) : "" }
+                                    StatRow { name: "Developer"; value: root.selectedApp ? root.selectedApp.developer || "" : "" }
+                                    StatRow { name: "Website"; value: root.selectedApp ? root.selectedApp.homepage || root.selectedApp.repository || "" : "" }
+                                    StatRow { name: "Size"; value: root.sizeLabel(root.selectedApp) }
+                                    StatRow { name: "Command"; value: root.recommendedVariant(root.selectedApp) ? root.commandPreview(root.recommendedVariant(root.selectedApp)) : "" }
                                 }
 
                                 SectionPanel {
-                                    title: "INSTALLATION"
-                                    subtitle: "Exact source and UNI command for this selected application."
-                                    StatRow { name: "SOURCE"; value: root.recommendedVariant(root.selectedApp) ? root.sourceLabel(root.recommendedVariant(root.selectedApp).source) : "" }
-                                    StatRow { name: "WHERE"; value: root.recommendedVariant(root.selectedApp) ? root.recommendedVariant(root.selectedApp).install_location : "" }
-                                    StatRow { name: "PACKAGE"; value: root.recommendedVariant(root.selectedApp) ? root.recommendedVariant(root.selectedApp).package_id : "" }
-                                    StatRow { name: "VERSION"; value: root.recommendedVariant(root.selectedApp) ? root.recommendedVariant(root.selectedApp).version : "" }
-                                    StatRow { name: "DOWNLOAD"; value: root.recommendedVariant(root.selectedApp) ? root.formatBytes(root.recommendedVariant(root.selectedApp).download_size) : "" }
-                                    StatRow { name: "INSTALLED"; value: root.recommendedVariant(root.selectedApp) ? root.formatBytes(root.recommendedVariant(root.selectedApp).installed_size) : "" }
-                                    StatRow { name: "COMMAND"; value: root.recommendedVariant(root.selectedApp) ? root.commandPreview(root.recommendedVariant(root.selectedApp)) : "" }
-                                }
-
-                                SectionPanel {
-                                    title: "SOURCES / PLATFORMS"
-                                    subtitle: "Choose the platform UNI should use. The recommended source is selected by safety-first ranking."
+                                    title: "Available Sources"
+                                    subtitle: "Choose the platform UNI should use. The recommended source is selected first."
                                     Repeater {
                                         model: root.selectedApp ? root.selectedApp.variants : []
                                         delegate: Rectangle {
                                             Layout.fillWidth: true
                                             height: Math.max(138, Math.round(132 * root.uiScale()))
-                                            color: modelData.id === root.selectedApp.recommended_variant_id ? "#1c2b20" : root.cDim
-                                            border.color: modelData.id === root.selectedApp.recommended_variant_id ? root.cGreen : root.cLine
+                                            color: modelData.id === root.selectedApp.recommended_variant_id ? "#203b33" : root.cPanel
+                                            border.color: modelData.id === root.selectedApp.recommended_variant_id ? "#2f6f55" : root.cLine
+                                            radius: 8
                                             clip: true
 
                                             RowLayout {
@@ -1244,6 +1493,7 @@ ShellRoot {
                                                         color: root.cFg
                                                         font.family: root.fontBrand
                                                         font.pixelSize: 17
+                                                        font.bold: true
                                                     }
                                                     Label {
                                                         text: root.platformLabel(modelData.source)
@@ -1301,9 +1551,9 @@ ShellRoot {
                                                 }
 
                                                 ActionButton {
-                                                    label: root.selectedApp && root.selectedApp.installed ? "UNINSTALL" : modelData.id === root.selectedApp.recommended_variant_id ? "INSTALL" : "USE SOURCE"
+                                                    label: root.selectedApp && root.selectedApp.installed ? "Uninstall" : modelData.id === root.selectedApp.recommended_variant_id ? "Get" : "Use Source"
                                                     fill: root.selectedApp && root.selectedApp.installed ? root.cRed : modelData.id === root.selectedApp.recommended_variant_id ? root.cGreen : root.cPanel
-                                                    textColor: root.selectedApp && root.selectedApp.installed ? root.cBase : modelData.id === root.selectedApp.recommended_variant_id ? root.cBase : root.cGreen
+                                                    textColor: root.selectedApp && root.selectedApp.installed ? "white" : modelData.id === root.selectedApp.recommended_variant_id ? "white" : root.cBlue
                                                     Layout.preferredWidth: Math.min(220, root.actionColumnWidth())
                                                     Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
                                                     onClicked: {
@@ -1319,7 +1569,7 @@ ShellRoot {
                                 }
 
                                 SectionPanel {
-                                    title: "ABOUT"
+                                    title: "About"
                                     Label {
                                         text: root.selectedApp && root.selectedApp.description ? root.selectedApp.description : "No long description was provided by this source."
                                         color: root.cFg
@@ -1347,17 +1597,29 @@ ShellRoot {
 
                             RowLayout {
                                 Layout.fillWidth: true
-                                Label {
-                                    text: "Operation Queue"
-                                    color: root.cFg
-                                    font.family: root.fontBrand
-                                    font.pixelSize: Math.round(28 * root.uiScale())
+                                ColumnLayout {
                                     Layout.fillWidth: true
+                                    spacing: 3
+                                    Label {
+                                        text: "Queue"
+                                        color: root.cFg
+                                        font.family: root.fontBrand
+                                        font.pixelSize: Math.round(32 * root.uiScale())
+                                        font.bold: true
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        text: root.operations.length + " operations in progress or history."
+                                        color: root.cMuted
+                                        font.family: root.fontHuman
+                                        font.pixelSize: 15
+                                        Layout.fillWidth: true
+                                    }
                                 }
                                 ActionButton {
-                                    label: "REFRESH"
+                                    label: "Refresh"
                                     fill: root.cDim
-                                    textColor: root.cGreen
+                                    textColor: root.cBlue
                                     Layout.preferredWidth: Math.min(120, root.actionColumnWidth())
                                     onClicked: root.request("operations.list", {})
                                 }
@@ -1369,6 +1631,7 @@ ShellRoot {
                                 Layout.fillHeight: true
                                 color: root.cPanel
                                 border.color: root.cLine
+                                radius: 8
                                 Label {
                                     anchors.centerIn: parent
                                     text: "No operations queued."
@@ -1383,41 +1646,137 @@ ShellRoot {
                                 Layout.fillHeight: true
                                 clip: true
                                 visible: root.operations.length > 0
-                                ListView {
-                                    id: queueList
+                                GridView {
+                                    id: queueGrid
+                                    width: parent.width
+                                    height: parent.height
                                     model: root.operations
-                                    spacing: 10
+                                    cellWidth: {
+                                        const columns = Math.max(1, Math.floor(width / 320))
+                                        return Math.floor(width / columns)
+                                    }
+                                    cellHeight: Math.round(138 * root.uiScale())
                                     delegate: Rectangle {
-                                        width: queueList.width
-                                        height: 100
+                                        id: queueCard
+                                        property color stateColor: modelData.state === "succeeded" ? root.cGreenSoft : modelData.state === "failed" ? root.cRed : root.cBlue
+                                        property color stateSurface: modelData.state === "succeeded" ? "#20372b" : modelData.state === "failed" ? "#4a2528" : root.cBlueSoft
+
+                                        width: queueGrid.cellWidth - 14
+                                        height: Math.round(122 * root.uiScale())
+                                        x: 7
+                                        y: 4
                                         color: root.cPanel
-                                        border.color: root.cLine
-                                        Rectangle {
-                                            width: 3
-                                            height: parent.height
-                                            color: modelData.state === "succeeded" ? root.cGreen : modelData.state === "failed" ? root.cRed : root.cWarn
+                                        border.color: queueHover.hovered ? "#5c708a" : root.cLine
+                                        radius: 8
+                                        opacity: 0
+                                        scale: queueHover.hovered ? 1.018 : 1.0
+                                        transform: Translate { id: queueSlide; y: queueHover.hovered ? -4 : 8 }
+                                        clip: true
+
+                                        HoverHandler { id: queueHover }
+
+                                        Component.onCompleted: {
+                                            queueFade.start()
+                                            queueLift.start()
                                         }
+
+                                        Behavior on border.color { ColorAnimation { duration: 140 } }
+                                        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+
+                                        NumberAnimation {
+                                            id: queueFade
+                                            target: queueCard
+                                            property: "opacity"
+                                            from: 0
+                                            to: 1
+                                            duration: 180
+                                            easing.type: Easing.OutCubic
+                                        }
+
+                                        NumberAnimation {
+                                            id: queueLift
+                                            target: queueSlide
+                                            property: "y"
+                                            from: 8
+                                            to: 0
+                                            duration: 180
+                                            easing.type: Easing.OutCubic
+                                        }
+
+                                        Rectangle {
+                                            width: parent.width
+                                            height: parent.height
+                                            opacity: queueHover.hovered ? 0.16 : 0.08
+                                            gradient: Gradient {
+                                                orientation: Gradient.Horizontal
+                                                GradientStop { position: 0.0; color: queueCard.stateColor }
+                                                GradientStop { position: 1.0; color: "transparent" }
+                                            }
+                                        }
+
                                         ColumnLayout {
                                             anchors.fill: parent
-                                            anchors.margins: 12
-                                            Label {
-                                                text: modelData.app_name + " · " + modelData.action + " · " + modelData.source + " · " + modelData.state
-                                                color: root.cFg
-                                                font.family: root.fontHuman
-                                                font.pixelSize: 16
+                                            anchors.margins: 16
+                                            spacing: 8
+
+                                            RowLayout {
                                                 Layout.fillWidth: true
-                                                elide: Text.ElideRight
+                                                spacing: 12
+
+                                                Rectangle {
+                                                    Layout.preferredWidth: Math.round(56 * root.uiScale())
+                                                    Layout.preferredHeight: Math.round(56 * root.uiScale())
+                                                    radius: 14
+                                                    color: queueCard.stateSurface
+                                                    border.color: queueCard.stateColor
+
+                                                    Label {
+                                                        anchors.centerIn: parent
+                                                        text: modelData.app_name ? modelData.app_name.substring(0, 1).toUpperCase() : "Q"
+                                                        color: queueCard.stateColor
+                                                        font.family: root.fontBrand
+                                                        font.pixelSize: Math.round(24 * root.uiScale())
+                                                        font.bold: true
+                                                    }
+                                                }
+
+                                                ColumnLayout {
+                                                    Layout.fillWidth: true
+                                                    Layout.minimumWidth: 0
+                                                    spacing: 4
+
+                                                    Label {
+                                                        text: modelData.app_name
+                                                        color: root.cFg
+                                                        font.family: root.fontHuman
+                                                        font.pixelSize: Math.round(16 * root.uiScale())
+                                                        font.bold: true
+                                                        Layout.fillWidth: true
+                                                        elide: Text.ElideRight
+                                                    }
+
+                                                    Label {
+                                                        text: modelData.action + " · " + modelData.source + " · " + modelData.state
+                                                        color: root.cMuted
+                                                        font.family: root.fontHuman
+                                                        font.pixelSize: 12
+                                                        Layout.fillWidth: true
+                                                        elide: Text.ElideRight
+                                                    }
+                                                }
                                             }
+
                                             ProgressBar {
                                                 from: 0
                                                 to: 100
                                                 value: modelData.percent
                                                 Layout.fillWidth: true
                                             }
+
                                             Label {
                                                 text: modelData.message
                                                 color: root.cMuted
-                                                font.family: root.fontMono
+                                                font.family: root.fontHuman
                                                 font.pixelSize: 11
                                                 Layout.fillWidth: true
                                                 elide: Text.ElideRight
@@ -1443,17 +1802,29 @@ ShellRoot {
 
                             RowLayout {
                                 Layout.fillWidth: true
-                                Label {
-                                    text: "Installed"
-                                    color: root.cFg
-                                    font.family: root.fontBrand
-                                    font.pixelSize: Math.round(28 * root.uiScale())
+                                ColumnLayout {
                                     Layout.fillWidth: true
+                                    spacing: 3
+                                    Label {
+                                        text: "Installed"
+                                        color: root.cFg
+                                        font.family: root.fontBrand
+                                        font.pixelSize: Math.round(32 * root.uiScale())
+                                        font.bold: true
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        text: root.installedItems.length + " apps found on this system."
+                                        color: root.cMuted
+                                        font.family: root.fontHuman
+                                        font.pixelSize: 15
+                                        Layout.fillWidth: true
+                                    }
                                 }
                                 ActionButton {
-                                    label: "REFRESH"
+                                    label: "Refresh"
                                     fill: root.cDim
-                                    textColor: root.cGreen
+                                    textColor: root.cBlue
                                     Layout.preferredWidth: Math.min(120, root.actionColumnWidth())
                                     onClicked: root.request("installed.list", {})
                                 }
@@ -1464,6 +1835,7 @@ ShellRoot {
                                 Layout.fillHeight: true
                                 color: root.cPanel
                                 border.color: root.cLine
+                                radius: 8
                                 visible: root.installedItems.length === 0
                                 ColumnLayout {
                                     anchors.centerIn: parent
@@ -1496,21 +1868,33 @@ ShellRoot {
                                 clip: true
                                 visible: root.installedItems.length > 0
 
-                                ListView {
-                                    id: installedList
+                                GridView {
+                                    id: installedGrid
+                                    width: parent.width
+                                    height: parent.height
                                     model: root.installedItems
-                                    spacing: 10
+                                    cellWidth: {
+                                        const columns = Math.max(1, Math.floor(width / 320))
+                                        return Math.floor(width / columns)
+                                    }
+                                    cellHeight: Math.round(142 * root.uiScale())
                                     delegate: Rectangle {
                                         id: installedCard
                                         property var item: modelData
                                         property string packageId: root.packageIdFromInstalled(item)
+                                        property string itemSource: root.operationSource(item.source)
 
-                                        width: installedList.width
-                                        height: Math.max(128, Math.round(124 * root.uiScale()))
+                                        width: installedGrid.cellWidth - 14
+                                        height: Math.round(126 * root.uiScale())
+                                        x: 7
+                                        y: 4
                                         color: root.cPanel
-                                        border.color: installedHover.hovered ? root.cGreen : root.cLine
+                                        border.color: installedHover.hovered ? "#5c708a" : root.cLine
+                                        radius: 8
                                         opacity: 0
-                                        transform: Translate { id: installedSlide; y: 8 }
+                                        scale: installedHover.hovered ? 1.018 : 1.0
+                                        transform: Translate { id: installedSlide; y: installedHover.hovered ? -4 : 8 }
+                                        clip: true
 
                                         Component.onCompleted: {
                                             installedFade.start()
@@ -1518,6 +1902,8 @@ ShellRoot {
                                         }
 
                                         HoverHandler { id: installedHover }
+                                        Behavior on border.color { ColorAnimation { duration: 140 } }
+                                        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
 
                                         NumberAnimation {
                                             id: installedFade
@@ -1540,40 +1926,54 @@ ShellRoot {
                                         }
 
                                         Rectangle {
-                                            width: installedHover.hovered ? 7 : 3
+                                            width: parent.width
                                             height: parent.height
-                                            color: installedCard.item.managedByUni ? root.cGreen : root.cWarn
-                                            Behavior on width { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+                                            opacity: installedHover.hovered ? 0.16 : 0.08
+                                            gradient: Gradient {
+                                                orientation: Gradient.Horizontal
+                                                GradientStop { position: 0.0; color: installedCard.item.managedByUni ? root.sourceSurface(installedCard.itemSource) : "#493a1f" }
+                                                GradientStop { position: 1.0; color: "transparent" }
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            acceptedButtons: Qt.LeftButton
+                                            onClicked: root.selectApp(root.appFromInstalled(installedCard.item))
                                         }
 
                                         RowLayout {
                                             anchors.fill: parent
-                                            anchors.margins: 12
-                                            spacing: 14
+                                            anchors.margins: 14
+                                            spacing: 12
 
                                             Rectangle {
-                                                Layout.preferredWidth: Math.round(56 * root.uiScale())
-                                                Layout.preferredHeight: Math.round(56 * root.uiScale())
-                                                color: root.cDim
-                                                border.color: root.cLine
+                                                Layout.preferredWidth: Math.round(72 * root.uiScale())
+                                                Layout.preferredHeight: Math.round(72 * root.uiScale())
+                                                radius: 16
+                                                color: installedCard.item.managedByUni ? root.sourceSurface(installedCard.itemSource) : "#493a1f"
+                                                border.color: installedCard.item.managedByUni ? root.sourceAccent(installedCard.itemSource) : "#8d6b2f"
                                                 Label {
                                                     anchors.centerIn: parent
                                                     text: installedCard.item.name.substring(0, 1).toUpperCase()
-                                                    color: root.cGreen
+                                                    color: installedCard.item.managedByUni ? root.sourceAccent(installedCard.itemSource) : root.cWarn
                                                     font.family: root.fontBrand
-                                                    font.pixelSize: Math.round(20 * root.uiScale())
+                                                    font.pixelSize: Math.round(30 * root.uiScale())
+                                                    font.bold: true
                                                 }
                                             }
 
                                             ColumnLayout {
                                                 Layout.fillWidth: true
                                                 Layout.minimumWidth: 0
+                                                Layout.alignment: Qt.AlignVCenter
                                                 spacing: 5
                                                 Label {
                                                     text: installedCard.item.name
                                                     color: root.cFg
                                                     font.family: root.fontHuman
-                                                    font.pixelSize: Math.round(17 * root.uiScale())
+                                                    font.pixelSize: Math.round(15 * root.uiScale())
                                                     font.bold: true
                                                     Layout.fillWidth: true
                                                     elide: Text.ElideRight
@@ -1584,14 +1984,14 @@ ShellRoot {
                                                           + " · " + installedCard.packageId
                                                     color: root.cMuted
                                                     font.family: root.fontHuman
-                                                    font.pixelSize: 13
+                                                    font.pixelSize: 11
                                                     Layout.fillWidth: true
                                                     elide: Text.ElideRight
                                                 }
                                                 Label {
                                                     text: installedCard.item.detail
                                                     color: root.cMuted
-                                                    font.family: root.fontMono
+                                                    font.family: root.fontHuman
                                                     font.pixelSize: 11
                                                     Layout.fillWidth: true
                                                     elide: Text.ElideRight
@@ -1602,50 +2002,54 @@ ShellRoot {
                                                     Rectangle {
                                                         height: 22
                                                         implicitWidth: sourceChipInstalled.implicitWidth + 14
+                                                        radius: 8
                                                         color: root.cDim
                                                         border.color: root.cLine
                                                         Label {
                                                             id: sourceChipInstalled
                                                             anchors.centerIn: parent
                                                             text: root.sourceLabel(root.operationSource(installedCard.item.source))
-                                                            color: root.cGreen
-                                                            font.family: root.fontMono
+                                                            color: root.cMuted
+                                                            font.family: root.fontHuman
                                                             font.pixelSize: 10
+                                                            font.bold: true
                                                         }
                                                     }
                                                     Rectangle {
                                                         height: 22
                                                         implicitWidth: managedChipInstalled.implicitWidth + 14
-                                                        color: installedCard.item.managedByUni ? "#1c2b20" : "#2d2618"
-                                                        border.color: installedCard.item.managedByUni ? root.cGreen : root.cWarn
+                                                        radius: 8
+                                                        color: installedCard.item.managedByUni ? "#203b33" : "#493a1f"
+                                                        border.color: installedCard.item.managedByUni ? "#2f6f55" : "#8d6b2f"
                                                         Label {
                                                             id: managedChipInstalled
                                                             anchors.centerIn: parent
                                                             text: installedCard.item.managedByUni ? "Managed by UNI" : "Detected"
                                                             color: installedCard.item.managedByUni ? root.cGreen : root.cWarn
-                                                            font.family: root.fontMono
+                                                            font.family: root.fontHuman
                                                             font.pixelSize: 10
+                                                            font.bold: true
                                                         }
                                                     }
                                                 }
                                             }
 
                                             ColumnLayout {
-                                                Layout.preferredWidth: root.actionColumnWidth()
-                                                Layout.maximumWidth: root.actionColumnWidth()
+                                                Layout.preferredWidth: 92
+                                                Layout.maximumWidth: 92
                                                 Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
                                                 spacing: 8
                                                 ActionButton {
-                                                    label: "DETAILS"
+                                                    label: "Details"
                                                     fill: root.cDim
-                                                    textColor: root.cGreen
+                                                    textColor: root.cBlue
                                                     Layout.fillWidth: true
                                                     onClicked: root.selectApp(root.appFromInstalled(installedCard.item))
                                                 }
                                                 ActionButton {
-                                                    label: "UNINSTALL"
+                                                    label: "Uninstall"
                                                     fill: root.cRed
-                                                    textColor: root.cBase
+                                                    textColor: "white"
                                                     Layout.fillWidth: true
                                                     onClicked: root.enqueueUninstallInstalled(installedCard.item)
                                                 }
@@ -1671,26 +2075,32 @@ ShellRoot {
 
                             RowLayout {
                                 Layout.fillWidth: true
-                                Label {
-                                    text: "Updates"
-                                    color: root.cFg
-                                    font.family: root.fontBrand
-                                    font.pixelSize: Math.round(28 * root.uiScale())
+                                ColumnLayout {
                                     Layout.fillWidth: true
+                                    spacing: 3
+                                    Label {
+                                        text: "Updates"
+                                        color: root.cFg
+                                        font.family: root.fontBrand
+                                        font.pixelSize: Math.round(32 * root.uiScale())
+                                        font.bold: true
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        text: root.updateItems.length + " updates available."
+                                        color: root.cMuted
+                                        font.family: root.fontHuman
+                                        font.pixelSize: 15
+                                        Layout.fillWidth: true
+                                    }
                                 }
                                 ActionButton {
-                                    label: "REFRESH"
+                                    label: "Refresh"
                                     fill: root.cDim
-                                    textColor: root.cGreen
+                                    textColor: root.cBlue
                                     Layout.preferredWidth: Math.min(120, root.actionColumnWidth())
                                     onClicked: root.request("updates.list", {})
                                 }
-                            }
-
-                            SectionPanel {
-                                title: "UPDATE SOURCES"
-                                subtitle: "Updates are read from UNI JSON mode. This page stays stable if one provider has no update data."
-                                Layout.fillWidth: true
                             }
 
                             Rectangle {
@@ -1699,6 +2109,7 @@ ShellRoot {
                                 Layout.fillHeight: true
                                 color: root.cPanel
                                 border.color: root.cLine
+                                radius: 8
 
                                 ColumnLayout {
                                     anchors.centerIn: parent
@@ -1732,20 +2143,32 @@ ShellRoot {
                                 clip: true
                                 visible: root.updateItems.length > 0
 
-                                ListView {
-                                    id: updatesList
+                                GridView {
+                                    id: updatesGrid
+                                    width: parent.width
+                                    height: parent.height
                                     model: root.updateItems
-                                    spacing: 10
+                                    cellWidth: {
+                                        const columns = Math.max(1, Math.floor(width / 320))
+                                        return Math.floor(width / columns)
+                                    }
+                                    cellHeight: Math.round(142 * root.uiScale())
                                     delegate: Rectangle {
                                         id: updateCard
                                         property var item: modelData
+                                        property string itemSource: root.operationSource(item.source)
 
-                                        width: updatesList.width
-                                        height: Math.max(112, root.cardHeight())
+                                        width: updatesGrid.cellWidth - 14
+                                        height: Math.round(126 * root.uiScale())
+                                        x: 7
+                                        y: 4
                                         color: root.cPanel
-                                        border.color: updateHover.hovered ? root.cGreen : root.cLine
+                                        border.color: updateHover.hovered ? "#5c708a" : root.cLine
+                                        radius: 8
                                         opacity: 0
-                                        transform: Translate { id: updateSlide; y: 8 }
+                                        scale: updateHover.hovered ? 1.018 : 1.0
+                                        transform: Translate { id: updateSlide; y: updateHover.hovered ? -4 : 8 }
+                                        clip: true
 
                                         Component.onCompleted: {
                                             updateFade.start()
@@ -1753,6 +2176,8 @@ ShellRoot {
                                         }
 
                                         HoverHandler { id: updateHover }
+                                        Behavior on border.color { ColorAnimation { duration: 140 } }
+                                        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
 
                                         NumberAnimation {
                                             id: updateFade
@@ -1775,40 +2200,54 @@ ShellRoot {
                                         }
 
                                         Rectangle {
-                                            width: updateHover.hovered ? 7 : 3
+                                            width: parent.width
                                             height: parent.height
-                                            color: root.cWarn
-                                            Behavior on width { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+                                            opacity: updateHover.hovered ? 0.16 : 0.08
+                                            gradient: Gradient {
+                                                orientation: Gradient.Horizontal
+                                                GradientStop { position: 0.0; color: root.sourceSurface(updateCard.itemSource) }
+                                                GradientStop { position: 1.0; color: "transparent" }
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            acceptedButtons: Qt.LeftButton
+                                            onClicked: root.selectApp(root.appFromInstalled(updateCard.item))
                                         }
 
                                         RowLayout {
                                             anchors.fill: parent
-                                            anchors.margins: 12
-                                            spacing: 14
+                                            anchors.margins: 14
+                                            spacing: 12
 
                                             Rectangle {
-                                                Layout.preferredWidth: Math.round(54 * root.uiScale())
-                                                Layout.preferredHeight: Math.round(54 * root.uiScale())
-                                                color: root.cDim
-                                                border.color: root.cLine
+                                                Layout.preferredWidth: Math.round(72 * root.uiScale())
+                                                Layout.preferredHeight: Math.round(72 * root.uiScale())
+                                                radius: 16
+                                                color: root.sourceSurface(updateCard.itemSource)
+                                                border.color: root.sourceAccent(updateCard.itemSource)
                                                 Label {
                                                     anchors.centerIn: parent
                                                     text: updateCard.item.name ? updateCard.item.name.substring(0, 1).toUpperCase() : "U"
-                                                    color: root.cGreen
+                                                    color: root.sourceAccent(updateCard.itemSource)
                                                     font.family: root.fontBrand
-                                                    font.pixelSize: Math.round(20 * root.uiScale())
+                                                    font.pixelSize: Math.round(30 * root.uiScale())
+                                                    font.bold: true
                                                 }
                                             }
 
                                             ColumnLayout {
                                                 Layout.fillWidth: true
                                                 Layout.minimumWidth: 0
+                                                Layout.alignment: Qt.AlignVCenter
                                                 spacing: 5
                                                 Label {
                                                     text: updateCard.item.name || "Unknown update"
                                                     color: root.cFg
                                                     font.family: root.fontHuman
-                                                    font.pixelSize: Math.round(17 * root.uiScale())
+                                                    font.pixelSize: Math.round(15 * root.uiScale())
                                                     font.bold: true
                                                     Layout.fillWidth: true
                                                     elide: Text.ElideRight
@@ -1819,14 +2258,14 @@ ShellRoot {
                                                           + " → " + (updateCard.item.available_version || "available")
                                                     color: root.cMuted
                                                     font.family: root.fontHuman
-                                                    font.pixelSize: 13
+                                                    font.pixelSize: 11
                                                     Layout.fillWidth: true
                                                     elide: Text.ElideRight
                                                 }
                                                 Label {
                                                     text: updateCard.item.detail || "Update metadata from UNI"
                                                     color: root.cMuted
-                                                    font.family: root.fontMono
+                                                    font.family: root.fontHuman
                                                     font.pixelSize: 11
                                                     Layout.fillWidth: true
                                                     elide: Text.ElideRight
@@ -1834,21 +2273,21 @@ ShellRoot {
                                             }
 
                                             ColumnLayout {
-                                                Layout.preferredWidth: root.actionColumnWidth()
-                                                Layout.maximumWidth: root.actionColumnWidth()
+                                                Layout.preferredWidth: 92
+                                                Layout.maximumWidth: 92
                                                 Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
                                                 spacing: 8
                                                 ActionButton {
-                                                    label: "DETAILS"
+                                                    label: "Details"
                                                     fill: root.cDim
-                                                    textColor: root.cGreen
+                                                    textColor: root.cBlue
                                                     Layout.fillWidth: true
                                                     onClicked: root.selectApp(root.appFromInstalled(updateCard.item))
                                                 }
                                                 ActionButton {
-                                                    label: "UPDATE"
-                                                    fill: root.cGreen
-                                                    textColor: root.cBase
+                                                    label: "Update"
+                                                    fill: root.cBlue
+                                                    textColor: "white"
                                                     Layout.fillWidth: true
                                                     onClicked: {
                                                         root.request("operations.enqueue", {
