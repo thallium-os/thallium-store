@@ -9,4 +9,5 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 store-core = { path = "../store-core" }
+tracing.workspace = true
 tokio.workspace = true

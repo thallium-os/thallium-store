@@ -504,6 +504,7 @@ dependencies = [
  "serde_json",
  "store-core",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
