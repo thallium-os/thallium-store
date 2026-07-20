@@ -7,7 +7,10 @@
 //! milestones only after the child had already exited).
 
 mod apt;
+mod appimage;
+mod download;
 mod flatpak;
+mod github;
 
 use crate::UniProgress;
 use store_core::{OperationAction, OperationState, SourceKind};
@@ -26,13 +29,8 @@ pub async fn run(
     match source {
         SourceKind::System => apt::run(action, &app_name, &package_id, &tx).await,
         SourceKind::Flathub => flatpak::run(action, &app_name, &package_id, &tx).await,
-        SourceKind::Github | SourceKind::Appimage => {
-            let _ = tx
-                .send(Err(format!(
-                    "native {source:?} backend is not implemented yet"
-                )))
-                .await;
-        }
+        SourceKind::Github => github::run(action, &app_name, &package_id, &tx).await,
+        SourceKind::Appimage => appimage::run(action, &app_name, &package_id, &tx).await,
     }
 }
 
