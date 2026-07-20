@@ -33,6 +33,13 @@ pub async fn run(
     let _network_permit = network.clone().acquire_owned().await.ok();
     let _mutation_permit = mutation.clone().acquire_owned().await.ok();
 
+    // flatpak_search reports the merged (system+user) remote list, but we
+    // install into the per-user installation. Ensure the flathub remote exists
+    // there so installs never fail with "No remote refs found for 'flathub'".
+    if !matches!(action, OperationAction::Remove) {
+        ensure_flathub_remote().await;
+    }
+
     let args: Vec<&str> = match action {
         OperationAction::Install => vec!["install", "-y", "--user", "flathub", package_id],
         OperationAction::Reinstall => {
@@ -107,6 +114,21 @@ async fn stream_line(tx: &ProgressSender, line: &str) {
         }
         None => emit(tx, OperationState::Installing, 50, line.trim()).await,
     }
+}
+
+async fn ensure_flathub_remote() {
+    let _ = Command::new("flatpak")
+        .args([
+            "remote-add",
+            "--user",
+            "--if-not-exists",
+            "flathub",
+            "https://dl.flathub.org/repo/flathub.flatpakrepo",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
 }
 
 async fn record(action: OperationAction, app_name: &str, package_id: &str) {
