@@ -515,96 +515,31 @@ fn data_home() -> PathBuf {
 
 async fn installed_list() -> Vec<InstalledItem> {
     let mut items = Vec::new();
-    items.extend(read_uni_installed().await);
+    items.extend(read_registry_installed().await);
     items.extend(read_flatpak_installed().await);
-    items.extend(read_known_dpkg_installed().await);
     dedupe_installed(items)
 }
 
-async fn read_uni_installed() -> Vec<InstalledItem> {
-    let output = match Command::new(uni_binary())
-        .args(["installed", "--json"])
-        .output()
-        .await
-    {
-        Ok(output) => output,
-        Err(_) => return Vec::new(),
-    };
-
-    if output.status.success() {
-        if let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) {
-            if let Some(items) = value.get("items").and_then(Value::as_array) {
-                return items
-                    .iter()
-                    .filter_map(|item| {
-                        let name = item.get("name").and_then(Value::as_str)?;
-                        let id = item.get("id").and_then(Value::as_str).unwrap_or(name);
-                        let source = item.get("source").and_then(Value::as_str).unwrap_or("uni");
-                        Some(InstalledItem {
-                            id: format!("uni:{source}:{id}"),
-                            name: name.to_string(),
-                            source: source.to_string(),
-                            version: item
-                                .get("version")
-                                .and_then(Value::as_str)
-                                .map(ToString::to_string),
-                            detail: id.to_string(),
-                            managed_by_uni: item
-                                .get("managedByUni")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(true),
-                        })
-                    })
-                    .collect();
-            }
+async fn read_registry_installed() -> Vec<InstalledItem> {
+    let registry = match store_uni::registry::load().await {
+        Ok(registry) => registry,
+        Err(err) => {
+            tracing::warn!("reading UNI registry failed: {err:#}");
+            return Vec::new();
         }
-    }
-
-    let fallback = match Command::new(uni_binary()).arg("list").output().await {
-        Ok(output) => output,
-        Err(_) => return Vec::new(),
     };
 
-    let text = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&fallback.stdout),
-        String::from_utf8_lossy(&fallback.stderr)
-    );
-
-    text.lines()
-        .filter_map(parse_uni_list_line)
-        .collect::<Vec<InstalledItem>>()
-}
-
-fn parse_uni_list_line(line: &str) -> Option<InstalledItem> {
-    let clean = strip_ansi(line).trim().to_string();
-    if clean.is_empty()
-        || clean.contains("Packages installed via uni")
-        || clean.contains("────")
-        || !clean.contains('[')
-        || !clean.contains(']')
-    {
-        return None;
-    }
-
-    let (name_part, rest) = clean.split_once('[')?;
-    let (source_part, detail_part) = rest.split_once(']')?;
-    let name = name_part.trim().to_string();
-    let source = source_part.trim().to_string();
-    let detail = detail_part.trim().to_string();
-
-    if name.is_empty() || source.is_empty() {
-        return None;
-    }
-
-    Some(InstalledItem {
-        id: format!("uni:{source}:{name}"),
-        name,
-        source,
-        version: None,
-        detail,
-        managed_by_uni: true,
-    })
+    registry
+        .into_iter()
+        .map(|(name, entry)| InstalledItem {
+            id: format!("uni:{}:{}", entry.backend, entry.id),
+            name,
+            source: entry.backend,
+            version: None,
+            detail: entry.id,
+            managed_by_uni: true,
+        })
+        .collect()
 }
 
 async fn read_flatpak_installed() -> Vec<InstalledItem> {
@@ -643,44 +578,6 @@ async fn read_flatpak_installed() -> Vec<InstalledItem> {
         .collect()
 }
 
-async fn read_known_dpkg_installed() -> Vec<InstalledItem> {
-    let known_packages = ["gimp", "obs-studio", "heroic", "zed"];
-    let output = match Command::new("dpkg-query")
-        .arg("-W")
-        .arg("-f=${Package}\t${Version}\t${binary:Summary}\n")
-        .args(known_packages)
-        .output()
-        .await
-    {
-        Ok(output) => output,
-        Err(_) => return Vec::new(),
-    };
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let columns = line.split('\t').collect::<Vec<_>>();
-            let package = columns.first()?.trim();
-            if package.is_empty() {
-                return None;
-            }
-            let version = columns
-                .get(1)
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            let summary = columns.get(2).map(|s| s.trim()).unwrap_or("system package");
-            Some(InstalledItem {
-                id: format!("dpkg:{package}"),
-                name: package.to_string(),
-                source: "system".to_string(),
-                version,
-                detail: summary.to_string(),
-                managed_by_uni: false,
-            })
-        })
-        .collect()
-}
-
 fn dedupe_installed(items: Vec<InstalledItem>) -> Vec<InstalledItem> {
     let mut deduped: Vec<InstalledItem> = Vec::new();
     for item in items {
@@ -694,48 +591,42 @@ fn dedupe_installed(items: Vec<InstalledItem>) -> Vec<InstalledItem> {
     deduped
 }
 
-fn strip_ansi(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
-            chars.next();
-            for next in chars.by_ref() {
-                if next.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            output.push(ch);
-        }
-    }
-
-    output
-}
-
-fn uni_binary() -> String {
-    std::env::var("THALLIUM_STORE_UNI").unwrap_or_else(|_| "uni".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parses_uni_list_line_with_ansi() {
-        let line = "\u{1b}[32m  heroic                           [dpkg      ]  heroic\u{1b}[0m";
-        let item = parse_uni_list_line(line).expect("line should parse");
+    fn dedupe_collapses_case_insensitive_names_and_sorts() {
+        let items = vec![
+            InstalledItem {
+                id: "flatpak:org.zed.Zed".into(),
+                name: "Zed".into(),
+                source: "flatpak".into(),
+                version: None,
+                detail: "flathub".into(),
+                managed_by_uni: false,
+            },
+            InstalledItem {
+                id: "uni:dpkg:zed".into(),
+                name: "zed".into(),
+                source: "dpkg".into(),
+                version: None,
+                detail: "zed".into(),
+                managed_by_uni: true,
+            },
+            InstalledItem {
+                id: "flatpak:org.gimp.GIMP".into(),
+                name: "GIMP".into(),
+                source: "flatpak".into(),
+                version: None,
+                detail: "flathub".into(),
+                managed_by_uni: false,
+            },
+        ];
 
-        assert_eq!(item.name, "heroic");
-        assert_eq!(item.source, "dpkg");
-        assert_eq!(item.detail, "heroic");
-        assert!(item.managed_by_uni);
-    }
-
-    #[test]
-    fn ignores_uni_header_lines() {
-        assert!(parse_uni_list_line("Packages installed via uni").is_none());
-        assert!(parse_uni_list_line("────────────────────────────────────────").is_none());
+        let out = dedupe_installed(items);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].name, "GIMP");
+        assert_eq!(out[1].name, "Zed");
     }
 }
