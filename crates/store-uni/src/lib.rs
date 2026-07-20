@@ -5,10 +5,8 @@ mod privilege;
 
 pub use backends::StagePermits;
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use store_core::{OperationAction, OperationState, SourceKind};
-use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
@@ -25,25 +23,37 @@ pub struct UniProgress {
     pub message: String,
 }
 
+/// Native backend/privilege readiness reported by `system.health`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeReadiness {
+    pub apt: bool,
+    pub flatpak: bool,
+    pub privilege: bool,
+}
+
+fn readiness_from(apt: bool, flatpak: bool, root: bool, escalator: bool) -> NativeReadiness {
+    NativeReadiness {
+        apt,
+        flatpak,
+        privilege: root || escalator,
+    }
+}
+
 impl UniAdapter {
     pub fn new(fake: bool) -> Self {
         Self { fake }
     }
 
-    pub async fn health(&self) -> Result<String> {
-        if self.fake {
-            return Ok("fake-uni enabled".to_string());
-        }
-        let output = Command::new(uni_binary()).arg("version").output().await?;
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !stdout.is_empty() {
-            return Ok(stdout);
-        }
-        if output.status.success() {
-            Ok("uni available".to_string())
-        } else {
-            Ok(format!("uni version failed: {}", output.status))
-        }
+    /// Presence of native backend tooling and privilege escalation, scanned
+    /// from PATH / /proc — no subprocess spawned, no bash `uni` involved.
+    pub fn native_readiness(&self) -> NativeReadiness {
+        readiness_from(
+            privilege::has("apt-get"),
+            privilege::has("flatpak"),
+            privilege::is_root(),
+            privilege::has("pkexec") || privilege::has("sudo"),
+        )
     }
 
     pub fn command_preview(
@@ -147,6 +157,40 @@ async fn run_fake(
     }
 }
 
-fn uni_binary() -> String {
-    std::env::var("THALLIUM_STORE_UNI").unwrap_or_else(|_| "uni".to_string())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readiness_from_requires_root_or_escalator_for_privilege() {
+        assert_eq!(
+            readiness_from(true, true, false, false),
+            NativeReadiness {
+                apt: true,
+                flatpak: true,
+                privilege: false
+            }
+        );
+        assert_eq!(
+            readiness_from(false, false, true, false).privilege,
+            true
+        );
+        assert_eq!(
+            readiness_from(false, false, false, true).privilege,
+            true
+        );
+    }
+
+    #[test]
+    fn native_readiness_serializes_camel_case() {
+        let readiness = NativeReadiness {
+            apt: true,
+            flatpak: false,
+            privilege: true,
+        };
+        let value = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(value["apt"], serde_json::json!(true));
+        assert_eq!(value["flatpak"], serde_json::json!(false));
+        assert_eq!(value["privilege"], serde_json::json!(true));
+    }
 }

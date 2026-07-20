@@ -268,12 +268,17 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
             "protocolVersion": 1,
             "fakeUni": state.fake_uni
         })),
-        "system.health" => Ok(json!({
-            "status": "ready",
-            "fakeUni": state.fake_uni,
-            "mode": if state.fake_uni { "fake" } else { "real-json" },
-            "uni": state.uni.health().await.unwrap_or_else(|err| err.to_string())
-        })),
+        "system.health" => {
+            let readiness = state.uni.native_readiness();
+            Ok(json!({
+                "status": "ready",
+                "fakeUni": state.fake_uni,
+                "mode": if state.fake_uni { "fake" } else { "real-json" },
+                "apt": readiness.apt,
+                "flatpak": readiness.flatpak,
+                "privilege": readiness.privilege
+            }))
+        }
         "catalog.search" => {
             let params: SearchParams = serde_json::from_value(request.params)?;
             let response = state.catalog.search(params).await;

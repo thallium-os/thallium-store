@@ -25,7 +25,7 @@ pub fn privileged(program: &str, args: &[&str]) -> Command {
 }
 
 /// Effective uid == 0, read from /proc so we avoid a libc dependency.
-fn is_root() -> bool {
+pub(crate) fn is_root() -> bool {
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|status| {
@@ -39,7 +39,7 @@ fn is_root() -> bool {
 }
 
 /// Whether `bin` resolves on PATH.
-fn has(bin: &str) -> bool {
+pub(crate) fn has(bin: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| {
             std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file())
