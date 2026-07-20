@@ -13,12 +13,13 @@ use store_core::{
     SearchParams, SourceKind, TrustLevel,
 };
 use store_db::StoreDb;
-use store_uni::UniAdapter;
+use store_uni::{StagePermits, UniAdapter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::Command;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{broadcast, Mutex, Semaphore};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -29,9 +30,14 @@ struct AppState {
     fake_uni: bool,
     recent_apps: Arc<Mutex<HashMap<String, CanonicalApp>>>,
     active: Arc<Semaphore>,
-    system_mutation: Arc<Semaphore>,
-    flatpak_mutation: Arc<Semaphore>,
-    github_mutation: Arc<Semaphore>,
+    permits: StagePermits,
+    /// Broadcasts `event.operationProgress` payloads to every connected
+    /// client, not just the one that enqueued the op, so reconnects don't
+    /// lose the stream.
+    progress_tx: broadcast::Sender<Operation>,
+    /// Cancellation tokens for currently running operations, keyed by
+    /// operation id, so `operations.cancel` can signal a running backend.
+    running_ops: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +127,7 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
     let fake_uni =
         std::env::var("THALLIUM_STORE_FAKE_UNI").unwrap_or_else(|_| "1".to_string()) != "0";
     let db_path = data_home().join("thallium-store/store.db");
+    let (progress_tx, _) = broadcast::channel(256);
     let state = AppState {
         catalog: CatalogManager::new(),
         db: Arc::new(Mutex::new(StoreDb::open(&db_path)?)),
@@ -128,9 +135,16 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
         fake_uni,
         recent_apps: Arc::new(Mutex::new(HashMap::new())),
         active: Arc::new(Semaphore::new(4)),
-        system_mutation: Arc::new(Semaphore::new(1)),
-        flatpak_mutation: Arc::new(Semaphore::new(1)),
-        github_mutation: Arc::new(Semaphore::new(2)),
+        // network bounds the parallel download stage across all sources;
+        // *_mutation bounds each source's install stage (system MUST stay 1).
+        permits: StagePermits {
+            network: Arc::new(Semaphore::new(4)),
+            system_mutation: Arc::new(Semaphore::new(1)),
+            flatpak_mutation: Arc::new(Semaphore::new(1)),
+            github_mutation: Arc::new(Semaphore::new(2)),
+        },
+        progress_tx,
+        running_ops: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let listener = UnixListener::bind(&socket_path)?;
@@ -151,6 +165,42 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
 async fn handle_connection(stream: UnixStream, state: AppState) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let writer = Arc::new(Mutex::new(writer));
+
+    // Replay current operation state so a client that just (re)connected isn't
+    // blind to progress made before it connected, then keep forwarding every
+    // future event.operationProgress from the shared broadcast channel. This
+    // decouples delivery from the connection that enqueued the op.
+    let mut progress_rx = state.progress_tx.subscribe();
+    let forward_writer = writer.clone();
+    let replay_db = state.db.clone();
+    let forward_task = tokio::spawn(async move {
+        let replayed = replay_db.lock().await.list_operations();
+        if let Ok(operations) = replayed {
+            for operation in operations {
+                let _ = write_notification(&forward_writer, "event.operationProgress", &operation).await;
+            }
+        }
+        loop {
+            match progress_rx.recv().await {
+                Ok(operation) => {
+                    let _ = write_notification(&forward_writer, "event.operationProgress", &operation).await;
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let result = read_requests(reader, &writer, &state).await;
+    forward_task.abort();
+    result
+}
+
+async fn read_requests(
+    reader: tokio::net::unix::OwnedReadHalf,
+    writer: &Arc<Mutex<OwnedWriteHalf>>,
+    state: &AppState,
+) -> Result<()> {
     let mut lines = BufReader::new(reader).lines();
 
     while let Some(line) = lines.next_line().await? {
@@ -158,7 +208,7 @@ async fn handle_connection(stream: UnixStream, state: AppState) -> Result<()> {
             Ok(request) => request,
             Err(err) => {
                 write_response(
-                    &writer,
+                    writer,
                     RpcResponse {
                         jsonrpc: "2.0",
                         id: None,
@@ -175,7 +225,7 @@ async fn handle_connection(stream: UnixStream, state: AppState) -> Result<()> {
         };
 
         let id = request.id.clone();
-        let result = handle_request(request, state.clone(), writer.clone()).await;
+        let result = handle_request(request, state.clone()).await;
         let response = match result {
             Ok(result) => RpcResponse {
                 jsonrpc: "2.0",
@@ -193,17 +243,13 @@ async fn handle_connection(stream: UnixStream, state: AppState) -> Result<()> {
                 }),
             },
         };
-        write_response(&writer, response).await?;
+        write_response(writer, response).await?;
     }
 
     Ok(())
 }
 
-async fn handle_request(
-    request: RpcRequest,
-    state: AppState,
-    writer: Arc<Mutex<OwnedWriteHalf>>,
-) -> Result<Value> {
+async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
     match request.method.as_str() {
         "system.hello" => Ok(json!({
             "name": "Thallium Store Backend",
@@ -256,24 +302,41 @@ async fn handle_request(
             let logs = state.db.lock().await.logs(id)?;
             Ok(json!({ "items": logs }))
         }
-        "operations.cancel" => Ok(json!({
-            "accepted": false,
-            "message": "Cancellation is available for queued jobs in the scheduler contract; active fake UNI jobs finish quickly in this MVP."
-        })),
+        "operations.cancel" => {
+            let id = request
+                .params
+                .get("operationId")
+                .and_then(Value::as_str)
+                .context("missing operationId")?;
+            let token = state.running_ops.lock().await.get(id).cloned();
+            match token {
+                Some(token) => {
+                    token.cancel();
+                    if let Some(mut operation) = state.db.lock().await.get_operation(id)? {
+                        operation.state = OperationState::Cancelled;
+                        operation.message = "Cancellation requested".to_string();
+                        operation.updated_at = Utc::now();
+                        state.db.lock().await.upsert_operation(&operation)?;
+                        let _ = state.progress_tx.send(operation);
+                    }
+                    Ok(json!({ "accepted": true }))
+                }
+                None => Ok(json!({
+                    "accepted": false,
+                    "message": "operation is not currently running"
+                })),
+            }
+        }
         "operations.retry" => Err(anyhow::anyhow!("retry is not implemented in the MVP slice")),
         "apps.launch" => Err(anyhow::anyhow!(
             "launch requires trusted desktop entry discovery; not enabled in fake MVP mode"
         )),
-        "operations.enqueue" => enqueue_operation(request.params, state, writer).await,
+        "operations.enqueue" => enqueue_operation(request.params, state).await,
         _ => Err(anyhow::anyhow!("unknown method {}", request.method)),
     }
 }
 
-async fn enqueue_operation(
-    params: Value,
-    state: AppState,
-    writer: Arc<Mutex<OwnedWriteHalf>>,
-) -> Result<Value> {
+async fn enqueue_operation(params: Value, state: AppState) -> Result<Value> {
     let request: EnqueueOperation = serde_json::from_value(params)?;
     let cached_app = state
         .recent_apps
@@ -354,10 +417,17 @@ async fn enqueue_operation(
         message: command_preview,
     })?;
 
+    let token = CancellationToken::new();
+    state
+        .running_ops
+        .lock()
+        .await
+        .insert(operation.id.clone(), token.clone());
+
     let operation_for_task = operation.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        run_operation(state, operation_for_task, variant.package_id, writer).await;
+        run_operation(state, operation_for_task, variant.package_id, token).await;
     });
 
     Ok(serde_json::to_value(operation)?)
@@ -367,21 +437,23 @@ async fn run_operation(
     state: AppState,
     mut operation: Operation,
     package_id: String,
-    writer: Arc<Mutex<OwnedWriteHalf>>,
+    token: CancellationToken,
 ) {
     let _active = state.active.clone().acquire_owned().await.ok();
-    let _source_permit = match operation.source {
-        SourceKind::System => state.system_mutation.clone().acquire_owned().await.ok(),
-        SourceKind::Flathub => state.flatpak_mutation.clone().acquire_owned().await.ok(),
-        SourceKind::Github => state.github_mutation.clone().acquire_owned().await.ok(),
-        SourceKind::Appimage => state.github_mutation.clone().acquire_owned().await.ok(),
-    };
 
+    // Stage-split scheduler boundary: each backend acquires `permits.network`
+    // around its download-heavy portion and the correct `permits.*_mutation`
+    // around its install-heavy portion (see store-uni::backends), so downloads
+    // across ops/sources overlap while installs stay serial per source
+    // (system_mutation permit=1, never relaxed). We just hand the whole
+    // permit set + cancellation token down.
     let mut rx = state.uni.run(
         operation.action,
         operation.app_name.clone(),
         package_id,
         operation.source,
+        token,
+        state.permits.clone(),
     );
 
     while let Some(event) = rx.recv().await {
@@ -409,8 +481,10 @@ async fn run_operation(
             },
             message: operation.message.clone(),
         });
-        let _ = write_notification(&writer, "event.operationProgress", &operation).await;
+        let _ = state.progress_tx.send(operation.clone());
     }
+
+    state.running_ops.lock().await.remove(&operation.id);
 }
 
 async fn write_response(writer: &Arc<Mutex<OwnedWriteHalf>>, response: RpcResponse) -> Result<()> {

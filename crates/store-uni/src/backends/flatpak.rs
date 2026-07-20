@@ -7,12 +7,31 @@
 use super::{emit, fail, ProgressSender};
 use crate::registry;
 use std::process::Stdio;
+use std::sync::Arc;
 use store_core::{OperationAction, OperationState};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
-pub async fn run(action: OperationAction, app_name: &str, package_id: &str, tx: &ProgressSender) {
+#[allow(clippy::too_many_arguments)]
+pub async fn run(
+    action: OperationAction,
+    app_name: &str,
+    package_id: &str,
+    tx: &ProgressSender,
+    token: &CancellationToken,
+    network: &Arc<Semaphore>,
+    mutation: &Arc<Semaphore>,
+) {
     emit(tx, OperationState::Resolving, 2, format!("Preparing flatpak for {app_name}")).await;
+
+    // flatpak fetches and deploys in one invocation too (and serializes itself
+    // internally via its own repo lock); hold both permits for the whole call
+    // to keep the boundary consistent with apt while still letting other
+    // sources overlap.
+    let _network_permit = network.clone().acquire_owned().await.ok();
+    let _mutation_permit = mutation.clone().acquire_owned().await.ok();
 
     let args: Vec<&str> = match action {
         OperationAction::Install => vec!["install", "-y", "--user", "flathub", package_id],
@@ -56,13 +75,20 @@ pub async fn run(action: OperationAction, app_name: &str, package_id: &str, tx: 
         });
     }
 
-    match child.wait().await {
-        Ok(status) if status.success() => {
-            record(action, app_name, package_id).await;
-            emit(tx, OperationState::Succeeded, 100, format!("{app_name} ready")).await;
+    tokio::select! {
+        status = child.wait() => match status {
+            Ok(status) if status.success() => {
+                record(action, app_name, package_id).await;
+                emit(tx, OperationState::Succeeded, 100, format!("{app_name} ready")).await;
+            }
+            Ok(status) => fail(tx, format!("flatpak exited with {status}")).await,
+            Err(err) => fail(tx, format!("flatpak wait failed: {err}")).await,
+        },
+        _ = token.cancelled() => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            emit(tx, OperationState::Cancelled, 0, format!("Cancelled flatpak for {app_name}")).await;
         }
-        Ok(status) => fail(tx, format!("flatpak exited with {status}")).await,
-        Err(err) => fail(tx, format!("flatpak wait failed: {err}")).await,
     }
 }
 

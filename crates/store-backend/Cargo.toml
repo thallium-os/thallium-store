@@ -14,6 +14,7 @@ store-core = { path = "../store-core" }
 store-db = { path = "../store-db" }
 store-uni = { path = "../store-uni" }
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true

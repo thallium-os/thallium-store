@@ -12,28 +12,50 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use store_core::{OperationAction, OperationState};
+use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
+use tokio_util::sync::CancellationToken;
 
-pub async fn run(action: OperationAction, app_name: &str, package_id: &str, tx: &ProgressSender) {
+#[allow(clippy::too_many_arguments)]
+pub async fn run(
+    action: OperationAction,
+    app_name: &str,
+    package_id: &str,
+    tx: &ProgressSender,
+    token: &CancellationToken,
+    network: &Arc<Semaphore>,
+    mutation: &Arc<Semaphore>,
+) {
     match action {
-        OperationAction::Remove => match remove(app_name).await {
-            Ok(()) => emit(tx, OperationState::Succeeded, 100, format!("Removed {app_name}")).await,
-            Err(err) => fail(tx, format!("removing {app_name} failed: {err}")).await,
-        },
+        OperationAction::Remove => {
+            let _mutation_permit = mutation.clone().acquire_owned().await.ok();
+            match remove(app_name).await {
+                Ok(()) => emit(tx, OperationState::Succeeded, 100, format!("Removed {app_name}")).await,
+                Err(err) => fail(tx, format!("removing {app_name} failed: {err}")).await,
+            }
+        }
         _ => {
             let dest = appimage_dir().join(format!("{}.AppImage", sanitize(app_name)));
-            if let Err(err) = install(app_name, package_id, &dest, tx).await {
-                fail(tx, format!("installing {app_name} failed: {err}")).await;
+            if let Err(err) = install(app_name, package_id, &dest, tx, token, network, mutation).await {
+                if token.is_cancelled() {
+                    emit(tx, OperationState::Cancelled, 0, format!("Cancelled installing {app_name}")).await;
+                } else {
+                    fail(tx, format!("installing {app_name} failed: {err}")).await;
+                }
             }
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn install(
     app_name: &str,
     url: &str,
     dest: &Path,
     tx: &ProgressSender,
+    token: &CancellationToken,
+    network: &Arc<Semaphore>,
+    mutation: &Arc<Semaphore>,
 ) -> anyhow::Result<()> {
     emit(tx, OperationState::Resolving, 2, format!("Fetching {app_name}")).await;
     if let Some(parent) = dest.parent() {
@@ -44,10 +66,16 @@ async fn install(
     let total = Arc::new(AtomicU64::new(0));
     let ticker = spawn_progress_ticker(tx.clone(), Arc::clone(&done), Arc::clone(&total), 0, 90);
 
-    let result = download(url, dest, &done, &total).await;
+    // Download stage: bounded by the shared network permit only, so several
+    // appimage/github downloads can run concurrently.
+    let network_permit = network.clone().acquire_owned().await.ok();
+    let result = download(url, dest, &done, &total, token).await;
     ticker.abort();
+    drop(network_permit);
     result?;
 
+    // Install stage: fs + registry write, serialized per source.
+    let _mutation_permit = mutation.clone().acquire_owned().await.ok();
     finalize(app_name, dest, tx).await
 }
 

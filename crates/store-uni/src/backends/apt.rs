@@ -10,11 +10,32 @@
 use super::{emit, fail, ProgressSender};
 use crate::{privilege::privileged, registry};
 use std::process::Stdio;
+use std::sync::Arc;
 use store_core::{OperationAction, OperationState};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
-pub async fn run(action: OperationAction, app_name: &str, package_id: &str, tx: &ProgressSender) {
+#[allow(clippy::too_many_arguments)]
+pub async fn run(
+    action: OperationAction,
+    app_name: &str,
+    package_id: &str,
+    tx: &ProgressSender,
+    token: &CancellationToken,
+    network: &Arc<Semaphore>,
+    mutation: &Arc<Semaphore>,
+) {
     emit(tx, OperationState::Resolving, 2, format!("Preparing apt for {app_name}")).await;
+
+    // apt-get streams both dlstatus (download) and pmstatus (install) from a
+    // single invocation under one dpkg lock, so download/install can't be
+    // split into separate child processes without a --download-only pre-fetch.
+    // Hold both the network slot and the (always-1) system mutation permit for
+    // the whole call: apt stays strictly serial while other sources still
+    // download/install in parallel via their own permits.
+    let _network_permit = network.clone().acquire_owned().await.ok();
+    let _mutation_permit = mutation.clone().acquire_owned().await.ok();
 
     let action_args: Vec<&str> = match action {
         OperationAction::Install => vec!["install", package_id],
@@ -69,13 +90,20 @@ pub async fn run(action: OperationAction, app_name: &str, package_id: &str, tx: 
         });
     }
 
-    match child.wait().await {
-        Ok(status) if status.success() => {
-            record(action, app_name, package_id).await;
-            emit(tx, OperationState::Succeeded, 100, format!("{app_name} ready")).await;
+    tokio::select! {
+        status = child.wait() => match status {
+            Ok(status) if status.success() => {
+                record(action, app_name, package_id).await;
+                emit(tx, OperationState::Succeeded, 100, format!("{app_name} ready")).await;
+            }
+            Ok(status) => fail(tx, format!("apt-get exited with {status}")).await,
+            Err(err) => fail(tx, format!("apt-get wait failed: {err}")).await,
+        },
+        _ = token.cancelled() => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            emit(tx, OperationState::Cancelled, 0, format!("Cancelled apt-get for {app_name}")).await;
         }
-        Ok(status) => fail(tx, format!("apt-get exited with {status}")).await,
-        Err(err) => fail(tx, format!("apt-get wait failed: {err}")).await,
     }
 }
 

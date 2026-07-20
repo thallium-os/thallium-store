@@ -3,12 +3,15 @@ pub mod registry;
 mod backends;
 mod privilege;
 
+pub use backends::StagePermits;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use store_core::{OperationAction, OperationState, SourceKind};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
 pub struct UniAdapter {
@@ -84,14 +87,16 @@ impl UniAdapter {
         app_name: String,
         package_id: String,
         source: SourceKind,
+        token: CancellationToken,
+        permits: StagePermits,
     ) -> mpsc::Receiver<Result<UniProgress, String>> {
         let (tx, rx) = mpsc::channel(16);
         let fake = self.fake;
         tokio::spawn(async move {
             if fake {
-                run_fake(action, &app_name, tx).await;
+                run_fake(action, &app_name, tx, token).await;
             } else {
-                backends::run(action, app_name, package_id, source, tx).await;
+                backends::run(action, app_name, package_id, source, tx, token, permits).await;
             }
         });
         rx
@@ -102,6 +107,7 @@ async fn run_fake(
     action: OperationAction,
     app_name: &str,
     tx: mpsc::Sender<Result<UniProgress, String>>,
+    token: CancellationToken,
 ) {
     let verb = match action {
         OperationAction::Install => "Installing",
@@ -118,7 +124,19 @@ async fn run_fake(
     ];
 
     for (state, percent, message) in events {
-        sleep(Duration::from_millis(450)).await;
+        tokio::select! {
+            _ = sleep(Duration::from_millis(450)) => {}
+            _ = token.cancelled() => {
+                let _ = tx
+                    .send(Ok(UniProgress {
+                        state: OperationState::Cancelled,
+                        percent,
+                        message: format!("Cancelled {app_name}"),
+                    }))
+                    .await;
+                return;
+            }
+        }
         let _ = tx
             .send(Ok(UniProgress {
                 state,

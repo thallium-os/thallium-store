@@ -7,16 +7,25 @@
 
 use super::appimage;
 use super::download::download;
-use super::{emit, fail, ProgressSender};
+use super::{emit, fail, ProgressSender, StagePermits};
 use crate::{privilege::privileged, registry};
 use serde_json::Value;
 use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use store_core::{OperationAction, OperationState};
+use tokio_util::sync::CancellationToken;
 
-pub async fn run(action: OperationAction, app_name: &str, package_id: &str, tx: &ProgressSender) {
+pub async fn run(
+    action: OperationAction,
+    app_name: &str,
+    package_id: &str,
+    tx: &ProgressSender,
+    token: &CancellationToken,
+    permits: &StagePermits,
+) {
     if matches!(action, OperationAction::Remove) {
+        let _mutation_permit = permits.github_mutation.clone().acquire_owned().await.ok();
         match registry::remove(app_name).await {
             Ok(()) => {
                 emit(tx, OperationState::Succeeded, 100, format!("Removed {app_name}")).await
@@ -26,8 +35,12 @@ pub async fn run(action: OperationAction, app_name: &str, package_id: &str, tx: 
         return;
     }
 
-    if let Err(err) = install(action, app_name, package_id, tx).await {
-        fail(tx, format!("installing {app_name} failed: {err}")).await;
+    if let Err(err) = install(action, app_name, package_id, tx, token, permits).await {
+        if token.is_cancelled() {
+            emit(tx, OperationState::Cancelled, 0, format!("Cancelled installing {app_name}")).await;
+        } else {
+            fail(tx, format!("installing {app_name} failed: {err}")).await;
+        }
     }
 }
 
@@ -36,6 +49,8 @@ async fn install(
     app_name: &str,
     package_id: &str,
     tx: &ProgressSender,
+    token: &CancellationToken,
+    permits: &StagePermits,
 ) -> anyhow::Result<()> {
     let (owner, repo) = package_id
         .split_once('/')
@@ -63,15 +78,25 @@ async fn install(
     let done = Arc::new(AtomicU64::new(0));
     let total = Arc::new(AtomicU64::new(0));
     let ticker = appimage::spawn_ticker(tx.clone(), Arc::clone(&done), Arc::clone(&total), 5, 80);
-    let result = download(&url, &dest, &done, &total).await;
+    // Download stage: shared network permit only, so this can run alongside
+    // other sources' downloads (and other github releases up to the limit).
+    let network_permit = permits.network.clone().acquire_owned().await.ok();
+    let result = download(&url, &dest, &done, &total, token).await;
     ticker.abort();
+    drop(network_permit);
     result?;
 
+    // Install stage: the resulting asset type decides which mutation permit
+    // applies. A `.deb` shells out to apt-get, which touches the dpkg lock
+    // just like the System backend, so it must serialize on `system_mutation`
+    // (never `github_mutation`) to stay strictly serial system-wide.
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".appimage") {
+        let _mutation_permit = permits.github_mutation.clone().acquire_owned().await.ok();
         appimage::finalize(app_name, &dest, tx).await
     } else if lower.ends_with(".deb") {
-        install_deb(app_name, repo, &dest, tx).await
+        let _mutation_permit = permits.system_mutation.clone().acquire_owned().await.ok();
+        install_deb(app_name, repo, &dest, tx, token).await
     } else {
         anyhow::bail!("unsupported asset type: {name}")
     }
@@ -82,14 +107,22 @@ async fn install_deb(
     repo: &str,
     dest: &std::path::Path,
     tx: &ProgressSender,
+    token: &CancellationToken,
 ) -> anyhow::Result<()> {
     emit(tx, OperationState::Installing, 88, format!("Installing {app_name}")).await;
     let path = dest.to_string_lossy().to_string();
-    let status = privileged("apt-get", &["install", "-y", &path])
+    let mut child = privileged("apt-get", &["install", "-y", &path])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .status()
-        .await?;
+        .spawn()?;
+    let status = tokio::select! {
+        status = child.wait() => status?,
+        _ = token.cancelled() => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            anyhow::bail!("cancelled");
+        }
+    };
     if !status.success() {
         anyhow::bail!("apt-get exited with {status}");
     }

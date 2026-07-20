@@ -13,10 +13,26 @@ mod flatpak;
 mod github;
 
 use crate::UniProgress;
+use std::sync::Arc;
 use store_core::{OperationAction, OperationState, SourceKind};
 use tokio::sync::mpsc::Sender;
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 pub type ProgressSender = Sender<Result<UniProgress, String>>;
+
+/// Scheduler-owned concurrency permits threaded down into backends so each one
+/// can bound its own download stage (shared `network` slot, parallel across all
+/// sources) separately from its install stage (per-source `*_mutation` slot,
+/// serial for system/flatpak). See individual backends for where each stage
+/// boundary actually falls.
+#[derive(Clone)]
+pub struct StagePermits {
+    pub network: Arc<Semaphore>,
+    pub system_mutation: Arc<Semaphore>,
+    pub flatpak_mutation: Arc<Semaphore>,
+    pub github_mutation: Arc<Semaphore>,
+}
 
 /// Dispatch an operation to the backend that owns `source`.
 pub async fn run(
@@ -25,12 +41,20 @@ pub async fn run(
     package_id: String,
     source: SourceKind,
     tx: ProgressSender,
+    token: CancellationToken,
+    permits: StagePermits,
 ) {
     match source {
-        SourceKind::System => apt::run(action, &app_name, &package_id, &tx).await,
-        SourceKind::Flathub => flatpak::run(action, &app_name, &package_id, &tx).await,
-        SourceKind::Github => github::run(action, &app_name, &package_id, &tx).await,
-        SourceKind::Appimage => appimage::run(action, &app_name, &package_id, &tx).await,
+        SourceKind::System => {
+            apt::run(action, &app_name, &package_id, &tx, &token, &permits.network, &permits.system_mutation).await
+        }
+        SourceKind::Flathub => {
+            flatpak::run(action, &app_name, &package_id, &tx, &token, &permits.network, &permits.flatpak_mutation).await
+        }
+        SourceKind::Github => github::run(action, &app_name, &package_id, &tx, &token, &permits).await,
+        SourceKind::Appimage => {
+            appimage::run(action, &app_name, &package_id, &tx, &token, &permits.network, &permits.github_mutation).await
+        }
     }
 }
 

@@ -12,16 +12,19 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 
 const SEGMENTS: u64 = 8;
 const MIN_SEGMENTED: u64 = 4 * 1024 * 1024; // below 4 MiB a single stream wins
 
 /// Download `url` to `dest`, adding fetched bytes to `done`. Returns total size.
+/// Observes `token`: cancellation aborts the transfer and returns an error.
 pub async fn download(
     url: &str,
     dest: &Path,
     done: &Arc<AtomicU64>,
     total_out: &Arc<AtomicU64>,
+    token: &CancellationToken,
 ) -> Result<u64> {
     let client = reqwest::Client::builder()
         .user_agent("thallium-store")
@@ -44,9 +47,9 @@ pub async fn download(
     total_out.store(total, Ordering::Relaxed);
 
     if ranged && total >= MIN_SEGMENTED {
-        segmented(&client, url, dest, total, done).await?;
+        segmented(&client, url, dest, total, done, token).await?;
     } else {
-        single(&client, url, dest, done).await?;
+        single(&client, url, dest, done, token).await?;
     }
     Ok(total)
 }
@@ -56,12 +59,21 @@ async fn single(
     url: &str,
     dest: &Path,
     done: &Arc<AtomicU64>,
+    token: &CancellationToken,
 ) -> Result<()> {
     let mut resp = client.get(url).send().await?.error_for_status()?;
     let mut file = tokio::fs::File::create(dest).await?;
-    while let Some(chunk) = resp.chunk().await? {
-        file.write_all(&chunk).await?;
-        done.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+    loop {
+        tokio::select! {
+            _ = token.cancelled() => anyhow::bail!("download cancelled"),
+            chunk = resp.chunk() => match chunk? {
+                Some(chunk) => {
+                    file.write_all(&chunk).await?;
+                    done.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                }
+                None => break,
+            },
+        }
     }
     file.flush().await?;
     Ok(())
@@ -73,6 +85,7 @@ async fn segmented(
     dest: &Path,
     total: u64,
     done: &Arc<AtomicU64>,
+    token: &CancellationToken,
 ) -> Result<()> {
     // Preallocate so each segment can seek to its own offset.
     let file = tokio::fs::File::create(dest).await?;
@@ -91,6 +104,7 @@ async fn segmented(
         let url = url.to_string();
         let dest = dest.to_path_buf();
         let done = Arc::clone(done);
+        let token = token.clone();
         handles.push(tokio::spawn(async move {
             let mut resp = client
                 .get(&url)
@@ -103,9 +117,17 @@ async fn segmented(
                 .open(&dest)
                 .await?;
             file.seek(std::io::SeekFrom::Start(start)).await?;
-            while let Some(chunk) = resp.chunk().await? {
-                file.write_all(&chunk).await?;
-                done.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            loop {
+                tokio::select! {
+                    _ = token.cancelled() => anyhow::bail!("download cancelled"),
+                    chunk = resp.chunk() => match chunk? {
+                        Some(chunk) => {
+                            file.write_all(&chunk).await?;
+                            done.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                        }
+                        None => break,
+                    },
+                }
             }
             file.flush().await?;
             Ok::<(), anyhow::Error>(())

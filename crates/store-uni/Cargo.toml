@@ -12,3 +12,4 @@ store-core = { path = "../store-core" }
 reqwest.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
