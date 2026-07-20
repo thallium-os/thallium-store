@@ -5,7 +5,7 @@ use std::process::Stdio;
 use store_core::{OperationAction, OperationState, SourceKind};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration};
 
 #[derive(Clone, Debug)]
@@ -82,14 +82,15 @@ impl UniAdapter {
         app_name: String,
         package_id: String,
         source: SourceKind,
+        cancel_rx: watch::Receiver<bool>,
     ) -> mpsc::Receiver<Result<UniProgress, String>> {
         let (tx, rx) = mpsc::channel(16);
         let fake = self.fake;
         tokio::spawn(async move {
             if fake {
-                run_fake(action, &app_name, tx).await;
+                run_fake(action, &app_name, tx, cancel_rx).await;
             } else {
-                run_real_json_events(action, &package_id, source, tx).await;
+                run_real_json_events(action, &package_id, source, tx, cancel_rx).await;
             }
         });
         rx
@@ -100,6 +101,7 @@ async fn run_fake(
     action: OperationAction,
     app_name: &str,
     tx: mpsc::Sender<Result<UniProgress, String>>,
+    mut cancel_rx: watch::Receiver<bool>,
 ) {
     let verb = match action {
         OperationAction::Install => "Installing",
@@ -116,7 +118,21 @@ async fn run_fake(
     ];
 
     for (state, percent, message) in events {
-        sleep(Duration::from_millis(450)).await;
+        tokio::select! {
+            _ = sleep(Duration::from_millis(450)) => {}
+            _ = cancel_rx.changed() => {
+                if *cancel_rx.borrow() {
+                    let _ = tx
+                        .send(Ok(UniProgress {
+                            state: OperationState::Cancelled,
+                            percent: 100,
+                            message: "Cancelled by user".to_string(),
+                        }))
+                        .await;
+                    return;
+                }
+            }
+        }
         let _ = tx
             .send(Ok(UniProgress {
                 state,
@@ -132,6 +148,7 @@ async fn run_real_json_events(
     package_id: &str,
     source: SourceKind,
     tx: mpsc::Sender<Result<UniProgress, String>>,
+    mut cancel_rx: watch::Receiver<bool>,
 ) {
     let source_arg = match source {
         SourceKind::System => "apt",
@@ -202,7 +219,8 @@ async fn run_real_json_events(
         });
     }
 
-    match child.wait().await {
+    tokio::select! {
+        status = child.wait() => match status {
         Ok(status) if status.success() => {}
         Ok(status) => {
             let _ = tx
@@ -211,6 +229,19 @@ async fn run_real_json_events(
         }
         Err(err) => {
             let _ = tx.send(Err(format!("UNI wait failed: {err}"))).await;
+        }
+        },
+        _ = cancel_rx.changed() => {
+            if *cancel_rx.borrow() {
+                let _ = child.kill().await;
+                let _ = tx
+                    .send(Ok(UniProgress {
+                        state: OperationState::Cancelled,
+                        percent: 100,
+                        message: "Cancelled by user".to_string(),
+                    }))
+                    .await;
+            }
         }
     }
 }

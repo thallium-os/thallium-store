@@ -254,6 +254,96 @@ ShellRoot {
         activeView = "queue"
     }
 
+    function packageIdFromOperation(operation) {
+        if (!operation)
+            return ""
+        if (operation.variant_id && operation.variant_id.indexOf(":") > 0)
+            return operation.variant_id.split(":").slice(1).join(":")
+        return operation.app_id || operation.app_name
+    }
+
+    function appFromOperation(operation) {
+        const source = operationSource(operation.source)
+        const packageId = packageIdFromOperation(operation)
+        const sourceArg = source === "system" ? "apt" : source === "flathub" ? "flatpak" : source
+        return {
+            id: operation.app_id || "operation:" + source + ":" + packageId,
+            name: operation.app_name,
+            summary: root.sourceLabel(source) + " · " + operation.action + " · " + operation.state,
+            description: operation.message || "Operation history from the queue.",
+            developer: null,
+            homepage: null,
+            license: null,
+            icon: null,
+            screenshots: [],
+            installed: operation.action === "install" && operation.state === "succeeded",
+            merge_confidence: 1.0,
+            merge_evidence: ["queue operation"],
+            recommended_variant_id: operation.variant_id || sourceArg + ":" + packageId,
+            variants: [{
+                id: operation.variant_id || sourceArg + ":" + packageId,
+                source: source,
+                package_id: packageId,
+                version: null,
+                trust: source === "flathub" ? "sandboxed" : source === "system" ? "system_access" : "unverified",
+                verified: false,
+                command_preview: "uni " + operation.action + " " + packageId + " --source " + sourceArg,
+                ranking_reasons: ["queue operation"]
+            }]
+        }
+    }
+
+    function retryOperation(operation) {
+        if (!operation)
+            return
+        request("operations.enqueue", {
+            app_id: operation.app_id,
+            variant_id: operation.variant_id,
+            action: operation.action,
+            app_name: operation.app_name,
+            package_id: packageIdFromOperation(operation),
+            source: operationSource(operation.source)
+        })
+        activeView = "queue"
+    }
+
+    function cancelOperation(operation) {
+        if (!operation)
+            return
+        request("operations.cancel", {
+            operationId: operation.id
+        })
+        activeView = "queue"
+    }
+
+    function operationActionLabel(operation) {
+        if (!operation)
+            return "Details"
+        if (operation.state === "failed")
+            return "Retry"
+        if (operation.state === "cancelled")
+            return "Cancelled"
+        if (operation.action === "remove" && operation.state === "succeeded")
+            return "Removed"
+        if (operation.action === "install" && operation.state === "succeeded")
+            return "Installed"
+        if (operation.action === "update" && operation.state === "succeeded")
+            return "Updated"
+        return "Cancel"
+    }
+
+    function operationProblem(operation) {
+        if (!operation)
+            return ""
+        if (operation.state === "failed")
+            return operation.message && operation.message.length > 0 ? "Problem: " + operation.message : "Problem: install failed without a detailed backend message."
+        if (operation.state === "cancelled")
+            return "Cancelled: operation was stopped before it finished."
+        if (operation.state === "succeeded")
+            return operation.action === "remove" ? "Completed: app was removed." : "Completed: app is installed."
+        return operation.message || "Working"
+    }
+
     function sourceLabel(source) {
         if (source === "system" || source === "apt" || source === "dpkg")
             return "System"
@@ -417,6 +507,9 @@ ShellRoot {
                     } else if (result.id && result.state !== undefined) {
                         root.status = result.message || "Queued"
                         root.request("operations.list", {})
+                    } else if (result.accepted !== undefined && result.operation !== undefined) {
+                        root.status = result.message || "Operation updated"
+                        root.request("operations.list", {})
                     } else if (result.status !== undefined) {
                         root.fakeUniMode = result.fakeUni === true
                         root.uniHealth = result.uni || ""
@@ -459,9 +552,18 @@ ShellRoot {
         onTriggered: root.activityFrame = root.activityFrame + 1
     }
 
+    Timer {
+        id: initialLoadDelay
+        interval: 650
+        repeat: false
+        onTriggered: {
+            root.request("system.health", {})
+            root.searchNow()
+        }
+    }
+
     Component.onCompleted: {
-        root.request("system.health", {})
-        root.searchNow()
+        initialLoadDelay.start()
     }
 
     component NavButton: Rectangle {
@@ -638,6 +740,7 @@ ShellRoot {
         signal clicked()
 
         height: 40
+        implicitHeight: height
         implicitWidth: actionText.implicitWidth + 28
         color: pressed ? Qt.darker(fill, 1.18) : hovered ? Qt.lighter(fill, 1.08) : fill
         border.color: fill === root.cPanel || fill === root.cDim ? root.cLine : fill
@@ -705,15 +808,6 @@ ShellRoot {
                         anchors.fill: parent
                         anchors.margins: 18
                         spacing: 14
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-                            Rectangle { Layout.preferredWidth: 13; Layout.preferredHeight: 13; radius: 7; color: "#ff5f57" }
-                            Rectangle { Layout.preferredWidth: 13; Layout.preferredHeight: 13; radius: 7; color: "#ffbd2e" }
-                            Rectangle { Layout.preferredWidth: 13; Layout.preferredHeight: 13; radius: 7; color: "#28c840" }
-                            Item { Layout.fillWidth: true }
-                        }
 
                         RowLayout {
                             Layout.fillWidth: true
@@ -918,25 +1012,6 @@ ShellRoot {
                         Rectangle {
                             anchors.fill: parent
                             color: root.cBase
-                        }
-
-                        Rectangle {
-                            width: parent.width * 0.82
-                            height: Math.max(220, parent.height * 0.24)
-                            radius: 24
-                            x: parent.width * 0.10
-                            y: parent.height - height + (root.isBusy() ? Math.sin(root.activityFrame / 5) * 12 : 0)
-                            opacity: root.isBusy() ? 0.30 : 0.14
-                            gradient: Gradient {
-                                orientation: Gradient.Horizontal
-                                GradientStop { position: 0.0; color: "#24d6c8" }
-                                GradientStop { position: 0.34; color: "#7be36f" }
-                                GradientStop { position: 0.68; color: "#0a84ff" }
-                                GradientStop { position: 1.0; color: "#bf5af2" }
-                            }
-
-                            Behavior on y { NumberAnimation { duration: 160; easing.type: Easing.OutSine } }
-                            Behavior on opacity { NumberAnimation { duration: 180 } }
                         }
 
                         ColumnLayout {
@@ -1655,14 +1730,15 @@ ShellRoot {
                                         const columns = Math.max(1, Math.floor(width / 320))
                                         return Math.floor(width / columns)
                                     }
-                                    cellHeight: Math.round(138 * root.uiScale())
+                                    cellHeight: Math.round(230 * root.uiScale())
                                     delegate: Rectangle {
                                         id: queueCard
                                         property color stateColor: modelData.state === "succeeded" ? root.cGreenSoft : modelData.state === "failed" ? root.cRed : root.cBlue
                                         property color stateSurface: modelData.state === "succeeded" ? "#20372b" : modelData.state === "failed" ? "#4a2528" : root.cBlueSoft
+                                        property bool terminal: modelData.state === "succeeded" || modelData.state === "failed" || modelData.state === "cancelled"
 
                                         width: queueGrid.cellWidth - 14
-                                        height: Math.round(122 * root.uiScale())
+                                        height: Math.round(210 * root.uiScale())
                                         x: 7
                                         y: 4
                                         color: root.cPanel
@@ -1716,7 +1792,7 @@ ShellRoot {
 
                                         ColumnLayout {
                                             anchors.fill: parent
-                                            anchors.margins: 16
+                                            anchors.margins: 14
                                             spacing: 8
 
                                             RowLayout {
@@ -1756,12 +1832,30 @@ ShellRoot {
                                                     }
 
                                                     Label {
-                                                        text: modelData.action + " · " + modelData.source + " · " + modelData.state
+                                                        text: modelData.action + " · " + root.sourceLabel(root.operationSource(modelData.source))
                                                         color: root.cMuted
                                                         font.family: root.fontHuman
                                                         font.pixelSize: 12
                                                         Layout.fillWidth: true
                                                         elide: Text.ElideRight
+                                                    }
+                                                }
+
+                                                Rectangle {
+                                                    Layout.preferredWidth: stateChip.implicitWidth + 18
+                                                    Layout.preferredHeight: 24
+                                                    radius: 12
+                                                    color: queueCard.stateSurface
+                                                    border.color: queueCard.stateColor
+
+                                                    Label {
+                                                        id: stateChip
+                                                        anchors.centerIn: parent
+                                                        text: modelData.state
+                                                        color: queueCard.stateColor
+                                                        font.family: root.fontHuman
+                                                        font.pixelSize: 10
+                                                        font.bold: true
                                                     }
                                                 }
                                             }
@@ -1774,12 +1868,42 @@ ShellRoot {
                                             }
 
                                             Label {
-                                                text: modelData.message
-                                                color: root.cMuted
+                                                text: root.operationProblem(modelData)
+                                                color: modelData.state === "failed" ? root.cRed : root.cMuted
                                                 font.family: root.fontHuman
-                                                font.pixelSize: 11
+                                                font.pixelSize: 12
+                                                maximumLineCount: 2
+                                                wrapMode: Text.WordWrap
                                                 Layout.fillWidth: true
                                                 elide: Text.ElideRight
+                                            }
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                Layout.preferredHeight: 40
+                                                spacing: 8
+
+                                                ActionButton {
+                                                    label: "Details"
+                                                    fill: root.cDim
+                                                    textColor: root.cBlue
+                                                    Layout.fillWidth: true
+                                                    onClicked: root.selectApp(root.appFromOperation(modelData))
+                                                }
+
+                                                ActionButton {
+                                                    label: root.operationActionLabel(modelData)
+                                                    fill: modelData.state === "failed" ? root.cRed : queueCard.terminal ? root.cDim : root.cBlue
+                                                    textColor: modelData.state === "failed" ? "white" : queueCard.terminal ? queueCard.stateColor : "white"
+                                                    active: modelData.state === "failed" || !queueCard.terminal
+                                                    Layout.fillWidth: true
+                                                    onClicked: {
+                                                        if (modelData.state === "failed")
+                                                            root.retryOperation(modelData)
+                                                        else if (!queueCard.terminal)
+                                                            root.cancelOperation(modelData)
+                                                    }
+                                                }
                                             }
                                         }
                                     }

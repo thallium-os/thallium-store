@@ -18,7 +18,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::Command;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{watch, Mutex, Semaphore};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -28,6 +28,7 @@ struct AppState {
     uni: UniAdapter,
     fake_uni: bool,
     recent_apps: Arc<Mutex<HashMap<String, CanonicalApp>>>,
+    cancellations: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     active: Arc<Semaphore>,
     system_mutation: Arc<Semaphore>,
     flatpak_mutation: Arc<Semaphore>,
@@ -95,11 +96,22 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
 
-    if socket_path.exists() {
+    for attempt in 0..20 {
+        if !socket_path.exists() {
+            break;
+        }
+
         match UnixStream::connect(&socket_path).await {
+            Ok(_) if attempt < 19 => {
+                tracing::info!(
+                    "backend already available on {}; waiting before helper exit",
+                    socket_path.display()
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
             Ok(_) => {
                 tracing::info!(
-                    "backend already available on {}; exiting helper instance",
+                    "backend still available on {}; exiting helper instance",
                     socket_path.display()
                 );
                 return Ok(());
@@ -110,9 +122,11 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
                     ErrorKind::ConnectionRefused
                         | ErrorKind::NotFound
                         | ErrorKind::AddrNotAvailable
+                        | ErrorKind::PermissionDenied
                 ) =>
             {
                 tokio::fs::remove_file(&socket_path).await?;
+                break;
             }
             Err(err) => return Err(err).context("existing backend socket is not usable"),
         }
@@ -127,6 +141,7 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
         uni: UniAdapter::new(fake_uni),
         fake_uni,
         recent_apps: Arc::new(Mutex::new(HashMap::new())),
+        cancellations: Arc::new(Mutex::new(HashMap::new())),
         active: Arc::new(Semaphore::new(4)),
         system_mutation: Arc::new(Semaphore::new(1)),
         flatpak_mutation: Arc::new(Semaphore::new(1)),
@@ -256,10 +271,7 @@ async fn handle_request(
             let logs = state.db.lock().await.logs(id)?;
             Ok(json!({ "items": logs }))
         }
-        "operations.cancel" => Ok(json!({
-            "accepted": false,
-            "message": "Cancellation is available for queued jobs in the scheduler contract; active fake UNI jobs finish quickly in this MVP."
-        })),
+        "operations.cancel" => cancel_operation(request.params, state).await,
         "operations.retry" => Err(anyhow::anyhow!("retry is not implemented in the MVP slice")),
         "apps.launch" => Err(anyhow::anyhow!(
             "launch requires trusted desktop entry discovery; not enabled in fake MVP mode"
@@ -267,6 +279,55 @@ async fn handle_request(
         "operations.enqueue" => enqueue_operation(request.params, state, writer).await,
         _ => Err(anyhow::anyhow!("unknown method {}", request.method)),
     }
+}
+
+async fn cancel_operation(params: Value, state: AppState) -> Result<Value> {
+    let operation_id = params
+        .get("operationId")
+        .and_then(Value::as_str)
+        .context("missing operationId")?;
+
+    let mut operation = state
+        .db
+        .lock()
+        .await
+        .get_operation(operation_id)?
+        .context("operation not found")?;
+
+    if matches!(
+        operation.state,
+        OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
+    ) {
+        return Ok(json!({
+            "accepted": false,
+            "message": "Operation is already finished",
+            "operation": operation
+        }));
+    }
+
+    if let Some(cancel) = state.cancellations.lock().await.remove(operation_id) {
+        let _ = cancel.send(true);
+    }
+
+    operation.state = OperationState::Cancelled;
+    operation.percent = 100;
+    operation.message = "Cancelled by user".to_string();
+    operation.updated_at = Utc::now();
+
+    let db = state.db.lock().await;
+    db.upsert_operation(&operation)?;
+    db.add_log(&OperationLog {
+        operation_id: operation.id.clone(),
+        timestamp: operation.updated_at,
+        level: "warn".to_string(),
+        message: operation.message.clone(),
+    })?;
+
+    Ok(json!({
+        "accepted": true,
+        "message": "Operation cancelled",
+        "operation": operation
+    }))
 }
 
 async fn enqueue_operation(
@@ -354,10 +415,24 @@ async fn enqueue_operation(
         message: command_preview,
     })?;
 
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    state
+        .cancellations
+        .lock()
+        .await
+        .insert(operation.id.clone(), cancel_tx);
+
     let operation_for_task = operation.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        run_operation(state, operation_for_task, variant.package_id, writer).await;
+        run_operation(
+            state,
+            operation_for_task,
+            variant.package_id,
+            writer,
+            cancel_rx,
+        )
+        .await;
     });
 
     Ok(serde_json::to_value(operation)?)
@@ -368,6 +443,7 @@ async fn run_operation(
     mut operation: Operation,
     package_id: String,
     writer: Arc<Mutex<OwnedWriteHalf>>,
+    cancel_rx: watch::Receiver<bool>,
 ) {
     let _active = state.active.clone().acquire_owned().await.ok();
     let _source_permit = match operation.source {
@@ -382,6 +458,7 @@ async fn run_operation(
         operation.app_name.clone(),
         package_id,
         operation.source,
+        cancel_rx,
     );
 
     while let Some(event) = rx.recv().await {
@@ -411,6 +488,8 @@ async fn run_operation(
         });
         let _ = write_notification(&writer, "event.operationProgress", &operation).await;
     }
+
+    state.cancellations.lock().await.remove(&operation.id);
 }
 
 async fn write_response(writer: &Arc<Mutex<OwnedWriteHalf>>, response: RpcResponse) -> Result<()> {
