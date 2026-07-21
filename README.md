@@ -90,4 +90,4 @@ UNI is vendored under `vendor/uni/`. Heavy builds and CI run in GitHub Actions.
 
 ## License
 
-MIT
+[GNU General Public License v3.0](LICENSE) or later.

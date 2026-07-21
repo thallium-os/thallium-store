@@ -3,8 +3,8 @@
   <id>io.thallium.Store</id>
   <name>Thallium Store</name>
   <summary>Install applications on Thallium OS</summary>
-  <metadata_license>MIT</metadata_license>
-  <project_license>MIT</project_license>
+  <metadata_license>FSFAP</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
   <description>
     <p>Thallium Store is a graphical application store for Thallium OS. It searches system packages, Flathub, and curated GitHub releases, then delegates package changes to UNI.</p>
   </description>
