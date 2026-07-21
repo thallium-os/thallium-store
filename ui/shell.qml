@@ -30,6 +30,9 @@ ShellRoot {
     property bool sidebarCollapsed: false
     property bool searchCommitted: false
     property var storeLog: []
+    property bool installOpen: false
+    property var installApp: null
+    property string installVariantId: ""
 
     function pushLog(msg) {
         const stamp = Qt.formatDateTime(new Date(), "HH:mm:ss")
@@ -412,6 +415,44 @@ ShellRoot {
         return source || "Unknown"
     }
 
+    function formatLabel(source) {
+        if (source === "system" || source === "apt" || source === "dpkg")
+            return ".deb (dpkg)"
+        if (source === "flathub" || source === "flatpak")
+            return "flatpak"
+        if (source === "github")
+            return "release binary"
+        if (source === "appimage")
+            return "AppImage"
+        return "package"
+    }
+
+    function openInstall(app) {
+        if (!app)
+            return
+        const rec = recommendedVariant(app)
+        root.installApp = app
+        root.installVariantId = rec ? rec.id : (app.variants.length > 0 ? app.variants[0].id : "")
+        root.installOpen = true
+    }
+
+    function confirmInstall() {
+        if (!root.installApp)
+            return
+        let chosen = null
+        for (let i = 0; i < root.installApp.variants.length; i++) {
+            if (root.installApp.variants[i].id === root.installVariantId) {
+                chosen = root.installApp.variants[i]
+                break
+            }
+        }
+        if (!chosen)
+            chosen = recommendedVariant(root.installApp)
+        root.installOpen = false
+        root.pushLog("install " + root.installApp.name + " via " + root.sourceLabel(chosen.source))
+        root.enqueueVariant(root.installApp, chosen)
+    }
+
     function platformLabel(source) {
         if (source === "system" || source === "apt" || source === "dpkg")
             return "Debian / Thallium repositories"
@@ -778,11 +819,13 @@ ShellRoot {
         }
     }
 
-    // Machine-voice section header: green tick + mono uppercase label.
+    // Machine-voice section header: green tick + mono uppercase label,
+    // hairline rule extending to the right edge (HUD readout feel).
     component HudRailHeader: RowLayout {
         property string title: ""
         property string sub: ""
         spacing: 10
+        Layout.fillWidth: true
         Rectangle { width: root.tickW; height: 15; radius: 0; color: root.cGreen; Layout.alignment: Qt.AlignVCenter }
         Label {
             text: title.toUpperCase()
@@ -800,6 +843,13 @@ ShellRoot {
             font.letterSpacing: 1
             Layout.alignment: Qt.AlignVCenter
             visible: sub.length > 0
+        }
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.alignment: Qt.AlignVCenter
+            height: 1
+            color: root.cLine
+            opacity: 0.45
         }
     }
 
@@ -1248,17 +1298,6 @@ ShellRoot {
                                 border.color: searchField.activeFocus ? root.cGreen : root.cLine
                                 clip: true
 
-                                Rectangle {
-                                    width: parent.width * 0.28
-                                    height: parent.height
-                                    radius: 0
-                                    color: "#a7c080"
-                                    opacity: root.requestRunning && root.activeMethod === "catalog.search" ? 0.16 : 0
-                                    x: root.requestRunning && root.activeMethod === "catalog.search" ? ((root.activityFrame * 20) % Math.max(1, parent.width + width)) - width : -width
-
-                                    Behavior on opacity { NumberAnimation { duration: 160 } }
-                                }
-
                                 RowLayout {
                                     anchors.fill: parent
                                     anchors.leftMargin: 16
@@ -1331,10 +1370,10 @@ ShellRoot {
                                     width: discoverScroll.availableWidth
                                     spacing: 26
 
-                                    // Featured carousel — full-width cards that slide between picks.
+                                    // Featured carousel — full-width editorial cards that slide between picks.
                                     Item {
                                         Layout.fillWidth: true
-                                        Layout.preferredHeight: Math.round(196 * root.uiScale()) + 24
+                                        Layout.preferredHeight: Math.round(236 * root.uiScale()) + 24
                                         visible: root.featuredPool().length > 0
 
                                         ListView {
@@ -1342,7 +1381,7 @@ ShellRoot {
                                             anchors.top: parent.top
                                             anchors.left: parent.left
                                             anchors.right: parent.right
-                                            height: Math.round(196 * root.uiScale())
+                                            height: Math.round(236 * root.uiScale())
                                             orientation: ListView.Horizontal
                                             snapMode: ListView.SnapOneItem
                                             highlightRangeMode: ListView.StrictlyEnforceRange
@@ -1358,8 +1397,24 @@ ShellRoot {
                                                 width: featuredCarousel.width
                                                 height: featuredCarousel.height
                                                 property var app: modelData
-                                                fill: root.cBlueSoft
+                                                property var variant: root.recommendedVariant(modelData)
+                                                fill: root.appSurface(app)
                                                 accentEdge: true
+                                                cut: 22
+                                                clip: true
+
+                                                // Ghost monogram — oversized brand letter bleeding off the right edge.
+                                                Label {
+                                                    anchors.right: parent.right
+                                                    anchors.rightMargin: Math.round(36 * root.uiScale())
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    text: featCard.app.name.substring(0, 1).toUpperCase()
+                                                    color: root.appAccent(featCard.app)
+                                                    opacity: 0.09
+                                                    font.family: root.fontBrand
+                                                    font.pixelSize: Math.round(230 * root.uiScale())
+                                                    font.bold: true
+                                                }
 
                                                 MouseArea {
                                                     anchors.fill: parent
@@ -1369,26 +1424,30 @@ ShellRoot {
 
                                                 RowLayout {
                                                     anchors.fill: parent
-                                                    anchors.margins: 28
-                                                    spacing: 24
+                                                    anchors.margins: 30
+                                                    spacing: 28
+
+                                                    // Icon on a dark inset tile — gives the artwork a stage.
                                                     Rectangle {
-                                                        Layout.preferredWidth: Math.round(112 * root.uiScale())
-                                                        Layout.preferredHeight: Math.round(112 * root.uiScale())
-                                                        color: "transparent"
+                                                        Layout.preferredWidth: Math.round(148 * root.uiScale())
+                                                        Layout.preferredHeight: Math.round(148 * root.uiScale())
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                        color: Qt.rgba(0, 0, 0, 0.30)
+                                                        border.color: Qt.rgba(0, 0, 0, 0.45)
                                                         clip: true
                                                         Label {
                                                             anchors.centerIn: parent
                                                             visible: fIcon.status !== Image.Ready
                                                             text: featCard.app.name.substring(0, 1).toUpperCase()
-                                                            color: root.cBlue
+                                                            color: root.appAccent(featCard.app)
                                                             font.family: root.fontBrand
-                                                            font.pixelSize: Math.round(48 * root.uiScale())
+                                                            font.pixelSize: Math.round(56 * root.uiScale())
                                                             font.bold: true
                                                         }
                                                         Image {
                                                             id: fIcon
                                                             anchors.fill: parent
-                                                            anchors.margins: 12
+                                                            anchors.margins: 20
                                                             source: featCard.app.icon ? featCard.app.icon : ""
                                                             fillMode: Image.PreserveAspectFit
                                                             asynchronous: true
@@ -1397,13 +1456,14 @@ ShellRoot {
                                                             visible: status === Image.Ready
                                                         }
                                                     }
+
                                                     ColumnLayout {
                                                         Layout.fillWidth: true
                                                         Layout.minimumWidth: 0
                                                         Layout.alignment: Qt.AlignVCenter
-                                                        spacing: 6
+                                                        spacing: 7
                                                         Label {
-                                                            text: "▚ FEATURED"
+                                                            text: "▚ FEATURED · " + (featCard.variant ? root.sourceLabel(featCard.variant.source).toUpperCase() : "CURATED")
                                                             color: root.cGreen
                                                             font.family: root.fontMono
                                                             font.pixelSize: 12
@@ -1414,14 +1474,15 @@ ShellRoot {
                                                             text: featCard.app.name
                                                             color: root.cFg
                                                             font.family: root.fontBrand
-                                                            font.pixelSize: Math.round(30 * root.uiScale())
+                                                            font.pixelSize: Math.round(33 * root.uiScale())
                                                             font.bold: true
                                                             elide: Text.ElideRight
                                                             Layout.fillWidth: true
                                                         }
                                                         Label {
                                                             text: featCard.app.summary
-                                                            color: root.cMuted
+                                                            color: root.cFg
+                                                            opacity: 0.72
                                                             font.family: root.fontHuman
                                                             font.pixelSize: 15
                                                             wrapMode: Text.WordWrap
@@ -1429,7 +1490,45 @@ ShellRoot {
                                                             elide: Text.ElideRight
                                                             Layout.fillWidth: true
                                                         }
+                                                        RowLayout {
+                                                            Layout.topMargin: 6
+                                                            spacing: 14
+                                                            ActionButton {
+                                                                label: featCard.app.installed ? "Installed" : "Get"
+                                                                fill: featCard.app.installed ? root.cDim : root.cGreen
+                                                                textColor: featCard.app.installed ? root.cMuted : root.cBase
+                                                                active: !featCard.app.installed
+                                                                height: 36
+                                                                Layout.preferredWidth: 104
+                                                                onClicked: {
+                                                                    if (!featCard.app.installed)
+                                                                        root.selectApp(featCard.app)
+                                                                }
+                                                            }
+                                                            Label {
+                                                                text: "FREE"
+                                                                color: root.cFg
+                                                                opacity: 0.5
+                                                                font.family: root.fontMono
+                                                                font.pixelSize: 10
+                                                                font.letterSpacing: 2
+                                                            }
+                                                        }
                                                     }
+                                                }
+
+                                                // HUD index counter, bottom-right.
+                                                Label {
+                                                    anchors.right: parent.right
+                                                    anchors.bottom: parent.bottom
+                                                    anchors.margins: 16
+                                                    text: (index + 1 < 10 ? "0" : "") + (index + 1) + " / "
+                                                          + (featuredCarousel.count < 10 ? "0" : "") + featuredCarousel.count
+                                                    color: root.cGreen
+                                                    opacity: 0.75
+                                                    font.family: root.fontMono
+                                                    font.pixelSize: 11
+                                                    font.letterSpacing: 2
                                                 }
                                             }
                                         }
@@ -1473,22 +1572,24 @@ ShellRoot {
 
                                             ListView {
                                                 Layout.fillWidth: true
-                                                Layout.preferredHeight: 162
+                                                Layout.preferredHeight: 246
                                                 orientation: ListView.Horizontal
-                                                spacing: 12
+                                                spacing: 14
                                                 clip: true
                                                 model: collection.apps
                                                 delegate: Rectangle {
                                                     id: railCard
                                                     property var app: modelData
-                                                    width: 132
-                                                    height: 150
+                                                    width: 176
+                                                    height: 234
                                                     radius: 0
-                                                    color: root.cPanel
+                                                    color: railHover.hovered ? root.cDim : root.cPanel
                                                     border.color: railHover.hovered ? root.cGreen : root.cLine
+                                                    transform: Translate { y: railHover.hovered ? -3 : 0 }
 
                                                     HoverHandler { id: railHover }
                                                     Behavior on border.color { ColorAnimation { duration: 140 } }
+                                                    Behavior on color { ColorAnimation { duration: 140 } }
 
                                                     MouseArea {
                                                         anchors.fill: parent
@@ -1498,27 +1599,30 @@ ShellRoot {
 
                                                     ColumnLayout {
                                                         anchors.fill: parent
-                                                        anchors.margins: 12
-                                                        spacing: 8
+                                                        anchors.margins: 14
+                                                        spacing: 10
+
+                                                        // Icon on a source-tinted tile — every card gets a stage.
                                                         Rectangle {
-                                                            Layout.alignment: Qt.AlignHCenter
-                                                            Layout.preferredWidth: 60
-                                                            Layout.preferredHeight: 60
-                                                            color: "transparent"
+                                                            Layout.fillWidth: true
+                                                            Layout.preferredHeight: 108
+                                                            color: root.appSurface(railCard.app)
+                                                            border.color: Qt.rgba(0, 0, 0, 0.3)
                                                             clip: true
                                                             Label {
                                                                 anchors.centerIn: parent
                                                                 visible: railIcon.status !== Image.Ready
                                                                 text: railCard.app.name.substring(0, 1).toUpperCase()
-                                                                color: root.cGreen
+                                                                color: root.appAccent(railCard.app)
                                                                 font.family: root.fontBrand
-                                                                font.pixelSize: 26
+                                                                font.pixelSize: 38
                                                                 font.bold: true
                                                             }
                                                             Image {
                                                                 id: railIcon
-                                                                anchors.fill: parent
-                                                                anchors.margins: 2
+                                                                anchors.centerIn: parent
+                                                                width: 72
+                                                                height: 72
                                                                 source: railCard.app.icon ? railCard.app.icon : ""
                                                                 fillMode: Image.PreserveAspectFit
                                                                 asynchronous: true
@@ -1527,21 +1631,33 @@ ShellRoot {
                                                                 visible: status === Image.Ready
                                                             }
                                                         }
+
                                                         Label {
                                                             text: railCard.app.name
                                                             color: root.cFg
                                                             font.family: root.fontHuman
-                                                            font.pixelSize: 13
+                                                            font.pixelSize: 14
                                                             font.bold: true
-                                                            horizontalAlignment: Text.AlignHCenter
+                                                            elide: Text.ElideRight
+                                                            maximumLineCount: 1
+                                                            Layout.fillWidth: true
+                                                        }
+
+                                                        Label {
+                                                            text: railCard.app.summary || ""
+                                                            color: root.cMuted
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 11
+                                                            lineHeight: 1.05
                                                             elide: Text.ElideRight
                                                             maximumLineCount: 2
                                                             wrapMode: Text.WordWrap
                                                             Layout.fillWidth: true
-                                                            Layout.alignment: Qt.AlignHCenter
+                                                            Layout.fillHeight: true
+                                                            verticalAlignment: Text.AlignTop
                                                         }
+
                                                         SourceTag {
-                                                            Layout.alignment: Qt.AlignHCenter
                                                             source: railCard.app.variants && railCard.app.variants.length > 0 ? railCard.app.variants[0].source : "flathub"
                                                             trust: railCard.app.variants && railCard.app.variants.length > 0 ? railCard.app.variants[0].trust : ""
                                                         }
@@ -1824,282 +1940,337 @@ ShellRoot {
 
                                 Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
 
+                                // Small back control above the banner.
+                                ActionButton {
+                                    label: "‹ Back"
+                                    fill: root.cDim
+                                    textColor: root.cFg
+                                    Layout.preferredWidth: 84
+                                    onClicked: root.activeView = "discover"
+                                }
+
+                                // Hero banner — accent gradient, icon left, name/tagline right.
                                 Rectangle {
                                     Layout.fillWidth: true
-                                    height: Math.max(292, Math.round(320 * root.uiScale()))
-                                    color: root.cPanel
-                                    border.color: root.cLine
+                                    height: Math.max(188, Math.round(210 * root.uiScale()))
                                     radius: 0
                                     clip: true
+                                    color: root.cPanel
+                                    border.color: root.cLine
 
-                                    ColumnLayout {
+                                    gradient: Gradient {
+                                        orientation: Gradient.Horizontal
+                                        GradientStop { position: 0.0; color: root.selectedApp ? root.appSurface(root.selectedApp) : root.cPanel }
+                                        GradientStop { position: 0.55; color: Qt.rgba(0, 0, 0, 0.10) }
+                                        GradientStop { position: 1.0; color: "transparent" }
+                                    }
+
+                                    // Ghost monogram bleeding off the right edge.
+                                    Label {
+                                        anchors.right: parent.right
+                                        anchors.rightMargin: Math.round(24 * root.uiScale())
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: root.selectedApp ? root.selectedApp.name.substring(0, 1).toUpperCase() : ""
+                                        color: root.selectedApp ? root.appAccent(root.selectedApp) : root.cGreen
+                                        opacity: 0.07
+                                        font.family: root.fontBrand
+                                        font.pixelSize: Math.round(220 * root.uiScale())
+                                        font.bold: true
+                                    }
+
+                                    RowLayout {
                                         anchors.fill: parent
-                                        anchors.margins: 24
-                                        spacing: 18
+                                        anchors.margins: 28
+                                        spacing: 26
 
-                                        RowLayout {
-                                            Layout.fillWidth: true
-                                            spacing: 12
-
-                                            ActionButton {
-                                                label: "Back"
-                                                fill: root.cDim
-                                                textColor: root.cFg
-                                                Layout.preferredWidth: 74
-                                                onClicked: root.activeView = "discover"
+                                        Rectangle {
+                                            Layout.preferredWidth: Math.round(120 * root.uiScale())
+                                            Layout.preferredHeight: Math.round(120 * root.uiScale())
+                                            Layout.alignment: Qt.AlignVCenter
+                                            color: "transparent"
+                                            clip: true
+                                            Label {
+                                                anchors.centerIn: parent
+                                                visible: heroIcon.status !== Image.Ready
+                                                text: root.selectedApp ? root.selectedApp.name.substring(0, 1).toUpperCase() : ""
+                                                color: root.selectedApp ? root.appAccent(root.selectedApp) : root.cGreen
+                                                font.family: root.fontBrand
+                                                font.pixelSize: Math.round(54 * root.uiScale())
+                                                font.bold: true
                                             }
+                                            Image {
+                                                id: heroIcon
+                                                anchors.fill: parent
+                                                source: root.selectedApp && root.selectedApp.icon ? root.selectedApp.icon : ""
+                                                fillMode: Image.PreserveAspectFit
+                                                asynchronous: true
+                                                cache: true
+                                                smooth: true
+                                                visible: status === Image.Ready
+                                            }
+                                        }
 
-                                            Item { Layout.fillWidth: true }
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
+                                            Layout.alignment: Qt.AlignVCenter
+                                            spacing: 8
+                                            Label {
+                                                text: root.selectedApp ? root.selectedApp.name : ""
+                                                color: root.cFg
+                                                font.family: root.fontBrand
+                                                font.pixelSize: Math.round(38 * root.uiScale())
+                                                font.bold: true
+                                                Layout.fillWidth: true
+                                                elide: Text.ElideRight
+                                            }
+                                            Label {
+                                                text: root.selectedApp ? root.selectedApp.summary : ""
+                                                color: root.cFg
+                                                opacity: 0.86
+                                                font.family: root.fontHuman
+                                                font.pixelSize: 17
+                                                wrapMode: Text.WordWrap
+                                                maximumLineCount: 2
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                            Label {
+                                                text: {
+                                                    const v = root.recommendedVariant(root.selectedApp)
+                                                    if (!v) return "Free"
+                                                    return "Free · " + root.sourceLabel(v.source) + " · " + root.formatLabel(v.source)
+                                                }
+                                                color: root.cFg
+                                                opacity: 0.62
+                                                font.family: root.fontMono
+                                                font.pixelSize: 12
+                                                font.letterSpacing: 1
+                                                Layout.fillWidth: true
+                                                elide: Text.ElideRight
+                                            }
+                                        }
 
+                                        // Primary action lives in the hero, Apple-style.
+                                        ColumnLayout {
+                                            Layout.alignment: Qt.AlignVCenter
+                                            spacing: 6
                                             ActionButton {
                                                 label: root.selectedApp && root.selectedApp.installed ? "Uninstall" : "Get"
-                                                fill: root.selectedApp && root.selectedApp.installed ? root.cRed : root.cBlue
-                                                textColor: "white"
-                                                Layout.preferredWidth: 116
+                                                fill: root.selectedApp && root.selectedApp.installed ? root.cRed : root.cGreen
+                                                textColor: root.selectedApp && root.selectedApp.installed ? "white" : root.cBase
+                                                Layout.preferredWidth: 132
                                                 onClicked: {
                                                     if (root.selectedApp && root.selectedApp.installed)
                                                         root.enqueueUninstall(root.selectedApp)
                                                     else
-                                                        root.enqueueInstall(root.selectedApp)
+                                                        root.openInstall(root.selectedApp)
                                                 }
+                                            }
+                                            Label {
+                                                text: root.selectedApp && root.selectedApp.installed ? "ON THIS SYSTEM" : "FREE"
+                                                color: root.cFg
+                                                opacity: 0.45
+                                                font.family: root.fontMono
+                                                font.pixelSize: 9
+                                                font.letterSpacing: 2
+                                                Layout.alignment: Qt.AlignHCenter
                                             }
                                         }
+                                    }
+                                }
 
-                                        RowLayout {
-                                            Layout.fillWidth: true
-                                            spacing: 28
+                                // App information strip — Apple-style metric row in the space under the banner.
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 78
+                                    color: root.cPanel
+                                    border.color: root.cLine
+                                    radius: 0
 
-                                            Rectangle {
-                                                Layout.preferredWidth: Math.round(120 * root.uiScale())
-                                                Layout.preferredHeight: Math.round(120 * root.uiScale())
-                                                color: "transparent"
-                                                clip: true
-                                                Label {
-                                                    anchors.centerIn: parent
-                                                    visible: heroIcon.status !== Image.Ready
-                                                    text: root.selectedApp ? root.selectedApp.name.substring(0, 1).toUpperCase() : ""
-                                                    color: root.cBlue
-                                                    font.family: root.fontBrand
-                                                    font.pixelSize: Math.round(54 * root.uiScale())
-                                                    font.bold: true
-                                                }
-                                                Image {
-                                                    id: heroIcon
-                                                    anchors.fill: parent
-                                                    anchors.margins: 8
-                                                    source: root.selectedApp && root.selectedApp.icon ? root.selectedApp.icon : ""
-                                                    fillMode: Image.PreserveAspectFit
-                                                    asynchronous: true
-                                                    cache: true
-                                                    smooth: true
-                                                    visible: status === Image.Ready
-                                                }
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 18
+                                        anchors.rightMargin: 18
+                                        spacing: 0
+
+                                        Repeater {
+                                            model: {
+                                                const v = root.recommendedVariant(root.selectedApp)
+                                                return [
+                                                    { t: "RATING",    val: (root.selectedApp && root.selectedApp.rating) ? Math.round(root.selectedApp.rating) + "★" : "—",           cap: "Catalog" },
+                                                    { t: "TRUST",     val: v ? root.trustLabel(v.trust) : "—",                                                                             cap: v && v.verified ? "Verified" : "Metadata" },
+                                                    { t: "SOURCE",    val: v ? root.sourceLabel(v.source) : "—",                                                                            cap: "Recommended" },
+                                                    { t: "DEVELOPER", val: (root.selectedApp && root.selectedApp.developer) ? root.selectedApp.developer : "—",                            cap: "Publisher" },
+                                                    { t: "VERSION",   val: v ? (v.version || "—") : "—",                                                                                    cap: "Latest" },
+                                                    { t: "SIZE",      val: root.sizeLabel(root.selectedApp),                                                                                cap: "Download" }
+                                                ]
                                             }
-
-                                            ColumnLayout {
+                                            delegate: RowLayout {
                                                 Layout.fillWidth: true
-                                                Layout.minimumWidth: 0
-                                                Layout.alignment: Qt.AlignVCenter
-                                                spacing: 8
-                                                Label {
-                                                    text: root.selectedApp ? root.selectedApp.name : ""
-                                                    color: root.cFg
-                                                    font.family: root.fontBrand
-                                                    font.pixelSize: Math.round(34 * root.uiScale())
-                                                    font.bold: true
-                                                    Layout.fillWidth: true
-                                                    elide: Text.ElideRight
-                                                }
-                                                Label {
-                                                    text: root.selectedApp ? root.selectedApp.summary : ""
-                                                    color: root.cMuted
-                                                    font.family: root.fontHuman
-                                                    font.pixelSize: 17
-                                                    wrapMode: Text.WordWrap
-                                                    Layout.fillWidth: true
-                                                }
-                                                Label {
-                                                    text: root.selectedApp ? root.compactDeveloper(root.selectedApp) : ""
-                                                    color: root.cBlue
-                                                    font.family: root.fontHuman
-                                                    font.pixelSize: 14
-                                                    font.bold: true
-                                                    Layout.fillWidth: true
-                                                    elide: Text.ElideRight
-                                                }
-                                            }
-                                        }
-
-                                        Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
-
-                                        GridLayout {
-                                            Layout.fillWidth: true
-                                            columns: detailsScroll.availableWidth > 860 ? 5 : 3
-                                            rowSpacing: 16
-                                            columnSpacing: 20
-
-                                            MetricBlock {
-                                                title: "Rating"
-                                                value: root.selectedApp && root.selectedApp.rating ? Math.round(root.selectedApp.rating) + "★" : "No rating"
-                                                caption: root.selectedApp && root.selectedApp.rating ? "Catalog" : ""
-                                            }
-                                            MetricBlock {
-                                                title: "Source"
-                                                value: root.recommendedVariant(root.selectedApp) ? root.sourceLabel(root.recommendedVariant(root.selectedApp).source) : "Unknown"
-                                                caption: "Recommended"
-                                            }
-                                            MetricBlock {
-                                                title: "Trust"
-                                                value: root.recommendedVariant(root.selectedApp) ? root.trustLabel(root.recommendedVariant(root.selectedApp).trust) : "Unknown"
-                                                caption: root.recommendedVariant(root.selectedApp) && root.recommendedVariant(root.selectedApp).verified ? "Verified" : "Metadata"
-                                            }
-                                            MetricBlock {
-                                                title: "Package"
-                                                value: root.recommendedVariant(root.selectedApp) ? root.recommendedVariant(root.selectedApp).package_id : ""
-                                                caption: root.recommendedVariant(root.selectedApp) ? root.recommendedVariant(root.selectedApp).version || "Version unknown" : ""
-                                            }
-                                            MetricBlock {
-                                                title: "Size"
-                                                value: root.sizeLabel(root.selectedApp)
-                                                caption: "Download"
-                                            }
-                                        }
-                                    }
-                                }
-
-                                SectionPanel {
-                                    title: "Preview"
-                                    subtitle: "Screenshots appear when catalog metadata includes safe HTTPS image links."
-                                    Layout.preferredHeight: Math.max(236, Math.round(254 * root.uiScale()))
-
-                                    ScrollView {
-                                        Layout.fillWidth: true
-                                        Layout.fillHeight: true
-                                        clip: true
-                                        ScrollBar.vertical.policy: ScrollBar.AlwaysOff
-
-                                        RowLayout {
-                                            spacing: 12
-                                            Repeater {
-                                                model: root.selectedApp && root.selectedApp.screenshots.length > 0 ? root.selectedApp.screenshots : ["placeholder"]
-                                                delegate: Rectangle {
-                                                    Layout.preferredWidth: 300
-                                                    Layout.preferredHeight: 168
-                                                    color: root.cDim
-                                                    border.color: root.cLine
-                                                    radius: 0
-                                                    clip: true
-
-                                                    Image {
-                                                        anchors.fill: parent
-                                                        anchors.margins: 1
-                                                        source: modelData === "placeholder" ? "" : modelData
-                                                        fillMode: Image.PreserveAspectCrop
-                                                        asynchronous: true
-                                                        visible: status === Image.Ready
-                                                    }
-                                                    ColumnLayout {
-                                                        anchors.centerIn: parent
-                                                        width: parent.width - 36
-                                                        visible: modelData === "placeholder" || shotImage.status === Image.Error
-                                                        Label {
-                                                            text: "No Preview"
-                                                            color: root.cMuted
-                                                            font.family: root.fontHuman
-                                                            font.pixelSize: 13
-                                                            font.bold: true
-                                                            horizontalAlignment: Text.AlignHCenter
-                                                            Layout.fillWidth: true
-                                                        }
-                                                        Label {
-                                                            text: root.selectedApp ? root.selectedApp.name : ""
-                                                            color: root.cMuted
-                                                            font.family: root.fontHuman
-                                                            font.pixelSize: 13
-                                                            horizontalAlignment: Text.AlignHCenter
-                                                            Layout.fillWidth: true
-                                                        }
-                                                    }
-                                                    Image {
-                                                        id: shotImage
-                                                        anchors.fill: parent
-                                                        source: modelData === "placeholder" ? "" : modelData
-                                                        fillMode: Image.PreserveAspectCrop
-                                                        asynchronous: true
-                                                        visible: status === Image.Ready
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                SectionPanel {
-                                    title: "App Information"
-                                    subtitle: root.recommendedVariant(root.selectedApp) && root.recommendedVariant(root.selectedApp).source === "flathub"
-                                              ? "Flatpak apps are sandboxed by default. Exact permissions require provider metadata."
-                                              : root.recommendedVariant(root.selectedApp) && root.recommendedVariant(root.selectedApp).source === "system"
-                                                ? "System packages integrate directly with Debian/Thallium and are not sandboxed."
-                                                : root.recommendedVariant(root.selectedApp) && root.recommendedVariant(root.selectedApp).source === "appimage"
-                                                  ? "AppImages are portable binaries installed under the user's UNI AppImage directory."
-                                                  : "GitHub releases are shown as unverified unless curated by Thallium metadata."
-                                    StatRow { name: "Source"; value: root.recommendedVariant(root.selectedApp) ? root.sourceLabel(root.recommendedVariant(root.selectedApp).source) : "" }
-                                    StatRow { name: "Package"; value: root.recommendedVariant(root.selectedApp) ? root.recommendedVariant(root.selectedApp).package_id : "" }
-                                    StatRow { name: "Version"; value: root.recommendedVariant(root.selectedApp) ? root.recommendedVariant(root.selectedApp).version || "" : "" }
-                                    StatRow { name: "Trust"; value: root.recommendedVariant(root.selectedApp) ? root.trustLabel(root.recommendedVariant(root.selectedApp).trust) : "" }
-                                    StatRow { name: "Developer"; value: root.selectedApp ? root.selectedApp.developer || "" : "" }
-                                    StatRow { name: "Website"; value: root.selectedApp ? root.selectedApp.homepage || root.selectedApp.repository || "" : "" }
-                                    StatRow { name: "Size"; value: root.sizeLabel(root.selectedApp) }
-                                    StatRow { name: "Command"; value: root.recommendedVariant(root.selectedApp) ? root.commandPreview(root.recommendedVariant(root.selectedApp)) : "" }
-                                }
-
-                                SectionPanel {
-                                    title: "Available Sources"
-                                    subtitle: "Choose the platform UNI should use. The recommended source is selected first."
-                                    Repeater {
-                                        model: root.selectedApp ? root.selectedApp.variants : []
-                                        delegate: Rectangle {
-                                            Layout.fillWidth: true
-                                            height: Math.max(138, Math.round(132 * root.uiScale()))
-                                            color: modelData.id === root.selectedApp.recommended_variant_id ? "#233024" : root.cPanel
-                                            border.color: modelData.id === root.selectedApp.recommended_variant_id ? "#4a5f3f" : root.cLine
-                                            radius: 0
-                                            clip: true
-
-                                            RowLayout {
-                                                anchors.fill: parent
-                                                anchors.margins: 12
-                                                spacing: 14
+                                                Layout.fillHeight: true
+                                                spacing: 0
 
                                                 ColumnLayout {
-                                                    Layout.preferredWidth: Math.max(150, Math.round(180 * root.uiScale()))
-                                                    spacing: 4
+                                                    Layout.fillWidth: true
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    spacing: 3
                                                     Label {
-                                                        text: root.sourceLabel(modelData.source)
+                                                        text: modelData.t
+                                                        color: root.cMuted
+                                                        font.family: root.fontMono
+                                                        font.pixelSize: 10
+                                                        font.letterSpacing: 1.5
+                                                        Layout.alignment: Qt.AlignHCenter
+                                                    }
+                                                    Label {
+                                                        text: modelData.val
                                                         color: root.cFg
                                                         font.family: root.fontBrand
                                                         font.pixelSize: 17
                                                         font.bold: true
+                                                        elide: Text.ElideRight
+                                                        horizontalAlignment: Text.AlignHCenter
+                                                        Layout.fillWidth: true
+                                                        Layout.maximumWidth: 140
                                                     }
                                                     Label {
-                                                        text: root.platformLabel(modelData.source)
+                                                        text: modelData.cap
                                                         color: root.cMuted
                                                         font.family: root.fontHuman
-                                                        font.pixelSize: 12
-                                                        wrapMode: Text.WordWrap
-                                                        Layout.fillWidth: true
+                                                        font.pixelSize: 10
+                                                        Layout.alignment: Qt.AlignHCenter
                                                     }
+                                                }
+                                                Rectangle {
+                                                    visible: index < 5
+                                                    Layout.preferredWidth: 1
+                                                    Layout.preferredHeight: 40
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    color: root.cLine
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Preview — screenshot gallery, App Store proportions.
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    visible: root.selectedApp && root.selectedApp.screenshots && root.selectedApp.screenshots.length > 0
+
+                                    HudRailHeader { title: "Preview" }
+
+                                    ListView {
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: Math.round(210 * root.uiScale())
+                                        orientation: ListView.Horizontal
+                                        snapMode: ListView.SnapToItem
+                                        clip: true
+                                        spacing: 14
+                                        model: root.selectedApp ? root.selectedApp.screenshots : []
+                                        delegate: Rectangle {
+                                            width: Math.round(348 * root.uiScale())
+                                            height: Math.round(210 * root.uiScale())
+                                            color: root.cDim
+                                            border.color: root.cLine
+                                            radius: 0
+                                            clip: true
+                                            Image {
+                                                id: shotImg
+                                                anchors.fill: parent
+                                                anchors.margins: 1
+                                                source: modelData
+                                                fillMode: Image.PreserveAspectCrop
+                                                asynchronous: true
+                                                cache: true
+                                                visible: status === Image.Ready
+                                            }
+                                            Label {
+                                                anchors.centerIn: parent
+                                                visible: shotImg.status !== Image.Ready
+                                                text: "…"
+                                                color: root.cMuted
+                                                font.family: root.fontMono
+                                                font.pixelSize: 14
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // About — full description.
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    visible: root.selectedApp && root.selectedApp.description && root.selectedApp.description.length > 0
+
+                                    HudRailHeader { title: "About" }
+
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        color: root.cPanel
+                                        border.color: root.cLine
+                                        radius: 0
+                                        implicitHeight: aboutText.implicitHeight + 36
+                                        Label {
+                                            id: aboutText
+                                            anchors.fill: parent
+                                            anchors.margins: 18
+                                            text: root.selectedApp && root.selectedApp.description ? root.selectedApp.description : ""
+                                            color: root.cFg
+                                            opacity: 0.9
+                                            font.family: root.fontHuman
+                                            font.pixelSize: 14
+                                            lineHeight: 1.3
+                                            wrapMode: Text.WordWrap
+                                        }
+                                    }
+                                }
+
+                                // Sources — every channel this app can install from.
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    visible: root.selectedApp && root.selectedApp.variants && root.selectedApp.variants.length > 0
+
+                                    HudRailHeader { title: "Sources"; sub: "install channels" }
+
+                                    Repeater {
+                                        model: root.selectedApp ? root.selectedApp.variants : []
+                                        delegate: Rectangle {
+                                            Layout.fillWidth: true
+                                            height: 60
+                                            color: root.cPanel
+                                            border.color: variantHover.hovered ? root.sourceAccent(modelData.source) : root.cLine
+                                            radius: 0
+
+                                            HoverHandler { id: variantHover }
+                                            Behavior on border.color { ColorAnimation { duration: 140 } }
+
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 16
+                                                anchors.rightMargin: 16
+                                                spacing: 14
+
+                                                Rectangle {
+                                                    width: 8; height: 8; radius: 0
+                                                    color: root.sourceAccent(modelData.source)
+                                                    Layout.alignment: Qt.AlignVCenter
                                                 }
 
                                                 ColumnLayout {
                                                     Layout.fillWidth: true
                                                     Layout.minimumWidth: 0
-                                                    spacing: 4
+                                                    spacing: 3
                                                     Label {
-                                                        text: modelData.package_id
+                                                        text: root.sourceLabel(modelData.source) + " · " + root.formatLabel(modelData.source)
+                                                              + (modelData.id === root.selectedApp.recommended_variant_id ? "  ★ recommended" : "")
                                                         color: root.cFg
-                                                        font.family: root.fontMono
+                                                        font.family: root.fontHuman
                                                         font.pixelSize: 13
+                                                        font.bold: true
                                                         elide: Text.ElideRight
                                                         Layout.fillWidth: true
                                                     }
@@ -2107,64 +2278,64 @@ ShellRoot {
                                                         text: root.commandPreview(modelData)
                                                         color: root.cMuted
                                                         font.family: root.fontMono
-                                                        font.pixelSize: 11
+                                                        font.pixelSize: 10
                                                         elide: Text.ElideRight
-                                                        Layout.fillWidth: true
-                                                    }
-                                                    Label {
-                                                        text: "Version: " + (modelData.version || "unknown") + " · Download: " + root.formatBytes(modelData.download_size) + " · Installed: " + root.formatBytes(modelData.installed_size)
-                                                        color: root.cMuted
-                                                        font.family: root.fontMono
-                                                        font.pixelSize: 11
-                                                        elide: Text.ElideRight
-                                                        Layout.fillWidth: true
-                                                    }
-                                                    Label {
-                                                        text: modelData.install_location || root.platformLabel(modelData.source)
-                                                        color: root.cMuted
-                                                        font.family: root.fontMono
-                                                        font.pixelSize: 11
-                                                        elide: Text.ElideRight
-                                                        Layout.fillWidth: true
-                                                    }
-                                                    Label {
-                                                        text: root.trustLabel(modelData.trust) + (modelData.verified ? " · verified metadata" : " · unverified")
-                                                        color: root.trustColor(modelData.trust)
-                                                        font.family: root.fontMono
-                                                        font.pixelSize: 11
                                                         Layout.fillWidth: true
                                                     }
                                                 }
 
-                                                ActionButton {
-                                                    label: root.selectedApp && root.selectedApp.installed ? "Uninstall" : modelData.id === root.selectedApp.recommended_variant_id ? "Get" : "Use Source"
-                                                    fill: root.selectedApp && root.selectedApp.installed ? root.cRed : modelData.id === root.selectedApp.recommended_variant_id ? root.cGreen : root.cPanel
-                                                    textColor: root.selectedApp && root.selectedApp.installed ? "white" : modelData.id === root.selectedApp.recommended_variant_id ? "white" : root.cBlue
-                                                    Layout.preferredWidth: Math.min(220, root.actionColumnWidth())
-                                                    Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
-                                                    onClicked: {
-                                                        if (root.selectedApp && root.selectedApp.installed)
-                                                            root.enqueueUninstall(root.selectedApp)
-                                                        else
-                                                            root.enqueueVariant(root.selectedApp, modelData)
-                                                    }
+                                                Label {
+                                                    text: modelData.version ? "v" + modelData.version : "latest"
+                                                    color: root.cMuted
+                                                    font.family: root.fontMono
+                                                    font.pixelSize: 11
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                }
+
+                                                Label {
+                                                    text: root.trustLabel(modelData.trust).toUpperCase()
+                                                    color: root.trustColor(modelData.trust)
+                                                    font.family: root.fontMono
+                                                    font.pixelSize: 10
+                                                    font.letterSpacing: 1
+                                                    Layout.alignment: Qt.AlignVCenter
                                                 }
                                             }
                                         }
                                     }
                                 }
 
-                                SectionPanel {
-                                    title: "About"
-                                    Label {
-                                        text: root.selectedApp && root.selectedApp.description ? root.selectedApp.description : "No long description was provided by this source."
-                                        color: root.cFg
-                                        font.family: root.fontHuman
-                                        font.pixelSize: 15
-                                        wrapMode: Text.WordWrap
+                                // Information — metadata readout.
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    visible: root.selectedApp !== null
+
+                                    HudRailHeader { title: "Information" }
+
+                                    Rectangle {
                                         Layout.fillWidth: true
+                                        color: root.cPanel
+                                        border.color: root.cLine
+                                        radius: 0
+                                        implicitHeight: infoCol.implicitHeight + 36
+
+                                        ColumnLayout {
+                                            id: infoCol
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.top: parent.top
+                                            anchors.margins: 18
+                                            spacing: 10
+                                            StatRow { name: "Developer"; value: root.compactDeveloper(root.selectedApp) }
+                                            StatRow { name: "License"; value: root.selectedApp && root.selectedApp.license ? root.selectedApp.license : "" }
+                                            StatRow { name: "Homepage"; value: root.selectedApp && root.selectedApp.homepage ? root.selectedApp.homepage : "" }
+                                            StatRow { name: "Identifier"; value: root.selectedApp ? root.selectedApp.id : "" }
+                                        }
                                     }
                                 }
+
+                                Item { Layout.preferredHeight: 4 }
                             }
                         }
                     }
@@ -2940,6 +3111,178 @@ ShellRoot {
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Install picker overlay — choose source + version, Modrinth-style.
+            Rectangle {
+                id: installOverlay
+                anchors.fill: parent
+                visible: root.installOpen
+                color: "#cc07090a"
+                z: 900
+
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: root.installOpen = false
+                }
+
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 468
+                    height: Math.min(560, bodyCol.implicitHeight + 32)
+                    color: root.cPanel
+                    border.color: root.cLine
+                    radius: 0
+
+                    // swallow clicks so backdrop doesn't close
+                    MouseArea { anchors.fill: parent }
+
+                    ColumnLayout {
+                        id: bodyCol
+                        anchors.fill: parent
+                        anchors.margins: 16
+                        spacing: 14
+
+                        // Header rail.
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Rectangle { width: root.tickW; height: 15; radius: 0; color: root.cGreen; Layout.alignment: Qt.AlignVCenter }
+                            Label {
+                                text: "INSTALL"
+                                color: root.cFg
+                                font.family: root.fontBrand
+                                font.pixelSize: 14
+                                font.bold: true
+                                font.letterSpacing: 1
+                            }
+                            Label {
+                                text: root.installApp ? root.installApp.name : ""
+                                color: root.cMuted
+                                font.family: root.fontMono
+                                font.pixelSize: 12
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                        }
+
+                        Label {
+                            text: "Choose a source and version"
+                            color: root.cMuted
+                            font.family: root.fontHuman
+                            font.pixelSize: 12
+                            Layout.fillWidth: true
+                        }
+
+                        // Variant list.
+                        ListView {
+                            id: variantList
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Math.min(300, contentHeight)
+                            clip: true
+                            spacing: 8
+                            model: root.installApp ? root.installApp.variants : []
+                            delegate: Rectangle {
+                                width: variantList.width
+                                height: 62
+                                property bool selected: modelData.id === root.installVariantId
+                                color: selected ? root.cBlueSoft : root.cDim
+                                border.color: selected ? root.cGreen : root.cLine
+                                radius: 0
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: root.installVariantId = modelData.id
+                                }
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 12
+                                    spacing: 12
+
+                                    // Radio indicator.
+                                    Rectangle {
+                                        Layout.preferredWidth: 14
+                                        Layout.preferredHeight: 14
+                                        Layout.alignment: Qt.AlignVCenter
+                                        radius: 0
+                                        color: "transparent"
+                                        border.color: parent.parent.selected ? root.cGreen : root.cLine
+                                        Rectangle {
+                                            anchors.centerIn: parent
+                                            width: 7; height: 7; radius: 0
+                                            color: root.cGreen
+                                            visible: parent.parent.parent.selected
+                                        }
+                                    }
+
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 2
+                                        Label {
+                                            text: root.sourceLabel(modelData.source) + "  ·  " + root.formatLabel(modelData.source)
+                                            color: root.cFg
+                                            font.family: root.fontHuman
+                                            font.pixelSize: 13
+                                            font.bold: true
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
+                                        Label {
+                                            text: (modelData.version ? "v" + modelData.version : "latest")
+                                                  + "  ·  " + (modelData.download_size > 0 ? root.formatBytes(modelData.download_size) : "size n/a")
+                                            color: root.cMuted
+                                            font.family: root.fontMono
+                                            font.pixelSize: 11
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
+                                    }
+
+                                    Label {
+                                        text: root.trustLabel(modelData.trust)
+                                        color: root.trustColor(modelData.trust)
+                                        font.family: root.fontMono
+                                        font.pixelSize: 10
+                                        font.letterSpacing: 1
+                                        Layout.alignment: Qt.AlignVCenter
+                                    }
+                                }
+                            }
+                        }
+
+                        Label {
+                            text: "You'll be asked for your password to install."
+                            color: root.cMuted
+                            font.family: root.fontHuman
+                            font.pixelSize: 11
+                            Layout.fillWidth: true
+                        }
+
+                        // Footer actions.
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Item { Layout.fillWidth: true }
+                            ActionButton {
+                                label: "Cancel"
+                                fill: root.cPanel
+                                textColor: root.cFg
+                                Layout.preferredWidth: 100
+                                onClicked: root.installOpen = false
+                            }
+                            ActionButton {
+                                label: "Install"
+                                fill: root.cGreen
+                                textColor: root.cBase
+                                active: root.installVariantId !== ""
+                                Layout.preferredWidth: 128
+                                onClicked: root.confirmInstall()
                             }
                         }
                     }
