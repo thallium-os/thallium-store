@@ -58,6 +58,16 @@ pub struct CanonicalApp {
     pub recommended_variant_id: Option<String>,
     pub merge_confidence: f32,
     pub merge_evidence: Vec<String>,
+    /// Source-language breakdown (GitHub linguist), percent-sorted descending.
+    /// Empty when the app has no discoverable repository.
+    #[serde(default)]
+    pub languages: Vec<LanguageStat>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LanguageStat {
+    pub name: String,
+    pub percent: f32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

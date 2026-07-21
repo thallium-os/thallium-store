@@ -2,8 +2,8 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 use store_core::{
-    rank_variants, AppVariant, CanonicalApp, DiscoverCollection, ProviderStatus, SearchParams,
-    SearchResponse, SourceKind, TrustLevel,
+    rank_variants, AppVariant, CanonicalApp, DiscoverCollection, LanguageStat, ProviderStatus,
+    SearchParams, SearchResponse, SourceKind, TrustLevel,
 };
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -13,6 +13,13 @@ use tokio::process::Command;
 pub struct CatalogManager {
     bundled: Vec<CanonicalApp>,
     index: Arc<RwLock<CatalogIndex>>,
+    /// Flathub appstream art (media-hash icon + screenshots) for the curated
+    /// featured apps, fetched once at warm-up so Discover cards can paint
+    /// real artwork backdrops without a per-request network hit.
+    featured_art: Arc<RwLock<std::collections::HashMap<String, (Option<String>, Vec<String>)>>>,
+    /// Short-TTL cache of fully enriched app details, so reopening a details
+    /// page skips the provider round-trips entirely.
+    details_cache: Arc<RwLock<std::collections::HashMap<String, (std::time::Instant, CanonicalApp)>>>,
 }
 
 impl CatalogManager {
@@ -20,6 +27,8 @@ impl CatalogManager {
         Self {
             bundled: bundled_catalog(),
             index: Arc::new(RwLock::new(CatalogIndex::default())),
+            featured_art: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            details_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -27,7 +36,11 @@ impl CatalogManager {
     /// daemon startup. Until this completes, `search` transparently falls back
     /// to the live subprocess/HTTP providers, so early queries still work.
     pub async fn warm(&self) {
-        let (apt, flathub) = tokio::join!(build_apt_index(), build_flathub_index());
+        let (apt, flathub, ()) = tokio::join!(
+            build_apt_index(),
+            build_flathub_index(),
+            self.warm_featured_art()
+        );
         let mut index = self.index.write().unwrap();
         if apt.is_some() {
             index.apt = apt;
@@ -37,12 +50,33 @@ impl CatalogManager {
         }
     }
 
+    /// Fetch appstream art for the first two apps of every curated collection
+    /// (the featured-carousel pool), concurrently, into `featured_art`.
+    async fn warm_featured_art(&self) {
+        let mut set = tokio::task::JoinSet::new();
+        for (_, _, ids) in CURATED_COLLECTIONS {
+            for id in ids.iter().take(2) {
+                let id: &'static str = id;
+                set.spawn(async move { (id, flathub_appstream(id).await) });
+            }
+        }
+        while let Some(res) = set.join_next().await {
+            if let Ok((id, Some(meta))) = res {
+                self.featured_art
+                    .write()
+                    .unwrap()
+                    .insert(id.to_string(), (meta.icon, meta.screenshots));
+            }
+        }
+    }
+
     /// Curated App Store–style landing: fixed collections of Flathub apps
     /// resolved against the warm index for names/summaries, instant from
     /// memory. Icons are derived from the app id, so cards render even before
     /// the index finishes warming.
     pub fn discover(&self) -> Vec<DiscoverCollection> {
         let index = self.index.read().unwrap();
+        let art = self.featured_art.read().unwrap();
         CURATED_COLLECTIONS
             .iter()
             .map(|(title, subtitle, ids)| DiscoverCollection {
@@ -50,7 +84,16 @@ impl CatalogManager {
                 subtitle: subtitle.to_string(),
                 apps: ids
                     .iter()
-                    .map(|id| curated_flathub_app(&index, id))
+                    .map(|id| {
+                        let mut app = curated_flathub_app(&index, id);
+                        if let Some((icon, shots)) = art.get(*id) {
+                            if let Some(icon) = icon {
+                                app.icon = Some(icon.clone());
+                            }
+                            app.screenshots = shots.clone();
+                        }
+                        app
+                    })
                     .collect(),
             })
             .collect()
@@ -179,46 +222,127 @@ impl CatalogManager {
     }
 
     pub async fn enrich_details(&self, mut app: CanonicalApp) -> CanonicalApp {
+        // Recently enriched details come straight from cache — reopening an
+        // app is instant instead of re-running every provider lookup.
+        {
+            let cache = self.details_cache.read().unwrap();
+            if let Some((at, cached)) = cache.get(&app.id) {
+                if at.elapsed() < Duration::from_secs(90) {
+                    return cached.clone();
+                }
+            }
+        }
+
         let variants = std::mem::take(&mut app.variants);
+
+        // Every variant info lookup runs concurrently; serially each was a
+        // network/subprocess round-trip (flatpak remote-info alone can take
+        // seconds), which is what made the details page feel slow.
+        let mut info_set = tokio::task::JoinSet::new();
+        for (i, variant) in variants.iter().enumerate() {
+            let source = variant.source;
+            let pkg = variant.package_id.clone();
+            info_set.spawn(async move {
+                let info = match source {
+                    SourceKind::Github => github_info(&pkg).await,
+                    SourceKind::Flathub => flathub_info(&pkg).await,
+                    SourceKind::System => apt_info(&pkg).await,
+                    SourceKind::Appimage => None,
+                };
+                (i, info)
+            });
+        }
+
+        // Flathub AppStream (media-hash icon, screenshots, urls) fetched in
+        // parallel with the variant lookups above.
+        let flathub_id = variants
+            .iter()
+            .find(|v| v.source == SourceKind::Flathub)
+            .map(|v| v.package_id.clone());
+        let need_meta =
+            app.screenshots.is_empty() || app.homepage.is_none() || app.repository.is_none();
+        let meta_fut = async {
+            match (&flathub_id, need_meta) {
+                (Some(id), true) => flathub_appstream(id).await,
+                _ => None,
+            }
+        };
+
+        let mut infos: Vec<Option<PackageInfo>> = (0..variants.len()).map(|_| None).collect();
+        let (meta, ()) = tokio::join!(meta_fut, async {
+            while let Some(res) = info_set.join_next().await {
+                if let Ok((i, info)) = res {
+                    infos[i] = info;
+                }
+            }
+        });
+
         let mut enriched_variants = Vec::with_capacity(variants.len());
-        for mut variant in variants {
-            let info = match variant.source {
-                SourceKind::Github => github_info(&variant.package_id).await,
-                SourceKind::Flathub => flathub_info(&variant.package_id).await,
-                SourceKind::System => apt_info(&variant.package_id).await,
-                SourceKind::Appimage => None,
-            };
+        for (mut variant, info) in variants.into_iter().zip(infos) {
             if let Some(info) = info {
                 apply_info(&mut app, &mut variant, info);
             }
             enriched_variants.push(variant);
         }
         app.variants = enriched_variants;
-        // Flathub AppStream carries the real (media-hash) icon and screenshots
-        // for the details page; fetched on demand — one request when an app is
-        // opened, not during search.
-        if app.screenshots.is_empty() {
-            if let Some(flathub_id) = app
-                .variants
-                .iter()
-                .find(|v| v.source == SourceKind::Flathub)
-                .map(|v| v.package_id.clone())
-            {
-                if let Some((icon, shots)) = flathub_appstream(&flathub_id).await {
-                    if let Some(icon) = icon {
-                        app.icon = Some(icon);
-                    }
-                    app.screenshots = shots;
+
+        {
+            if let Some(meta) = meta {
+                if let Some(icon) = meta.icon {
+                    app.icon = Some(icon);
+                }
+                if app.screenshots.is_empty() {
+                    app.screenshots = meta.screenshots;
+                }
+                if app.homepage.is_none() {
+                    app.homepage = meta.homepage;
+                }
+                if app.repository.is_none() {
+                    app.repository = meta.repo_url.as_deref().and_then(github_repo_from_url);
                 }
             }
         }
+        // Source-language breakdown, best-effort: any discoverable GitHub repo
+        // (explicit repository, GitHub variant, or github.com homepage).
+        if app.languages.is_empty() {
+            let repo = app
+                .repository
+                .clone()
+                .or_else(|| {
+                    app.variants
+                        .iter()
+                        .find(|v| v.source == SourceKind::Github)
+                        .map(|v| v.package_id.clone())
+                })
+                .or_else(|| {
+                    app.homepage
+                        .as_deref()
+                        .and_then(github_repo_from_url)
+                });
+            if let Some(repo) = repo {
+                if let Some(langs) = github_languages(&repo).await {
+                    app.languages = langs;
+                }
+            }
+        }
+        self.details_cache
+            .write()
+            .unwrap()
+            .insert(app.id.clone(), (std::time::Instant::now(), app.clone()));
         app
     }
 }
 
 /// v2 AppStream for one Flathub app — the media-hash icon and screenshot URLs
 /// for the details page. Best-effort; None on any failure.
-async fn flathub_appstream(app_id: &str) -> Option<(Option<String>, Vec<String>)> {
+struct FlathubMeta {
+    icon: Option<String>,
+    screenshots: Vec<String>,
+    homepage: Option<String>,
+    repo_url: Option<String>,
+}
+
+async fn flathub_appstream(app_id: &str) -> Option<FlathubMeta> {
     let client = reqwest::Client::builder()
         .user_agent("thallium-store")
         .timeout(Duration::from_secs(8))
@@ -259,7 +383,21 @@ async fn flathub_appstream(app_id: &str) -> Option<(Option<String>, Vec<String>)
             }
         }
     }
-    Some((icon, shots))
+    let urls = value.get("urls");
+    let homepage = urls
+        .and_then(|u| u.get("homepage"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let repo_url = urls
+        .and_then(|u| u.get("vcs_browser").or_else(|| u.get("vcs-browser")))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    Some(FlathubMeta {
+        icon,
+        screenshots: shots,
+        homepage,
+        repo_url,
+    })
 }
 
 impl Default for CatalogManager {
@@ -875,6 +1013,122 @@ struct PackageInfo {
 /// `GET /repos/{owner}/{repo}` for description/homepage/license, plus a
 /// best-effort `GET /repos/{owner}/{repo}/releases/latest` for the version
 /// tag (skipped on 404 / no releases — repos without releases still enrich).
+/// On-disk icon cache: remote icon URLs are swapped for local file:// paths
+/// once downloaded, so the store paints icons instantly on every launch
+/// after the first. Unseen URLs kick off a background download and are
+/// served remotely this one time.
+pub fn cached_icon_url(url: &str) -> String {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return url.to_string();
+    }
+    let dir = icon_cache_dir();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(url, &mut hasher);
+    let hash = std::hash::Hasher::finish(&hasher);
+    let ext = url
+        .rsplit('.')
+        .next()
+        .filter(|e| e.len() <= 4 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or("png");
+    let path = dir.join(format!("{hash:016x}.{ext}"));
+    if path.exists() {
+        return format!("file://{}", path.display());
+    }
+    let url_owned = url.to_string();
+    tokio::spawn(async move {
+        let Ok(client) = reqwest::Client::builder()
+            .user_agent("thallium-store")
+            .timeout(Duration::from_secs(15))
+            .build()
+        else {
+            return;
+        };
+        let Ok(resp) = client.get(&url_owned).send().await else {
+            return;
+        };
+        let Ok(resp) = resp.error_for_status() else {
+            return;
+        };
+        let Ok(bytes) = resp.bytes().await else {
+            return;
+        };
+        let tmp = path.with_extension("part");
+        if std::fs::create_dir_all(path.parent().unwrap()).is_ok()
+            && std::fs::write(&tmp, &bytes).is_ok()
+        {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    });
+    url.to_string()
+}
+
+pub fn icon_cache_dir() -> std::path::PathBuf {
+    let data = std::env::var("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+                .join(".local/share")
+        });
+    data.join("thallium-store/icons")
+}
+
+/// Rewrite an app's icon to its cached copy when available.
+pub fn rewrite_icon(app: &mut CanonicalApp) {
+    if let Some(icon) = &app.icon {
+        app.icon = Some(cached_icon_url(icon));
+    }
+}
+
+/// "owner/repo" from a github.com URL, if the URL points at a repository.
+fn github_repo_from_url(url: &str) -> Option<String> {
+    let path = url.split("github.com/").nth(1)?;
+    let mut parts = path.split('/').filter(|s| !s.is_empty());
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    let repo = repo.trim_end_matches(".git");
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+/// GitHub linguist byte counts as percentages, top six languages.
+async fn github_languages(repo: &str) -> Option<Vec<LanguageStat>> {
+    let repo = repo.trim_start_matches("github:");
+    let repo = repo.split('#').next()?;
+    let (owner, name) = repo.split_once('/')?;
+    let client = github_client().ok()?;
+    let value: Value = github_request(
+        &client,
+        format!("https://api.github.com/repos/{owner}/{name}/languages"),
+    )
+    .send()
+    .await
+    .ok()?
+    .error_for_status()
+    .ok()?
+    .json()
+    .await
+    .ok()?;
+    let map = value.as_object()?;
+    let total: f64 = map.values().filter_map(Value::as_f64).sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let mut stats: Vec<LanguageStat> = map
+        .iter()
+        .filter_map(|(name, bytes)| {
+            bytes.as_f64().map(|b| LanguageStat {
+                name: name.clone(),
+                percent: (b / total * 100.0) as f32,
+            })
+        })
+        .collect();
+    stats.sort_by(|a, b| b.percent.total_cmp(&a.percent));
+    stats.truncate(6);
+    Some(stats)
+}
+
 async fn github_info(package_id: &str) -> Option<PackageInfo> {
     let (owner, repo) = package_id.split_once('/')?;
     let client = github_client().ok()?;
@@ -942,6 +1196,13 @@ async fn github_info(package_id: &str) -> Option<PackageInfo> {
 /// flathub` when the app isn't installed locally. Best-effort text parse.
 async fn flathub_info(package_id: &str) -> Option<PackageInfo> {
     if let Some(info) = run_flatpak_info(&["info", "--user", package_id]).await {
+        return Some(info);
+    }
+    // --cached answers from the local appstream cache in milliseconds; the
+    // uncached form re-fetches remote metadata and can take seconds.
+    if let Some(info) =
+        run_flatpak_info(&["remote-info", "--cached", "--user", "flathub", package_id]).await
+    {
         return Some(info);
     }
     run_flatpak_info(&["remote-info", "--user", "flathub", package_id]).await
@@ -1258,6 +1519,7 @@ fn single_variant_app(
         recommended_variant_id: None,
         merge_confidence: 0.7,
         merge_evidence: vec!["provider result".to_string()],
+        languages: Vec::new(),
     }
 }
 

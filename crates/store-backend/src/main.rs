@@ -88,6 +88,48 @@ struct UpdateItem {
     managed_by_uni: bool,
 }
 
+fn settings_path() -> PathBuf {
+    let config = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config")
+        });
+    config.join("thallium-store/settings.json")
+}
+
+fn load_settings() -> Value {
+    std::fs::read_to_string(settings_path())
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+fn save_settings(settings: &Value) -> Result<()> {
+    let path = settings_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(settings)?)?;
+    Ok(())
+}
+
+fn icon_cache_info() -> Value {
+    let dir = store_catalog::icon_cache_dir();
+    let mut bytes: u64 = 0;
+    let mut count: u64 = 0;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    bytes += meta.len();
+                    count += 1;
+                }
+            }
+        }
+    }
+    json!({ "iconBytes": bytes, "iconCount": count })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -273,6 +315,27 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
             "protocolVersion": 1,
             "fakeUni": state.fake_uni
         })),
+        "settings.get" => Ok(json!({ "settings": load_settings() })),
+        "settings.set" => {
+            let mut settings = load_settings();
+            if let (Some(target), Some(patch)) = (settings.as_object_mut(), request.params.as_object()) {
+                for (key, value) in patch {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+            save_settings(&settings)?;
+            Ok(json!({ "settings": settings }))
+        }
+        "system.cacheInfo" => Ok(icon_cache_info()),
+        "system.clearIconCache" => {
+            let dir = store_catalog::icon_cache_dir();
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+            Ok(icon_cache_info())
+        }
         "system.health" => {
             let readiness = state.uni.native_readiness();
             Ok(json!({
@@ -286,19 +349,27 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
         }
         "catalog.search" => {
             let params: SearchParams = serde_json::from_value(request.params)?;
-            let response = state.catalog.search(params).await;
+            let mut response = state.catalog.search(params).await;
             let mut cache = state.recent_apps.lock().await;
             for app in &response.results {
                 cache.insert(app.id.clone(), app.clone());
             }
+            for app in &mut response.results {
+                store_catalog::rewrite_icon(app);
+            }
             Ok(serde_json::to_value(response)?)
         }
         "catalog.discover" => {
-            let collections = state.catalog.discover();
+            let mut collections = state.catalog.discover();
             let mut cache = state.recent_apps.lock().await;
             for collection in &collections {
                 for app in &collection.apps {
                     cache.insert(app.id.clone(), app.clone());
+                }
+            }
+            for collection in &mut collections {
+                for app in &mut collection.apps {
+                    store_catalog::rewrite_icon(app);
                 }
             }
             Ok(json!({ "collections": collections }))
@@ -312,9 +383,9 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
             let cached = state.recent_apps.lock().await.get(id).cloned();
             let app = cached.or_else(|| state.catalog.app_details(id));
             if let Some(app) = app {
-                Ok(serde_json::to_value(
-                    state.catalog.enrich_details(app).await,
-                )?)
+                let mut app = state.catalog.enrich_details(app).await;
+                store_catalog::rewrite_icon(&mut app);
+                Ok(serde_json::to_value(app)?)
             } else {
                 Ok(Value::Null)
             }

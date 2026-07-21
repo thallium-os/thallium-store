@@ -27,12 +27,15 @@ ShellRoot {
     property var searchCache: ({})
     property string activeSearchQuery: ""
     readonly property int searchCacheTtlMs: 60000
-    property bool sidebarCollapsed: false
     property bool searchCommitted: false
     property var storeLog: []
     property bool installOpen: false
     property var installApp: null
     property string installVariantId: ""
+    property var storeSettings: ({})
+    property var cacheInfo: ({ iconBytes: 0, iconCount: 0 })
+    property bool setupOpen: false
+    property int setupStep: 0
 
     function pushLog(msg) {
         const stamp = Qt.formatDateTime(new Date(), "HH:mm:ss")
@@ -42,7 +45,7 @@ ShellRoot {
 
     // Thallium 81 design tokens — Everforest palette, retro sci-fi HUD grown
     // out of Soviet brutalism. Green is THE accent; blue is retired.
-    readonly property color cBase: "#0d0d0f"      // void: page, deepest bg
+    readonly property color cBase: "#060607"      // void: page, deepest bg
     readonly property color cPanel: "#15191b"     // raised surface: cards
     readonly property color cDim: "#1e2326"       // inputs, insets, controls
     readonly property color cLine: "#3a464c"      // hairlines, borders, dim labels
@@ -70,17 +73,33 @@ ShellRoot {
     readonly property int tSlow: 360
 
     function uiScale() {
-        const w = window && window.width ? window.width : 1180
-        return Math.max(0.86, Math.min(1.14, w / 1180))
+        const w = window && window.width ? window.width : 1280
+        return Math.max(0.86, Math.min(1.14, w / 1280))
     }
 
     function pagePad() {
         return Math.round(28 * uiScale())
     }
 
+    // Centered storefront column: slim 4% gutters — content owns the width.
+    function contentSideMargin() {
+        const w = window && window.width ? window.width : 1280
+        return Math.max(pagePad(), Math.round(w * 0.04))
+    }
+
     function actionColumnWidth() {
-        const w = window && window.width ? window.width : 1180
-        return Math.max(154, Math.min(230, Math.round((w - 238) * 0.22)))
+        const w = window && window.width ? window.width : 1280
+        return Math.max(154, Math.min(230, Math.round(w * 0.18)))
+    }
+
+    function activeOpsCount() {
+        let n = 0
+        for (let i = 0; i < operations.length; i++) {
+            const s = operations[i].state
+            if (s !== "succeeded" && s !== "failed" && s !== "cancelled")
+                n++
+        }
+        return n
     }
 
     function cardHeight() {
@@ -153,7 +172,10 @@ ShellRoot {
     }
 
     function searchNow() {
-        activeView = "search"
+        // Never hijack the view — a details page opened just before the
+        // debounce fired must stay open. Typing already switches the view.
+        if (activeView !== "search")
+            return
         const q = query
         const cached = searchCache[q]
         if (cached && (Date.now() - cached.ts) < searchCacheTtlMs) {
@@ -178,6 +200,7 @@ ShellRoot {
     }
 
     function selectApp(app) {
+        searchDebounce.stop()
         selectedApp = app
         activeView = "details"
         if (app && app.id)
@@ -218,7 +241,7 @@ ShellRoot {
             variant_id: variant.id,
             action: action || "install"
         })
-        activeView = "queue"
+        activeView = "installed"
     }
 
     function enqueueInstall(app) {
@@ -295,7 +318,7 @@ ShellRoot {
             package_id: packageId,
             source: source
         })
-        activeView = "queue"
+        activeView = "installed"
     }
 
     function enqueueUninstall(app) {
@@ -310,7 +333,7 @@ ShellRoot {
             package_id: variant.package_id,
             source: variant.source
         })
-        activeView = "queue"
+        activeView = "installed"
     }
 
     function packageIdFromOperation(operation) {
@@ -363,7 +386,7 @@ ShellRoot {
             package_id: packageIdFromOperation(operation),
             source: operationSource(operation.source)
         })
-        activeView = "queue"
+        activeView = "installed"
     }
 
     function cancelOperation(operation) {
@@ -372,7 +395,7 @@ ShellRoot {
         request("operations.cancel", {
             operationId: operation.id
         })
-        activeView = "queue"
+        activeView = "installed"
     }
 
     function operationActionLabel(operation) {
@@ -425,6 +448,11 @@ ShellRoot {
         if (source === "appimage")
             return "AppImage"
         return "package"
+    }
+
+    function finishSetup() {
+        setupOpen = false
+        request("settings.set", { first_run_done: true })
     }
 
     function openInstall(app) {
@@ -487,6 +515,12 @@ ShellRoot {
 
     function commandPreview(variant) {
         return variant && variant.command_preview ? variant.command_preview : "UNI command unavailable"
+    }
+
+    // Language segments cycle through the Everforest accents.
+    function langColor(i) {
+        const palette = [cGreen, cGreenSoft, cWarn, cPurple, cRed, cFg]
+        return palette[i % palette.length]
     }
 
     function formatBytes(bytes) {
@@ -639,6 +673,14 @@ ShellRoot {
                     } else if (result.accepted !== undefined && result.operation !== undefined) {
                         root.status = result.message || "Operation updated"
                         root.request("operations.list", {})
+                    } else if (result.settings !== undefined) {
+                        root.storeSettings = result.settings
+                        if (root.activeMethod === "settings.get" && result.settings.first_run_done !== true) {
+                            root.setupStep = 0
+                            root.setupOpen = true
+                        }
+                    } else if (result.iconBytes !== undefined) {
+                        root.cacheInfo = result
                     } else if (result.status !== undefined) {
                         root.fakeUniMode = result.fakeUni === true
                         root.uniHealth = result.uni || ""
@@ -671,7 +713,7 @@ ShellRoot {
         repeat: true
         running: true
         onTriggered: {
-            if (root.activeView === "queue")
+            if (root.activeView === "installed")
                 root.request("operations.list", {})
         }
     }
@@ -710,6 +752,7 @@ ShellRoot {
         repeat: false
         onTriggered: {
             root.request("system.health", {})
+            root.request("settings.get", {})
             root.loadDiscover()
             discoverWarmReload.start()
         }
@@ -719,62 +762,77 @@ ShellRoot {
         initialLoadDelay.start()
     }
 
-    component NavButton: Rectangle {
-        id: nav
+    // Top-bar navigation tab: mono uppercase label, green underline when
+    // active, optional live badge (queue count).
+    component TopTab: Item {
+        id: tab
         property string label: ""
         property string view: ""
-        property string mark: "·"
-        property bool hovered: false
-        readonly property bool selected: root.activeView === view || (view === "discover" && root.activeView === "details")
+        property int badge: 0
+        readonly property bool selected: root.activeView === view
+            || (view === "discover" && (root.activeView === "details" || root.activeView === "search"))
 
-        Layout.fillWidth: true
-        height: 44
-        color: selected ? root.cBlueSoft : hovered ? root.cDim : "transparent"
-        border.color: selected ? root.cGreen : "transparent"
+        width: tabRow.implicitWidth
+        height: 64
 
-        Behavior on color { ColorAnimation { duration: 140 } }
+        HoverHandler { id: tabHover }
 
-        RowLayout {
-            anchors.fill: parent
-            anchors.leftMargin: root.sidebarCollapsed ? 0 : 14
-            anchors.rightMargin: root.sidebarCollapsed ? 0 : 14
-            spacing: 12
+        Row {
+            id: tabRow
+            anchors.centerIn: parent
+            spacing: 8
             Label {
-                text: nav.mark
-                color: nav.selected ? root.cGreen : root.cMuted
+                text: tab.label.toUpperCase()
+                color: tab.selected || tabHover.hovered ? root.cFg : root.cMuted
                 font.family: root.fontMono
-                font.pixelSize: 17
-                Layout.preferredWidth: root.sidebarCollapsed ? -1 : 24
-                Layout.fillWidth: root.sidebarCollapsed
-                horizontalAlignment: Text.AlignHCenter
+                font.pixelSize: 12
+                font.bold: tab.selected
+                font.letterSpacing: 2
+                anchors.verticalCenter: parent.verticalCenter
+                Behavior on color { ColorAnimation { duration: root.tFast } }
             }
-            Label {
-                visible: !root.sidebarCollapsed
-                text: nav.label
-                color: nav.selected ? root.cFg : root.cMuted
-                font.family: root.fontHuman
-                font.pixelSize: 14
-                font.bold: nav.selected
-                Layout.fillWidth: true
+            Rectangle {
+                visible: tab.badge > 0
+                width: badgeText.implicitWidth + 10
+                height: 16
+                color: root.cGreen
+                anchors.verticalCenter: parent.verticalCenter
+                Label {
+                    id: badgeText
+                    anchors.centerIn: parent
+                    text: tab.badge
+                    color: root.cBase
+                    font.family: root.fontMono
+                    font.pixelSize: 10
+                    font.bold: true
+                }
             }
+        }
+
+        Rectangle {
+            anchors.bottom: parent.bottom
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: tab.selected ? tabRow.implicitWidth : 0
+            height: 2
+            color: root.cGreen
+            Behavior on width { NumberAnimation { duration: root.tMed; easing.type: Easing.OutCubic } }
         }
 
         MouseArea {
             anchors.fill: parent
-            hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            onEntered: nav.hovered = true
-            onExited: nav.hovered = false
             onClicked: {
-                root.activeView = nav.view
-                if (nav.view === "search")
-                    searchField.forceActiveFocus()
-                if (nav.view === "queue")
-                    root.request("operations.list", {})
-                if (nav.view === "installed")
+                root.activeView = tab.view
+                if (tab.view === "installed") {
                     root.request("installed.list", {})
-                if (nav.view === "updates")
+                    root.request("operations.list", {})
+                }
+                if (tab.view === "updates")
                     root.request("updates.list", {})
+                if (tab.view === "settings") {
+                    root.request("system.cacheInfo", {})
+                    root.request("settings.get", {})
+                }
             }
         }
     }
@@ -816,6 +874,81 @@ ShellRoot {
                     ctx.stroke()
                 }
             }
+        }
+    }
+
+    // Thallium 81 brand loader — same stroke-by-stroke logo animation as the
+    // OS control center (native-QML port of the thallium-81 logo artwork).
+    component ThalliumLoader: Item {
+        id: loader
+        property bool running: true
+        property color stroke: root.cGreen
+        property real phase: 0
+        property real lineScale: 1
+
+        implicitWidth: 72
+        implicitHeight: 72
+
+        NumberAnimation on phase {
+            from: 0; to: 1; duration: 6000
+            loops: Animation.Infinite
+            running: loader.running && loader.visible
+        }
+
+        Canvas {
+            id: loaderCanvas
+            anchors.fill: parent
+            antialiasing: true
+
+            // x1,y1,x2,y2,drawStart,drawEnd — the original 55 path stages.
+            readonly property string geometry: "-85.18,49.18,0,98.36,0,.55;0,-98.36,-85.18,-49.18,0,.55;-85.18,-49.18,-85.18,49.18,0,.55;85.18,49.18,0,98.36,0,.55;85.18,-49.18,85.18,49.18,0,.55;0,-98.36,85.18,-49.18,0,.55;0,-86.08,-62.22,-50.16,.472,1.022;-74.55,43.04,-12.33,78.96,.472,1.022;74.55,-28.81,74.55,43.04,.472,1.022;0,-86.08,65.81,-48.09,.479,1.029;-74.55,-32.95,-74.55,43.04,.479,1.029;74.55,43.04,8.74,81.04,.479,1.029;-9.59,-66.71,.78,-72.70,.703,1.253;-85.18,-49.18,-32.15,-18.56,.799,1.349;0,98.36,0,37.13,.799,1.349;85.18,-49.18,32.15,-18.56,.799,1.349;35.02,-30.31,65.81,-48.09,.977,1.527;-74.55,-32.95,-43.76,-15.17,.977,1.527;8.74,45.48,8.74,81.04,.977,1.527;-63.36,-26.26,-63.36,35.69,.992,1.542;8.94,68,62.58,37.03,.992,1.542;.78,-72.70,54.41,-41.74,.992,1.542;-63.36,35.69,-12.20,65.22,1.015,1.565;62.58,-22.05,62.58,37.03,1.015,1.565;-9.59,-66.71,-50.38,-43.16,1.035,1.585;-62.22,-50.16,-29.42,-31.22,1.095,1.645;-12.33,41.08,-12.33,78.96,1.096,1.646;41.74,-9.87,74.55,-28.81,1.096,1.646;-9.59,-42.66,-9.59,-66.71,1.359,1.909;11.60,-43.83,11.60,-64.76,1.359,1.909;-43.76,11.87,-61.89,22.33,1.359,1.909;32.15,31.96,50.28,42.43,1.359,1.909;-32.15,29.63,-52.96,41.65,1.36,1.91;41.74,13.03,62.55,25.05,1.36,1.91;0,-86.08,0,-24.03,1.381,1.931;-74.55,43.04,-20.81,12.01,1.381,1.931;74.55,43.04,20.81,12.01,1.381,1.931;11.60,-43.83,35.02,-30.31,1.897,2.447;-43.76,-15.17,-43.76,11.87,1.897,2.447;32.15,31.96,8.74,45.48,1.897,2.447;-29.42,-31.22,-9.59,-42.66,1.989,2.539;-32.15,29.63,-12.33,41.08,1.989,2.539;41.74,13.03,41.74,-9.87,1.989,2.539;-32.15,-18.56,11.60,-43.83,2.398,2.948;-43.76,11.87,0,37.13,2.398,2.948;32.15,-18.56,32.15,31.96,2.398,2.948;-32.15,-18.56,-32.15,29.63,2.408,2.958;0,37.13,41.74,13.03,2.408,2.958;-9.59,-42.66,32.15,-18.56,2.408,2.958;0,24.03,20.81,12.01,2.95,3.5;0,-24.03,-20.81,-12.01,2.95,3.5;-20.81,12.01,0,24.03,2.95,3.5;0,-24.03,20.81,-12.01,2.95,3.5;-20.81,-12.01,-20.81,12.01,2.95,3.5;20.81,-12.01,20.81,12.01,2.95,3.5"
+
+            function clamp(v) { return Math.max(0, Math.min(1, v)); }
+            onPaint: {
+                var c = getContext("2d"); c.reset();
+                var scale = Math.min(width, height) / 225;
+                var cx = width / 2, cy = height / 2;
+                // Original timing: draw 2.17s, hold 1.1s, retract 2.17s, hold .55s.
+                var sec = loader.running ? loader.phase * 5.99 : 2.17;
+                var sourceT;
+                if (sec < 2.17) sourceT = sec / .62;
+                else if (sec < 3.27) sourceT = 3.5;
+                else if (sec < 5.44) sourceT = (5.44 - sec) / .62;
+                else sourceT = 0;
+
+                c.strokeStyle = loader.stroke;
+                c.lineWidth = Math.max(1, 2.4 * scale * loader.lineScale);
+                c.lineCap = "round"; c.lineJoin = "round";
+                var paths = geometry.split(";");
+                for (var i = 0; i < paths.length; ++i) {
+                    var p = paths[i].split(",").map(Number);
+                    var progress = clamp((sourceT - p[4]) / (p[5] - p[4]));
+                    // Persistent ghost trace keeps the brand mark identifiable
+                    // during the original animation's deliberate empty hold.
+                    c.globalAlpha = .08;
+                    c.beginPath();
+                    c.moveTo(cx + p[0] * scale, cy + p[1] * scale);
+                    c.lineTo(cx + p[2] * scale, cy + p[3] * scale);
+                    c.stroke();
+                    if (progress <= 0) continue;
+                    c.globalAlpha = .22 + progress * .78;
+                    c.beginPath();
+                    c.moveTo(cx + p[0] * scale, cy + p[1] * scale);
+                    c.lineTo(cx + (p[0] + (p[2] - p[0]) * progress) * scale,
+                             cy + (p[1] + (p[3] - p[1]) * progress) * scale);
+                    c.stroke();
+                }
+                c.globalAlpha = 1;
+            }
+
+            Connections {
+                target: loader
+                function onPhaseChanged() { loaderCanvas.requestPaint(); }
+                function onStrokeChanged() { loaderCanvas.requestPaint(); }
+                function onRunningChanged() { loaderCanvas.requestPaint(); }
+            }
+            onWidthChanged: requestPaint()
+            onHeightChanged: requestPaint()
         }
     }
 
@@ -1047,8 +1180,8 @@ ShellRoot {
 
     FloatingWindow {
         id: window
-        implicitWidth: 1180
-        implicitHeight: 760
+        implicitWidth: 1280
+        implicitHeight: 820
         visible: true
         title: "Thallium Store"
         color: root.cBase
@@ -1057,171 +1190,168 @@ ShellRoot {
             anchors.fill: parent
             color: root.cBase
 
-            RowLayout {
+            ColumnLayout {
                 anchors.fill: parent
                 spacing: 0
 
+                // ── Command bar: brand left, centered HUD tabs, search right ──
                 Rectangle {
-                    id: sidebar
-                    Layout.preferredWidth: root.sidebarCollapsed ? 64 : 246
-                    Layout.fillHeight: true
+                    id: topBar
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 64
                     color: root.cPanel
-                    border.color: root.cLine
-                    clip: true
-                    Behavior on Layout.preferredWidth { NumberAnimation { duration: root.tMed; easing.type: Easing.OutCubic } }
 
-                    ColumnLayout {
-                        anchors.fill: parent
-                        anchors.margins: root.sidebarCollapsed ? 11 : 18
-                        spacing: 14
+                    Rectangle {
+                        anchors.bottom: parent.bottom
+                        width: parent.width
+                        height: 1
+                        color: root.cLine
+                    }
 
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 12
+                    RowLayout {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 20
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 12
 
-                            Rectangle {
-                                Layout.preferredWidth: 42
-                                Layout.preferredHeight: 42
-                                color: root.cGreen
-
-                                Label {
-                                    anchors.centerIn: parent
-                                    text: "T"
-                                    color: root.cBase
-                                    font.family: root.fontBrand
-                                    font.pixelSize: 21
-                                    font.bold: true
-                                }
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.sidebarCollapsed = !root.sidebarCollapsed
-                                }
-                            }
-
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 0
-                                visible: !root.sidebarCollapsed
-
-                                Label {
-                                    text: "Thallium"
-                                    color: root.cFg
-                                    font.family: root.fontBrand
-                                    font.pixelSize: 22
-                                    font.bold: true
-                                    Layout.fillWidth: true
-                                }
-
-                                Label {
-                                    text: "Store"
-                                    color: root.cMuted
-                                    font.family: root.fontHuman
-                                    font.pixelSize: 13
-                                    Layout.fillWidth: true
-                                }
-                            }
-
+                        Rectangle {
+                            Layout.preferredWidth: 34
+                            Layout.preferredHeight: 34
+                            color: root.cGreen
                             Label {
-                                visible: !root.sidebarCollapsed
-                                text: "«"
+                                anchors.centerIn: parent
+                                text: "T"
+                                color: root.cBase
+                                font.family: root.fontBrand
+                                font.pixelSize: 17
+                                font.bold: true
+                            }
+                        }
+
+                        ColumnLayout {
+                            spacing: 0
+                            Label {
+                                text: "Thallium"
+                                color: root.cFg
+                                font.family: root.fontBrand
+                                font.pixelSize: 17
+                                font.bold: true
+                            }
+                            Label {
+                                text: "STORE"
                                 color: root.cMuted
                                 font.family: root.fontMono
-                                font.pixelSize: 18
+                                font.pixelSize: 8
+                                font.letterSpacing: 4
+                            }
+                        }
+                    }
+
+                    Row {
+                        anchors.centerIn: parent
+                        spacing: 36
+                        // Ribbon steps aside while search is expanded over it.
+                        opacity: searchBox.expanded ? 0 : 1
+                        enabled: !searchBox.expanded
+                        Behavior on opacity { NumberAnimation { duration: root.tMed; easing.type: Easing.OutCubic } }
+                        TopTab { label: "Home"; view: "discover" }
+                        TopTab { label: "Apps"; view: "installed"; badge: root.activeOpsCount() }
+                        TopTab { label: "Updates"; view: "updates" }
+                        TopTab { label: "Settings"; view: "settings" }
+                    }
+
+                    // Search: an icon at rest; typing expands it left over the
+                    // ribbon tabs, Apple-style.
+                    Rectangle {
+                        id: searchBox
+                        readonly property bool expanded: searchField.activeFocus
+                            || root.query.length > 0 || root.activeView === "search"
+                        anchors.right: parent.right
+                        anchors.rightMargin: 20
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: expanded ? Math.min(640, Math.round(window.width * 0.42)) : 36
+                        height: 36
+                        z: 10
+                        color: root.cDim
+                        border.color: searchField.activeFocus ? root.cGreen : root.cLine
+                        Behavior on width { NumberAnimation { duration: root.tMed; easing.type: Easing.OutCubic } }
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: searchBox.expanded ? 12 : 0
+                            anchors.rightMargin: searchBox.expanded ? 10 : 0
+                            spacing: 8
+                            Label {
+                                text: "⌕"
+                                color: searchField.activeFocus ? root.cGreen : root.cMuted
+                                font.family: root.fontMono
+                                font.pixelSize: 15
+                                horizontalAlignment: searchBox.expanded ? Text.AlignLeft : Text.AlignHCenter
+                                Layout.fillWidth: !searchBox.expanded
+                            }
+                            TextField {
+                                id: searchField
+                                visible: searchBox.expanded
+                                Layout.fillWidth: searchBox.expanded
+                                placeholderText: "Search apps"
+                                text: root.query
+                                color: root.cFg
+                                placeholderTextColor: root.cMuted
+                                background: Rectangle { color: "transparent" }
+                                font.family: root.fontHuman
+                                font.pixelSize: 13
+                                onActiveFocusChanged: {
+                                    if (activeFocus)
+                                        root.activeView = "search"
+                                }
+                                onTextChanged: {
+                                    if (text === root.query)
+                                        return
+                                    root.query = text
+                                    root.searchCommitted = false
+                                    if (root.activeView !== "search")
+                                        root.activeView = "search"
+                                    searchDebounce.restart()
+                                }
+                                onAccepted: root.searchCommitted = true
+                                Keys.onEscapePressed: {
+                                    root.activeView = "discover"
+                                    focus = false
+                                }
+                            }
+
+                            // Clear + exit search.
+                            Label {
+                                visible: searchBox.expanded
+                                text: "✕"
+                                color: searchCloseHover.hovered ? root.cFg : root.cMuted
+                                font.family: root.fontMono
+                                font.pixelSize: 13
+                                Layout.alignment: Qt.AlignVCenter
+                                HoverHandler { id: searchCloseHover }
                                 MouseArea {
                                     anchors.fill: parent
                                     anchors.margins: -8
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.sidebarCollapsed = true
+                                    onClicked: {
+                                        root.query = ""
+                                        root.searchCommitted = false
+                                        root.results = []
+                                        searchDebounce.stop()
+                                        searchField.focus = false
+                                        root.activeView = "discover"
+                                    }
                                 }
                             }
                         }
 
-                        Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
-
-                        Label {
-                            visible: !root.sidebarCollapsed
-                            text: root.status
-                            color: root.cMuted
-                            font.family: root.fontHuman
-                            font.pixelSize: 13
-                            wrapMode: Text.WordWrap
-                            maximumLineCount: 2
-                            elide: Text.ElideRight
-                            Layout.fillWidth: true
-                        }
-
-                        NavButton { label: "Discover"; view: "discover"; mark: "◆" }
-                        NavButton { label: "Search"; view: "search"; mark: "⌕" }
-                        NavButton { label: "Queue"; view: "queue"; mark: "▤" }
-                        NavButton { label: "Installed"; view: "installed"; mark: "✓" }
-                        NavButton { label: "Updates"; view: "updates"; mark: "↻" }
-
-                        // Live store log — what the store is actually doing.
-                        Rectangle {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            Layout.topMargin: 6
-                            visible: !root.sidebarCollapsed
-                            color: root.cBase
-                            border.color: root.isBusy() ? root.cGreen : root.cLine
-                            clip: true
-
-                            ColumnLayout {
-                                anchors.fill: parent
-                                anchors.margins: 12
-                                spacing: 8
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 8
-                                    Rectangle { width: root.tickW; height: 12; color: root.cGreen; Layout.alignment: Qt.AlignVCenter }
-                                    Label {
-                                        text: "LOG"
-                                        color: root.cFg
-                                        font.family: root.fontMono
-                                        font.pixelSize: 12
-                                        font.bold: true
-                                        font.letterSpacing: 2
-                                        Layout.fillWidth: true
-                                    }
-                                    Label {
-                                        text: root.activityGlyph()
-                                        color: root.isBusy() ? root.cGreen : root.cMuted
-                                        font.family: root.fontMono
-                                        font.pixelSize: 12
-                                    }
-                                }
-
-                                Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
-
-                                ListView {
-                                    Layout.fillWidth: true
-                                    Layout.fillHeight: true
-                                    clip: true
-                                    model: root.storeLog
-                                    spacing: 3
-                                    boundsBehavior: Flickable.StopAtBounds
-                                    delegate: Label {
-                                        width: ListView.view ? ListView.view.width : 0
-                                        text: modelData
-                                        color: root.cMuted
-                                        font.family: root.fontMono
-                                        font.pixelSize: 10
-                                        elide: Text.ElideRight
-                                        maximumLineCount: 1
-                                    }
-                                }
-
-                                Label {
-                                    visible: root.storeLog.length === 0
-                                    text: "waiting for events…"
-                                    color: root.cLine
-                                    font.family: root.fontMono
-                                    font.pixelSize: 10
-                                    Layout.fillWidth: true
-                                }
+                        MouseArea {
+                            visible: !searchBox.expanded
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                root.activeView = "search"
+                                searchField.forceActiveFocus()
                             }
                         }
                     }
@@ -1230,7 +1360,7 @@ ShellRoot {
                 StackLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    currentIndex: root.activeView === "details" ? 1 : root.activeView === "queue" ? 2 : root.activeView === "installed" ? 3 : root.activeView === "updates" ? 4 : 0
+                    currentIndex: root.activeView === "details" ? 1 : root.activeView === "settings" ? 2 : root.activeView === "installed" || root.activeView === "queue" ? 3 : root.activeView === "updates" ? 4 : 0
 
                     Item {
                         id: discoverPage
@@ -1250,84 +1380,41 @@ ShellRoot {
 
                         ColumnLayout {
                             anchors.fill: parent
-                            anchors.margins: root.pagePad()
+                            anchors.leftMargin: root.contentSideMargin()
+                            anchors.rightMargin: root.contentSideMargin()
+                            anchors.topMargin: root.pagePad()
+                            anchors.bottomMargin: root.pagePad()
                             spacing: 16
 
-                            RowLayout {
+                            ColumnLayout {
                                 Layout.fillWidth: true
-                                spacing: 14
-                                visible: !discoverPage.onSearch
+                                spacing: 3
 
-                                ColumnLayout {
+                                Label {
+                                    visible: !discoverPage.onSearch
+                                    text: Qt.formatDate(new Date(), "dddd, MMMM d").toUpperCase()
+                                    color: root.cGreen
+                                    font.family: root.fontMono
+                                    font.pixelSize: 11
+                                    font.letterSpacing: 3
                                     Layout.fillWidth: true
-                                    spacing: 3
-                                    Label {
-                                        text: discoverPage.onSearch ? "Search" : "Discover"
-                                        color: root.cFg
-                                        font.family: root.fontBrand
-                                        font.pixelSize: Math.round(34 * root.uiScale())
-                                        font.bold: true
-                                        Layout.fillWidth: true
-                                    }
-                                    Label {
-                                        text: discoverPage.onSearch
-                                              ? (root.query.length > 0 ? root.results.length + " apps found across Thallium sources." : "Search apt, Flathub, GitHub and AppImage.")
-                                              : "Curated picks from Flathub."
-                                        color: root.cMuted
-                                        font.family: root.fontHuman
-                                        font.pixelSize: 15
-                                        Layout.fillWidth: true
-                                    }
                                 }
-
-                                ActionButton {
-                                    label: "Refresh"
-                                    fill: root.cDim
-                                    textColor: root.cGreen
-                                    Layout.preferredWidth: Math.min(120, root.actionColumnWidth())
-                                    onClicked: discoverPage.onSearch ? root.searchNow() : root.loadDiscover()
+                                Label {
+                                    text: discoverPage.onSearch ? "Search" : "Home"
+                                    color: root.cFg
+                                    font.family: root.fontBrand
+                                    font.pixelSize: Math.round(34 * root.uiScale())
+                                    font.bold: true
+                                    Layout.fillWidth: true
                                 }
-                            }
-
-                            Rectangle {
-                                Layout.fillWidth: true
-                                visible: discoverPage.onSearch
-                                height: 52
-                                radius: 0
-                                color: root.cDim
-                                border.color: searchField.activeFocus ? root.cGreen : root.cLine
-                                clip: true
-
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 16
-                                    anchors.rightMargin: 16
-                                    spacing: 12
-
-                                    Label {
-                                        text: "⌕"
-                                        color: root.cMuted
-                                        font.family: root.fontMono
-                                        font.pixelSize: 20
-                                    }
-                                    TextField {
-                                        id: searchField
-                                        Layout.fillWidth: true
-                                        placeholderText: "Search apps, packages, repositories"
-                                        text: root.query
-                                        color: root.cFg
-                                        placeholderTextColor: root.cMuted
-                                        background: Rectangle { color: "transparent" }
-                                        font.family: root.fontHuman
-                                        font.pixelSize: 16
-                                        onTextChanged: {
-                                            root.query = text
-                                            root.searchCommitted = false
-                                            searchDebounce.restart()
-                                        }
-                                        onAccepted: root.searchCommitted = true
-                                        Component.onCompleted: forceActiveFocus()
-                                    }
+                                Label {
+                                    text: discoverPage.onSearch
+                                          ? (root.query.length > 0 ? root.results.length + " apps found across Thallium sources." : "Search apt, Flathub, GitHub and AppImage.")
+                                          : "Curated picks from Flathub."
+                                    color: root.cMuted
+                                    font.family: root.fontHuman
+                                    font.pixelSize: 15
+                                    Layout.fillWidth: true
                                 }
                             }
 
@@ -1365,6 +1452,7 @@ ShellRoot {
                                 clip: true
                                 visible: !discoverPage.onSearch
                                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                                ScrollBar.vertical.policy: ScrollBar.AlwaysOff
 
                                 ColumnLayout {
                                     width: discoverScroll.availableWidth
@@ -1403,8 +1491,56 @@ ShellRoot {
                                                 cut: 22
                                                 clip: true
 
-                                                // Ghost monogram — oversized brand letter bleeding off the right edge.
+                                                // Artwork backdrop — first screenshot under an Everforest scrim,
+                                                // Apple Today style. Falls back to tint + ghost monogram.
+                                                Image {
+                                                    id: featShot
+                                                    anchors.fill: parent
+                                                    source: featCard.app.screenshots && featCard.app.screenshots.length > 0 ? featCard.app.screenshots[0] : ""
+                                                    fillMode: Image.PreserveAspectCrop
+                                                    asynchronous: true
+                                                    cache: true
+                                                    smooth: true
+                                                    visible: status === Image.Ready
+                                                }
+                                                Rectangle {
+                                                    anchors.fill: parent
+                                                    visible: featShot.status === Image.Ready
+                                                    gradient: Gradient {
+                                                        orientation: Gradient.Horizontal
+                                                        GradientStop { position: 0.0; color: "#f5060607" }
+                                                        GradientStop { position: 0.5; color: "#c0060607" }
+                                                        GradientStop { position: 1.0; color: "#3d060607" }
+                                                    }
+                                                }
+                                                // Re-cut the chamfer notch over the artwork.
+                                                Canvas {
+                                                    anchors.fill: parent
+                                                    visible: featShot.status === Image.Ready
+                                                    onWidthChanged: requestPaint()
+                                                    onHeightChanged: requestPaint()
+                                                    onPaint: {
+                                                        const ctx = getContext("2d"); ctx.reset()
+                                                        const k = featCard.cut
+                                                        ctx.beginPath()
+                                                        ctx.moveTo(width - k, 0)
+                                                        ctx.lineTo(width, 0)
+                                                        ctx.lineTo(width, k)
+                                                        ctx.closePath()
+                                                        ctx.fillStyle = String(root.cBase)
+                                                        ctx.fill()
+                                                        ctx.strokeStyle = String(root.cGreen)
+                                                        ctx.lineWidth = 1.5
+                                                        ctx.beginPath()
+                                                        ctx.moveTo(width - k, 0)
+                                                        ctx.lineTo(width, k)
+                                                        ctx.stroke()
+                                                    }
+                                                }
+
+                                                // Ghost monogram — fallback identity when no artwork.
                                                 Label {
+                                                    visible: featShot.status !== Image.Ready
                                                     anchors.right: parent.right
                                                     anchors.rightMargin: Math.round(36 * root.uiScale())
                                                     anchors.verticalCenter: parent.verticalCenter
@@ -1427,14 +1563,11 @@ ShellRoot {
                                                     anchors.margins: 30
                                                     spacing: 28
 
-                                                    // Icon on a dark inset tile — gives the artwork a stage.
-                                                    Rectangle {
+                                                    // Icon floats free — no backdrop tile.
+                                                    Item {
                                                         Layout.preferredWidth: Math.round(148 * root.uiScale())
                                                         Layout.preferredHeight: Math.round(148 * root.uiScale())
                                                         Layout.alignment: Qt.AlignVCenter
-                                                        color: Qt.rgba(0, 0, 0, 0.30)
-                                                        border.color: Qt.rgba(0, 0, 0, 0.45)
-                                                        clip: true
                                                         Label {
                                                             anchors.centerIn: parent
                                                             visible: fIcon.status !== Image.Ready
@@ -1447,7 +1580,7 @@ ShellRoot {
                                                         Image {
                                                             id: fIcon
                                                             anchors.fill: parent
-                                                            anchors.margins: 20
+                                                            anchors.margins: 8
                                                             source: featCard.app.icon ? featCard.app.icon : ""
                                                             fillMode: Image.PreserveAspectFit
                                                             asynchronous: true
@@ -1571,21 +1704,25 @@ ShellRoot {
                                             }
 
                                             ListView {
+                                                id: railView
                                                 Layout.fillWidth: true
                                                 Layout.preferredHeight: 246
                                                 orientation: ListView.Horizontal
                                                 spacing: 14
                                                 clip: true
                                                 model: collection.apps
+                                                // Dynamic card width — fill the row edge-to-edge at any window size;
+                                                // when the collection has fewer apps than fit, stretch them instead.
+                                                readonly property int cardsVisible: Math.max(3, Math.min(count > 0 ? count : 6, Math.floor((width + spacing) / 200)))
+                                                readonly property int cardW: Math.floor((width - (cardsVisible - 1) * spacing) / cardsVisible)
                                                 delegate: Rectangle {
                                                     id: railCard
                                                     property var app: modelData
-                                                    width: 176
+                                                    width: railView.cardW
                                                     height: 234
                                                     radius: 0
                                                     color: railHover.hovered ? root.cDim : root.cPanel
                                                     border.color: railHover.hovered ? root.cGreen : root.cLine
-                                                    transform: Translate { y: railHover.hovered ? -3 : 0 }
 
                                                     HoverHandler { id: railHover }
                                                     Behavior on border.color { ColorAnimation { duration: 140 } }
@@ -1602,13 +1739,10 @@ ShellRoot {
                                                         anchors.margins: 14
                                                         spacing: 10
 
-                                                        // Icon on a source-tinted tile — every card gets a stage.
-                                                        Rectangle {
+                                                        // Icon floats free — no backdrop tile.
+                                                        Item {
                                                             Layout.fillWidth: true
                                                             Layout.preferredHeight: 108
-                                                            color: root.appSurface(railCard.app)
-                                                            border.color: Qt.rgba(0, 0, 0, 0.3)
-                                                            clip: true
                                                             Label {
                                                                 anchors.centerIn: parent
                                                                 visible: railIcon.status !== Image.Ready
@@ -1621,8 +1755,8 @@ ShellRoot {
                                                             Image {
                                                                 id: railIcon
                                                                 anchors.centerIn: parent
-                                                                width: 72
-                                                                height: 72
+                                                                width: 88
+                                                                height: 88
                                                                 source: railCard.app.icon ? railCard.app.icon : ""
                                                                 fillMode: Image.PreserveAspectFit
                                                                 asynchronous: true
@@ -1681,6 +1815,54 @@ ShellRoot {
                                     font.family: root.fontMono
                                     font.pixelSize: 12
                                     font.letterSpacing: 2
+                                }
+                            }
+
+                            // No results (search settled, nothing found).
+                            Item {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                visible: discoverPage.onSearch && root.query.length > 0
+                                         && root.results.length === 0
+                                         && !root.isBusy() && !searchDebounce.running
+                                Label {
+                                    anchors.centerIn: parent
+                                    text: "NO RESULTS FOR “" + root.query.toUpperCase() + "”"
+                                    color: root.cLine
+                                    font.family: root.fontMono
+                                    font.pixelSize: 12
+                                    font.letterSpacing: 2
+                                }
+                            }
+
+                            // Search pending or in flight, nothing painted yet — brand
+                            // loader. Also covers the debounce window so the header
+                            // never loses its fill-height sibling (which would let the
+                            // ColumnLayout re-center everything mid-keystroke).
+                            Item {
+                                id: searchLoading
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                visible: discoverPage.onSearch && root.query.length > 0
+                                         && root.results.length === 0
+                                         && (root.isBusy() || searchDebounce.running)
+                                ColumnLayout {
+                                    anchors.centerIn: parent
+                                    spacing: 16
+                                    ThalliumLoader {
+                                        Layout.alignment: Qt.AlignHCenter
+                                        Layout.preferredWidth: 84
+                                        Layout.preferredHeight: 84
+                                        running: searchLoading.visible
+                                    }
+                                    Label {
+                                        text: "SEARCHING SOURCES"
+                                        color: root.cMuted
+                                        font.family: root.fontMono
+                                        font.pixelSize: 10
+                                        font.letterSpacing: 3
+                                        Layout.alignment: Qt.AlignHCenter
+                                    }
                                 }
                             }
 
@@ -1932,9 +2114,9 @@ ShellRoot {
 
                             ColumnLayout {
                                 id: detailsColumn
-                                x: root.pagePad()
+                                x: Math.max(root.pagePad(), Math.round((detailsScroll.availableWidth - width) / 2))
                                 y: root.pagePad()
-                                width: Math.max(360, detailsScroll.availableWidth - root.pagePad() * 2)
+                                width: Math.max(360, Math.min(1000, detailsScroll.availableWidth - root.pagePad() * 2))
                                 spacing: 16
                                 opacity: root.activeView === "details" ? 1 : 0
 
@@ -2285,7 +2467,7 @@ ShellRoot {
                                                 }
 
                                                 Label {
-                                                    text: modelData.version ? "v" + modelData.version : "latest"
+                                                    text: modelData.version ? (modelData.version.charAt(0) === "v" ? modelData.version : "v" + modelData.version) : "latest"
                                                     color: root.cMuted
                                                     font.family: root.fontMono
                                                     font.pixelSize: 11
@@ -2299,6 +2481,81 @@ ShellRoot {
                                                     font.pixelSize: 10
                                                     font.letterSpacing: 1
                                                     Layout.alignment: Qt.AlignVCenter
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Composition — GitHub linguist breakdown, stacked bar + legend.
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    visible: root.selectedApp && root.selectedApp.languages && root.selectedApp.languages.length > 0
+
+                                    HudRailHeader { title: "Composition"; sub: "source languages" }
+
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        color: root.cPanel
+                                        border.color: root.cLine
+                                        radius: 0
+                                        implicitHeight: langCol.implicitHeight + 36
+
+                                        ColumnLayout {
+                                            id: langCol
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.top: parent.top
+                                            anchors.margins: 18
+                                            spacing: 14
+
+                                            Item {
+                                                id: langBar
+                                                Layout.fillWidth: true
+                                                height: 10
+                                                Row {
+                                                    anchors.fill: parent
+                                                    spacing: 2
+                                                    Repeater {
+                                                        model: root.selectedApp ? root.selectedApp.languages : []
+                                                        delegate: Rectangle {
+                                                            height: 10
+                                                            width: Math.max(3, (langBar.width - (root.selectedApp.languages.length - 1) * 2) * modelData.percent / 100)
+                                                            color: root.langColor(index)
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            Flow {
+                                                Layout.fillWidth: true
+                                                spacing: 18
+                                                Repeater {
+                                                    model: root.selectedApp ? root.selectedApp.languages : []
+                                                    delegate: Row {
+                                                        spacing: 7
+                                                        Rectangle {
+                                                            width: 8; height: 8; radius: 0
+                                                            color: root.langColor(index)
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                        }
+                                                        Label {
+                                                            text: modelData.name
+                                                            color: root.cFg
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 12
+                                                            font.bold: true
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                        }
+                                                        Label {
+                                                            text: modelData.percent.toFixed(1) + "%"
+                                                            color: root.cMuted
+                                                            font.family: root.fontMono
+                                                            font.pixelSize: 11
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -2341,254 +2598,168 @@ ShellRoot {
                     }
 
                     Item {
-                        opacity: root.activeView === "queue" ? 1 : 0
+                        opacity: root.activeView === "settings" ? 1 : 0
                         transform: Translate {
-                            y: root.activeView === "queue" ? 0 : 12
+                            y: root.activeView === "settings" ? 0 : 12
                             Behavior on y { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                         }
                         Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                         ColumnLayout {
                             anchors.fill: parent
-                            anchors.margins: root.pagePad()
+                            anchors.leftMargin: root.contentSideMargin()
+                            anchors.rightMargin: root.contentSideMargin()
+                            anchors.topMargin: root.pagePad()
+                            anchors.bottomMargin: root.pagePad()
                             spacing: 14
 
-                            RowLayout {
+                            ColumnLayout {
                                 Layout.fillWidth: true
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 3
-                                    Label {
-                                        text: "Queue"
-                                        color: root.cFg
-                                        font.family: root.fontBrand
-                                        font.pixelSize: Math.round(32 * root.uiScale())
-                                        font.bold: true
-                                        Layout.fillWidth: true
-                                    }
-                                    Label {
-                                        text: root.operations.length + " operations in progress or history."
-                                        color: root.cMuted
-                                        font.family: root.fontHuman
-                                        font.pixelSize: 15
-                                        Layout.fillWidth: true
-                                    }
-                                }
-                                ActionButton {
-                                    label: "Refresh"
-                                    fill: root.cDim
-                                    textColor: root.cBlue
-                                    Layout.preferredWidth: Math.min(120, root.actionColumnWidth())
-                                    onClicked: root.request("operations.list", {})
-                                }
-                            }
-
-                            Rectangle {
-                                visible: root.operations.length === 0
-                                Layout.fillWidth: true
-                                Layout.fillHeight: true
-                                color: root.cPanel
-                                border.color: root.cLine
-                                radius: 0
+                                spacing: 3
                                 Label {
-                                    anchors.centerIn: parent
-                                    text: "No operations queued."
+                                    text: "Settings"
+                                    color: root.cFg
+                                    font.family: root.fontBrand
+                                    font.pixelSize: Math.round(32 * root.uiScale())
+                                    font.bold: true
+                                    Layout.fillWidth: true
+                                }
+                                Label {
+                                    text: "Storage, setup and store information."
                                     color: root.cMuted
                                     font.family: root.fontHuman
-                                    font.pixelSize: 16
+                                    font.pixelSize: 15
+                                    Layout.fillWidth: true
                                 }
                             }
 
                             ScrollView {
+                                id: settingsScroll
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
-                                visible: root.operations.length > 0
-                                GridView {
-                                    id: queueGrid
-                                    width: parent.width
-                                    height: parent.height
-                                    model: root.operations
-                                    cellWidth: {
-                                        const columns = Math.max(1, Math.floor(width / 320))
-                                        return Math.floor(width / columns)
-                                    }
-                                    cellHeight: Math.round(230 * root.uiScale())
-                                    delegate: Rectangle {
-                                        id: queueCard
-                                        property color stateColor: modelData.state === "succeeded" ? root.cGreenSoft : modelData.state === "failed" ? root.cRed : root.cBlue
-                                        property color stateSurface: modelData.state === "succeeded" ? "#233024" : modelData.state === "failed" ? "#33201f" : root.cBlueSoft
-                                        property bool terminal: modelData.state === "succeeded" || modelData.state === "failed" || modelData.state === "cancelled"
+                                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                                ScrollBar.vertical.policy: ScrollBar.AlwaysOff
 
-                                        width: queueGrid.cellWidth - 14
-                                        height: Math.round(210 * root.uiScale())
-                                        x: 7
-                                        y: 4
+                                ColumnLayout {
+                                    width: settingsScroll.availableWidth
+                                    spacing: 16
+
+                                    HudRailHeader { title: "Storage" }
+
+                                    Rectangle {
+                                        Layout.fillWidth: true
                                         color: root.cPanel
-                                        border.color: queueHover.hovered ? "#5f7048" : root.cLine
+                                        border.color: root.cLine
                                         radius: 0
-                                        opacity: 0
-                                        scale: queueHover.hovered ? 1.018 : 1.0
-                                        transform: Translate { id: queueSlide; y: queueHover.hovered ? -4 : 8 }
-                                        clip: true
+                                        implicitHeight: 72
 
-                                        HoverHandler { id: queueHover }
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 18
+                                            anchors.rightMargin: 18
+                                            spacing: 14
 
-                                        Component.onCompleted: {
-                                            queueFade.start()
-                                            queueLift.start()
-                                        }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 3
+                                                Label {
+                                                    text: "Icon cache"
+                                                    color: root.cFg
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: 14
+                                                    font.bold: true
+                                                }
+                                                Label {
+                                                    text: (root.cacheInfo.iconBytes > 0 ? root.formatBytes(root.cacheInfo.iconBytes) : "0 B") + " · " + root.cacheInfo.iconCount + " files · ~/.local/share/thallium-store/icons"
+                                                    color: root.cMuted
+                                                    font.family: root.fontMono
+                                                    font.pixelSize: 11
+                                                    elide: Text.ElideRight
+                                                    Layout.fillWidth: true
+                                                }
+                                            }
 
-                                        Behavior on border.color { ColorAnimation { duration: 140 } }
-                                        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
-
-                                        NumberAnimation {
-                                            id: queueFade
-                                            target: queueCard
-                                            property: "opacity"
-                                            from: 0
-                                            to: 1
-                                            duration: 180
-                                            easing.type: Easing.OutCubic
-                                        }
-
-                                        NumberAnimation {
-                                            id: queueLift
-                                            target: queueSlide
-                                            property: "y"
-                                            from: 8
-                                            to: 0
-                                            duration: 180
-                                            easing.type: Easing.OutCubic
-                                        }
-
-                                        Rectangle {
-                                            width: parent.width
-                                            height: parent.height
-                                            opacity: queueHover.hovered ? 0.16 : 0.08
-                                            gradient: Gradient {
-                                                orientation: Gradient.Horizontal
-                                                GradientStop { position: 0.0; color: queueCard.stateColor }
-                                                GradientStop { position: 1.0; color: "transparent" }
+                                            ActionButton {
+                                                label: "Clear cache"
+                                                fill: root.cDim
+                                                textColor: root.cRed
+                                                Layout.preferredWidth: 118
+                                                onClicked: root.request("system.clearIconCache", {})
                                             }
                                         }
+                                    }
+
+                                    HudRailHeader { title: "Setup" }
+
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        color: root.cPanel
+                                        border.color: root.cLine
+                                        radius: 0
+                                        implicitHeight: 72
+
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 18
+                                            anchors.rightMargin: 18
+                                            spacing: 14
+
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 3
+                                                Label {
+                                                    text: "First-launch walkthrough"
+                                                    color: root.cFg
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: 14
+                                                    font.bold: true
+                                                }
+                                                Label {
+                                                    text: "Replay the welcome tour and source overview."
+                                                    color: root.cMuted
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: 12
+                                                    Layout.fillWidth: true
+                                                }
+                                            }
+
+                                            ActionButton {
+                                                label: "Run again"
+                                                fill: root.cDim
+                                                textColor: root.cGreen
+                                                Layout.preferredWidth: 118
+                                                onClicked: {
+                                                    root.setupStep = 0
+                                                    root.setupOpen = true
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    HudRailHeader { title: "About" }
+
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        color: root.cPanel
+                                        border.color: root.cLine
+                                        radius: 0
+                                        implicitHeight: aboutSettingsCol.implicitHeight + 36
 
                                         ColumnLayout {
-                                            anchors.fill: parent
-                                            anchors.margins: 14
-                                            spacing: 8
-
-                                            RowLayout {
-                                                Layout.fillWidth: true
-                                                spacing: 12
-
-                                                Rectangle {
-                                                    Layout.preferredWidth: Math.round(56 * root.uiScale())
-                                                    Layout.preferredHeight: Math.round(56 * root.uiScale())
-                                                    radius: 0
-                                                    color: queueCard.stateSurface
-                                                    border.color: queueCard.stateColor
-
-                                                    Label {
-                                                        anchors.centerIn: parent
-                                                        text: modelData.app_name ? modelData.app_name.substring(0, 1).toUpperCase() : "Q"
-                                                        color: queueCard.stateColor
-                                                        font.family: root.fontBrand
-                                                        font.pixelSize: Math.round(24 * root.uiScale())
-                                                        font.bold: true
-                                                    }
-                                                }
-
-                                                ColumnLayout {
-                                                    Layout.fillWidth: true
-                                                    Layout.minimumWidth: 0
-                                                    spacing: 4
-
-                                                    Label {
-                                                        text: modelData.app_name
-                                                        color: root.cFg
-                                                        font.family: root.fontHuman
-                                                        font.pixelSize: Math.round(16 * root.uiScale())
-                                                        font.bold: true
-                                                        Layout.fillWidth: true
-                                                        elide: Text.ElideRight
-                                                    }
-
-                                                    Label {
-                                                        text: modelData.action + " · " + root.sourceLabel(root.operationSource(modelData.source))
-                                                        color: root.cMuted
-                                                        font.family: root.fontHuman
-                                                        font.pixelSize: 12
-                                                        Layout.fillWidth: true
-                                                        elide: Text.ElideRight
-                                                    }
-                                                }
-
-                                                Rectangle {
-                                                    Layout.preferredWidth: stateChip.implicitWidth + 18
-                                                    Layout.preferredHeight: 24
-                                                    radius: 0
-                                                    color: queueCard.stateSurface
-                                                    border.color: queueCard.stateColor
-
-                                                    Label {
-                                                        id: stateChip
-                                                        anchors.centerIn: parent
-                                                        text: modelData.state
-                                                        color: queueCard.stateColor
-                                                        font.family: root.fontHuman
-                                                        font.pixelSize: 10
-                                                        font.bold: true
-                                                    }
-                                                }
-                                            }
-
-                                            ProgressBar {
-                                                from: 0
-                                                to: 100
-                                                value: modelData.percent
-                                                Layout.fillWidth: true
-                                            }
-
-                                            Label {
-                                                text: root.operationProblem(modelData)
-                                                color: modelData.state === "failed" ? root.cRed : root.cMuted
-                                                font.family: root.fontHuman
-                                                font.pixelSize: 12
-                                                maximumLineCount: 2
-                                                wrapMode: Text.WordWrap
-                                                Layout.fillWidth: true
-                                                elide: Text.ElideRight
-                                            }
-
-                                            RowLayout {
-                                                Layout.fillWidth: true
-                                                Layout.preferredHeight: 40
-                                                spacing: 8
-
-                                                ActionButton {
-                                                    label: "Details"
-                                                    fill: root.cDim
-                                                    textColor: root.cBlue
-                                                    Layout.fillWidth: true
-                                                    onClicked: root.selectApp(root.appFromOperation(modelData))
-                                                }
-
-                                                ActionButton {
-                                                    label: root.operationActionLabel(modelData)
-                                                    fill: modelData.state === "failed" ? root.cRed : queueCard.terminal ? root.cDim : root.cBlue
-                                                    textColor: modelData.state === "failed" ? "white" : queueCard.terminal ? queueCard.stateColor : "white"
-                                                    active: modelData.state === "failed" || !queueCard.terminal
-                                                    Layout.fillWidth: true
-                                                    onClicked: {
-                                                        if (modelData.state === "failed")
-                                                            root.retryOperation(modelData)
-                                                        else if (!queueCard.terminal)
-                                                            root.cancelOperation(modelData)
-                                                    }
-                                                }
-                                            }
+                                            id: aboutSettingsCol
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            anchors.top: parent.top
+                                            anchors.margins: 18
+                                            spacing: 10
+                                            StatRow { name: "Version"; value: "0.1.0 · MVP" }
+                                            StatRow { name: "Backend"; value: "UNI " + (root.fakeUniMode ? "simulated (fake mode)" : (root.uniHealth || "connected")) }
+                                            StatRow { name: "Sources"; value: "APT · Flathub · GitHub · AppImage" }
+                                            StatRow { name: "Design"; value: "Thallium 81 · Everforest" }
                                         }
                                     }
+
+                                    Item { Layout.preferredHeight: 4 }
                                 }
                             }
                         }
@@ -2603,7 +2774,10 @@ ShellRoot {
                         Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                         ColumnLayout {
                             anchors.fill: parent
-                            anchors.margins: root.pagePad()
+                            anchors.leftMargin: root.contentSideMargin()
+                            anchors.rightMargin: root.contentSideMargin()
+                            anchors.topMargin: root.pagePad()
+                            anchors.bottomMargin: root.pagePad()
                             spacing: 14
 
                             RowLayout {
@@ -2612,7 +2786,7 @@ ShellRoot {
                                     Layout.fillWidth: true
                                     spacing: 3
                                     Label {
-                                        text: "Installed"
+                                        text: "Apps"
                                         color: root.cFg
                                         font.family: root.fontBrand
                                         font.pixelSize: Math.round(32 * root.uiScale())
@@ -2620,7 +2794,8 @@ ShellRoot {
                                         Layout.fillWidth: true
                                     }
                                     Label {
-                                        text: root.installedItems.length + " apps found on this system."
+                                        text: root.installedItems.length + " apps on this system"
+                                              + (root.activeOpsCount() > 0 ? " · " + root.activeOpsCount() + " operation" + (root.activeOpsCount() === 1 ? "" : "s") + " running" : "") + "."
                                         color: root.cMuted
                                         font.family: root.fontHuman
                                         font.pixelSize: 15
@@ -2632,7 +2807,94 @@ ShellRoot {
                                     fill: root.cDim
                                     textColor: root.cBlue
                                     Layout.preferredWidth: Math.min(120, root.actionColumnWidth())
-                                    onClicked: root.request("installed.list", {})
+                                    onClicked: {
+                                        root.request("installed.list", {})
+                                        root.request("operations.list", {})
+                                    }
+                                }
+                            }
+
+                            // Activity — running and recent operations, merged from the old Queue page.
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                visible: root.operations.length > 0
+
+                                HudRailHeader {
+                                    title: "Activity"
+                                    sub: root.activeOpsCount() > 0 ? root.activeOpsCount() + " running" : "recent"
+                                }
+
+                                Repeater {
+                                    model: root.operations.slice(0, 6)
+                                    delegate: Rectangle {
+                                        id: opRow
+                                        property var op: modelData
+                                        property bool terminal: op.state === "succeeded" || op.state === "failed" || op.state === "cancelled"
+                                        property color stateColor: op.state === "succeeded" ? root.cGreenSoft : op.state === "failed" ? root.cRed : root.cGreen
+
+                                        Layout.fillWidth: true
+                                        height: 54
+                                        color: root.cPanel
+                                        border.color: root.cLine
+                                        radius: 0
+
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 16
+                                            anchors.rightMargin: 12
+                                            spacing: 14
+
+                                            Rectangle {
+                                                width: 8; height: 8; radius: 0
+                                                color: opRow.stateColor
+                                                Layout.alignment: Qt.AlignVCenter
+                                            }
+
+                                            Label {
+                                                text: opRow.op.app_name || "Unknown"
+                                                color: root.cFg
+                                                font.family: root.fontHuman
+                                                font.pixelSize: 13
+                                                font.bold: true
+                                                elide: Text.ElideRight
+                                                Layout.preferredWidth: 220
+                                            }
+
+                                            Label {
+                                                text: opRow.op.action + " · " + root.sourceLabel(root.operationSource(opRow.op.source)) + " · " + opRow.op.state
+                                                color: opRow.op.state === "failed" ? root.cRed : root.cMuted
+                                                font.family: root.fontMono
+                                                font.pixelSize: 10
+                                                font.letterSpacing: 1
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+
+                                            ProgressBar {
+                                                visible: !opRow.terminal
+                                                from: 0
+                                                to: 100
+                                                value: opRow.op.percent
+                                                Layout.preferredWidth: 160
+                                            }
+
+                                            ActionButton {
+                                                label: root.operationActionLabel(opRow.op)
+                                                fill: opRow.op.state === "failed" ? root.cRed : root.cDim
+                                                textColor: opRow.op.state === "failed" ? "white" : opRow.terminal ? root.cMuted : root.cFg
+                                                active: opRow.op.state === "failed" || !opRow.terminal
+                                                height: 32
+                                                Layout.preferredWidth: 96
+                                                onClicked: {
+                                                    if (opRow.op.state === "failed")
+                                                        root.retryOperation(opRow.op)
+                                                    else if (!opRow.terminal)
+                                                        root.cancelOperation(opRow.op)
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
@@ -2698,8 +2960,7 @@ ShellRoot {
                                         border.color: installedHover.hovered ? "#5f7048" : root.cLine
                                         radius: 0
                                         opacity: 0
-                                        scale: installedHover.hovered ? 1.018 : 1.0
-                                        transform: Translate { id: installedSlide; y: installedHover.hovered ? -4 : 8 }
+                                        transform: Translate { id: installedSlide; y: 8 }
                                         clip: true
 
                                         Component.onCompleted: {
@@ -2709,7 +2970,6 @@ ShellRoot {
 
                                         HoverHandler { id: installedHover }
                                         Behavior on border.color { ColorAnimation { duration: 140 } }
-                                        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
 
                                         NumberAnimation {
                                             id: installedFade
@@ -2876,7 +3136,10 @@ ShellRoot {
                         Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                         ColumnLayout {
                             anchors.fill: parent
-                            anchors.margins: root.pagePad()
+                            anchors.leftMargin: root.contentSideMargin()
+                            anchors.rightMargin: root.contentSideMargin()
+                            anchors.topMargin: root.pagePad()
+                            anchors.bottomMargin: root.pagePad()
                             spacing: 14
 
                             RowLayout {
@@ -2972,8 +3235,7 @@ ShellRoot {
                                         border.color: updateHover.hovered ? "#5f7048" : root.cLine
                                         radius: 0
                                         opacity: 0
-                                        scale: updateHover.hovered ? 1.018 : 1.0
-                                        transform: Translate { id: updateSlide; y: updateHover.hovered ? -4 : 8 }
+                                        transform: Translate { id: updateSlide; y: 8 }
                                         clip: true
 
                                         Component.onCompleted: {
@@ -2983,7 +3245,6 @@ ShellRoot {
 
                                         HoverHandler { id: updateHover }
                                         Behavior on border.color { ColorAnimation { duration: 140 } }
-                                        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
 
                                         NumberAnimation {
                                             id: updateFade
@@ -3104,7 +3365,7 @@ ShellRoot {
                                                             package_id: root.packageIdFromInstalled(updateCard.item),
                                                             source: root.operationSource(updateCard.item.source)
                                                         })
-                                                        root.activeView = "queue"
+                                                        root.activeView = "installed"
                                                     }
                                                 }
                                             }
@@ -3113,6 +3374,286 @@ ShellRoot {
                                 }
                             }
                         }
+                    }
+                }
+
+            }
+
+            // First-launch setup — three-step brand walkthrough, shown once.
+            Rectangle {
+                anchors.fill: parent
+                visible: root.setupOpen
+                color: "#f0060607"
+                z: 950
+
+                MouseArea { anchors.fill: parent }
+
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 580
+                    height: 440
+                    color: root.cPanel
+                    border.color: root.cGreen
+                    radius: 0
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 30
+                        spacing: 14
+
+                        StackLayout {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            currentIndex: root.setupStep
+
+                            // Step 0 — welcome.
+                            ColumnLayout {
+                                spacing: 12
+                                Item { Layout.fillHeight: true }
+                                ThalliumLoader {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    Layout.preferredWidth: 104
+                                    Layout.preferredHeight: 104
+                                    running: root.setupOpen && root.setupStep === 0
+                                }
+                                Label {
+                                    text: "WELCOME TO"
+                                    color: root.cGreen
+                                    font.family: root.fontMono
+                                    font.pixelSize: 11
+                                    font.letterSpacing: 5
+                                    Layout.alignment: Qt.AlignHCenter
+                                }
+                                Label {
+                                    text: "Thallium Store"
+                                    color: root.cFg
+                                    font.family: root.fontBrand
+                                    font.pixelSize: 27
+                                    font.bold: true
+                                    Layout.alignment: Qt.AlignHCenter
+                                }
+                                Label {
+                                    text: "One store for apt, Flathub, GitHub releases and AppImages — merged, ranked by trust, installed through UNI."
+                                    color: root.cMuted
+                                    font.family: root.fontHuman
+                                    font.pixelSize: 13
+                                    wrapMode: Text.WordWrap
+                                    horizontalAlignment: Text.AlignHCenter
+                                    Layout.fillWidth: true
+                                }
+                                Item { Layout.fillHeight: true }
+                            }
+
+                            // Step 1 — sources and trust.
+                            ColumnLayout {
+                                spacing: 10
+                                Label {
+                                    text: "SOURCES & TRUST"
+                                    color: root.cFg
+                                    font.family: root.fontMono
+                                    font.pixelSize: 13
+                                    font.bold: true
+                                    font.letterSpacing: 3
+                                }
+                                Label {
+                                    text: "Every app can come from several channels. Thallium ranks them and recommends the safest."
+                                    color: root.cMuted
+                                    font.family: root.fontHuman
+                                    font.pixelSize: 12
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+                                Repeater {
+                                    model: [
+                                        { s: "flathub",  n: "Flathub",  d: "Sandboxed flatpaks — the default recommendation." },
+                                        { s: "system",   n: "System",   d: "Native .deb packages with full system access." },
+                                        { s: "github",   n: "GitHub",   d: "Curated release binaries from upstream repos." },
+                                        { s: "appimage", n: "AppImage", d: "Portable single-file apps." }
+                                    ]
+                                    delegate: RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 12
+                                        Rectangle {
+                                            width: 10; height: 10; radius: 0
+                                            color: root.sourceAccent(modelData.s)
+                                            Layout.alignment: Qt.AlignVCenter
+                                        }
+                                        Label {
+                                            text: modelData.n
+                                            color: root.cFg
+                                            font.family: root.fontHuman
+                                            font.pixelSize: 13
+                                            font.bold: true
+                                            Layout.preferredWidth: 92
+                                        }
+                                        Label {
+                                            text: modelData.d
+                                            color: root.cMuted
+                                            font.family: root.fontHuman
+                                            font.pixelSize: 12
+                                            wrapMode: Text.WordWrap
+                                            Layout.fillWidth: true
+                                        }
+                                    }
+                                }
+                                Item { Layout.fillHeight: true }
+                            }
+
+                            // Step 2 — cache and privacy.
+                            ColumnLayout {
+                                spacing: 10
+                                Label {
+                                    text: "FAST & LOCAL"
+                                    color: root.cFg
+                                    font.family: root.fontMono
+                                    font.pixelSize: 13
+                                    font.bold: true
+                                    font.letterSpacing: 3
+                                }
+                                Repeater {
+                                    model: [
+                                        "App icons are cached on disk after first load, so the store paints instantly offline.",
+                                        "Detail pages are enriched from Flathub and GitHub on demand, then cached in the daemon.",
+                                        "Network is only touched for search, artwork and metadata — never in the background without you.",
+                                        "Storage and cache controls live in Settings."
+                                    ]
+                                    delegate: RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 10
+                                        Rectangle {
+                                            width: root.tickW; height: 12; color: root.cGreen
+                                            Layout.alignment: Qt.AlignTop
+                                            Layout.topMargin: 3
+                                        }
+                                        Label {
+                                            text: modelData
+                                            color: root.cMuted
+                                            font.family: root.fontHuman
+                                            font.pixelSize: 13
+                                            wrapMode: Text.WordWrap
+                                            Layout.fillWidth: true
+                                        }
+                                    }
+                                }
+                                Item { Layout.fillHeight: true }
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+
+                            Row {
+                                spacing: 6
+                                Layout.alignment: Qt.AlignVCenter
+                                Repeater {
+                                    model: 3
+                                    delegate: Rectangle {
+                                        width: root.setupStep === index ? 16 : 6
+                                        height: 5
+                                        color: root.setupStep === index ? root.cGreen : root.cLine
+                                        Behavior on width { NumberAnimation { duration: root.tFast } }
+                                    }
+                                }
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            ActionButton {
+                                visible: root.setupStep < 2
+                                label: "Skip"
+                                fill: root.cDim
+                                textColor: root.cMuted
+                                Layout.preferredWidth: 84
+                                onClicked: root.finishSetup()
+                            }
+                            ActionButton {
+                                label: root.setupStep < 2 ? "Continue" : "Get started"
+                                fill: root.cGreen
+                                textColor: root.cBase
+                                Layout.preferredWidth: 128
+                                onClicked: {
+                                    if (root.setupStep < 2)
+                                        root.setupStep = root.setupStep + 1
+                                    else
+                                        root.finishSetup()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Details loading takeover — whole screen goes dark, the brand
+            // logo draws itself, then the finished page fades back in.
+            Rectangle {
+                id: detailsTakeover
+                anchors.fill: parent
+                color: root.cBase
+                z: 850
+                opacity: root.requestRunning && root.activeMethod === "catalog.appDetails" ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity { NumberAnimation { duration: root.tMed; easing.type: Easing.OutCubic } }
+
+                MouseArea { anchors.fill: parent }
+
+                ColumnLayout {
+                    anchors.centerIn: parent
+                    spacing: 20
+
+                    ThalliumLoader {
+                        Layout.alignment: Qt.AlignHCenter
+                        Layout.preferredWidth: 110
+                        Layout.preferredHeight: 110
+                        running: detailsTakeover.visible
+                    }
+                    Label {
+                        text: root.selectedApp ? root.selectedApp.name.toUpperCase() : ""
+                        color: root.cMuted
+                        font.family: root.fontMono
+                        font.pixelSize: 11
+                        font.letterSpacing: 4
+                        Layout.alignment: Qt.AlignHCenter
+                    }
+                }
+            }
+
+            // Boot loading screen — brand logo draws itself until the
+            // Discover feed arrives, then fades out.
+            Rectangle {
+                anchors.fill: parent
+                color: root.cBase
+                z: 800
+                opacity: root.discover.length === 0 ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity { NumberAnimation { duration: root.tSlow; easing.type: Easing.OutCubic } }
+
+                ColumnLayout {
+                    anchors.centerIn: parent
+                    spacing: 22
+
+                    ThalliumLoader {
+                        Layout.alignment: Qt.AlignHCenter
+                        Layout.preferredWidth: 132
+                        Layout.preferredHeight: 132
+                        running: root.discover.length === 0
+                    }
+                    Label {
+                        text: "THALLIUM STORE"
+                        color: root.cFg
+                        font.family: root.fontMono
+                        font.pixelSize: 13
+                        font.bold: true
+                        font.letterSpacing: 6
+                        Layout.alignment: Qt.AlignHCenter
+                    }
+                    Label {
+                        text: root.status.toUpperCase()
+                        color: root.cMuted
+                        font.family: root.fontMono
+                        font.pixelSize: 10
+                        font.letterSpacing: 2
+                        Layout.alignment: Qt.AlignHCenter
                     }
                 }
             }
