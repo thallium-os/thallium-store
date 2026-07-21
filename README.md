@@ -1,146 +1,93 @@
-# Thallium Store MVP
+# Thallium Store
 
-Thallium Store is a Quickshell/QML app store frontend for Thallium OS. The backend is Rust and speaks newline-delimited JSON-RPC over a per-user Unix socket. UNI remains the install authority.
+> The app store for Thallium 81 — one place to find and install software from apt, Flathub, GitHub releases and AppImages, ranked by trust and installed through UNI.
 
-The packaged app defaults to `THALLIUM_STORE_FAKE_UNI=0` and uses the bundled JSON-capable UNI backend. Set `THALLIUM_STORE_FAKE_UNI=1` only when you want safe demo progress without real package mutations.
+## What it does
 
-## Prerequisites
+Thallium Store merges four package sources into a single catalog. Search once and every source answers; each app shows every channel it ships on, with the safest option recommended. Installs, removals and updates run through [UNI](https://github.com/dronzer-tb/UNI), the system's package authority — the store never shells out to `apt` or `flatpak` on its own.
 
-- Debian/Thallium OS baseline
-- Rust toolchain with Cargo
-- Quickshell
-- UNI
-- Flatpak for Flathub search
-- `apt-cache` for system package search
+- **Unified catalog** — apt, Flathub, GitHub releases and AppImage results merged and de-duplicated, each variant tagged with its trust level (sandboxed, system access, verified, unverified).
+- **Editorial home** — curated collections and a featured carousel that paints real Flathub artwork behind each pick.
+- **Rich detail pages** — screenshots, description, every install source with its exact UNI command, source-language breakdown for open-source apps (via GitHub linguist), and metadata.
+- **Apps view** — everything installed on the system, plus live install/remove/update activity.
+- **Fast and local** — app icons and enriched details are cached on disk, so the store paints instantly after first load and touches the network only for search, artwork and metadata.
 
-## Build
-
-```bash
-cargo build
-```
-
-## Run Backend
+## Quick Start
 
 ```bash
-THALLIUM_STORE_FAKE_UNI=1 cargo run -p thallium-store-backend
+git clone https://github.com/dronzer-tb/thallium-store.git
+cd thallium-store
+./scripts/dev-run
 ```
 
-The socket is created at:
+`dev-run` builds the workspace and launches the Quickshell UI against a freshly built backend, using real UNI. First launch shows a short setup walkthrough.
 
-```text
-$XDG_RUNTIME_DIR/thallium-store/backend.sock
-```
+## Installation
 
-## Run UI
-
-Recommended developer launcher:
+Build a Debian package and install it:
 
 ```bash
-scripts/dev-run
+./scripts/build-deb
+sudo apt install ./thallium-store_*.deb
 ```
 
-Install into your user account:
+Or install into your user prefix without packaging:
 
 ```bash
-scripts/install-local
+./scripts/install-local
+```
+
+## Usage
+
+The store is a Quickshell shell; launch it with the bundled wrapper (added to `PATH` by the package):
+
+```bash
 thallium-store
 ```
 
-Build a Debian package:
+- **Home** — curated picks and collections.
+- **Search** — click the search icon in the ribbon; every source is queried as you type, press Enter for full results.
+- **Apps** — installed software and live operation activity (retry/cancel from here).
+- **Updates** — available updates from UNI.
+- **Settings** — cache storage controls, replay the first-run walkthrough, store info.
 
-```bash
-scripts/build-deb
-sudo dpkg -i dist/thallium-store_0.1.0_*.deb
-```
+## Configuration
 
-Manual equivalent:
+Set via environment variables (the wrappers in `scripts/` set sensible defaults):
 
-```bash
-PATH="$PWD/target/debug:$PATH" THALLIUM_STORE_FAKE_UNI=1 quickshell --path ui/shell.qml
-```
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `THALLIUM_STORE_FAKE_UNI` | `0` | `1` runs a safe simulator — progress and state without real package mutations. |
+| `THALLIUM_STORE_BACKEND` | `thallium-store-backend` on `PATH` | Path to the backend binary. |
+| `THALLIUM_STORE_UNI` | bundled `vendor/uni/uni` | Path to the UNI binary. |
+| `UNI_PRIVILEGE_BACKEND` | `pkexec` | Privilege escalation for apt/system flatpak mutations (`pkexec` or `sudo`). |
 
-The UI starts `thallium-store-backend` from `PATH`.
-
-## Check
-
-```bash
-scripts/check
-```
-
-## Test IPC
-
-```bash
-cargo run -p thallium-store-backend -- --request system.health '{}'
-cargo run -p thallium-store-backend -- --request catalog.search '{"query":"gimp","sources":["system","flathub","github"],"limit":20}'
-```
-
-## Test
-
-```bash
-cargo fmt --check
-cargo test
-```
+State lives under `~/.local/share/thallium-store/` (SQLite DB, icon cache) and `~/.config/thallium-store/settings.json`.
 
 ## Architecture
 
-```text
-Quickshell/QML
-  -> thallium-store-backend JSON-RPC client helper
-  -> Unix socket backend
-  -> catalog providers, SQLite queue, UNI adapter
-  -> UNI CLI
-```
+A Rust backend and a QML frontend talk newline-delimited JSON-RPC over a per-user Unix socket. The backend is a Cargo workspace:
 
-The backend stores durable queue state at:
+| Crate | Responsibility |
+| --- | --- |
+| `store-backend` | JSON-RPC daemon, socket server, request routing, caches, settings. |
+| `store-catalog` | Source providers (apt, Flathub, GitHub, AppImage), merge/rank, detail enrichment. |
+| `store-uni` | UNI adapter — install/remove/update backends, privilege escalation, progress streaming. |
+| `store-db` | SQLite operation history. |
+| `store-core` | Shared models and the trust-ranking logic. |
 
-```text
-$XDG_DATA_HOME/thallium-store/store.db
-```
+The UI is a single Quickshell/QML shell (`ui/shell.qml`) in the Thallium 81 design language (Everforest palette, chamfered HUD surfaces). Curated catalog data lives in `data/`.
 
-## Current MVP Features
-
-- Bundled starter app catalog for GIMP, OBS Studio, and Zed.
-- Read-only Flatpak search using `flatpak search`.
-- Read-only system search using `apt-cache search`.
-- Source ranking and basic deduplication.
-- Quickshell search, details, queue, and install actions.
-- JSON-RPC IPC over a local Unix socket.
-- SQLite operation persistence and logs.
-- Bounded fake operation scheduler with source-specific semaphores.
-- Fake UNI progress stream for safe demos.
-
-## UNI JSON Contract Status
-
-The local UNI script has been patched with initial support for:
+## Contributing
 
 ```bash
-uni search <query> --json
-uni info <id> --source <source> --json
-uni installed --json
-uni updates --json
-uni install <id> --source <source> --json-events
-uni remove <id> --source <source> --json-events
-uni update <id> --source <source> --json-events
+cargo build          # build the workspace
+cargo test           # run tests
+./scripts/check      # fmt + clippy + tests
 ```
 
-The `--json-events` path is currently a lifecycle wrapper around the existing human commands. It emits valid newline-delimited JSON and captures command logs as JSON log events. Rich backend-specific progress percentages still need deeper UNI integration.
+UNI is vendored under `vendor/uni/`. Heavy builds and CI run in GitHub Actions.
 
-Expected long-term upstream contract:
+## License
 
-```bash
-uni search <query> --json
-uni info <id> --source <source> --json
-uni installed --json
-uni updates --json
-uni install <id> --source <source> --json-events
-uni remove <id> --source <source> --json-events
-uni update <id> --source <source> --json-events
-```
-
-The store adapter in `crates/store-uni` already parses JSON event lines. To try real package operations from the GUI, run with:
-
-```bash
-THALLIUM_STORE_FAKE_UNI=0 thallium-store
-```
-
-Only do that from a disposable VM until real install/remove flows have been tested carefully.
+MIT
