@@ -159,6 +159,11 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
         running_ops: Arc::new(Mutex::new(HashMap::new())),
     };
 
+    // Warm the catalog index in the background so searches are served from
+    // memory; live providers cover the brief window before it's ready.
+    let warm_catalog = state.catalog.clone();
+    tokio::spawn(async move { warm_catalog.warm().await });
+
     let listener = UnixListener::bind(&socket_path)?;
     std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!("listening on {}", socket_path.display());
@@ -287,6 +292,16 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
                 cache.insert(app.id.clone(), app.clone());
             }
             Ok(serde_json::to_value(response)?)
+        }
+        "catalog.discover" => {
+            let collections = state.catalog.discover();
+            let mut cache = state.recent_apps.lock().await;
+            for collection in &collections {
+                for app in &collection.apps {
+                    cache.insert(app.id.clone(), app.clone());
+                }
+            }
+            Ok(json!({ "collections": collections }))
         }
         "catalog.appDetails" => {
             let id = request

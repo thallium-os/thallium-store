@@ -82,6 +82,13 @@ pub struct SearchResponse {
     pub providers: Vec<ProviderStatus>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DiscoverCollection {
+    pub title: String,
+    pub subtitle: String,
+    pub apps: Vec<CanonicalApp>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OperationAction {

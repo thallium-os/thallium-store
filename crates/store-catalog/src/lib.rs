@@ -2,22 +2,58 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 use store_core::{
-    rank_variants, AppVariant, CanonicalApp, ProviderStatus, SearchParams, SearchResponse,
-    SourceKind, TrustLevel,
+    rank_variants, AppVariant, CanonicalApp, DiscoverCollection, ProviderStatus, SearchParams,
+    SearchResponse, SourceKind, TrustLevel,
 };
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::process::Command;
 
 #[derive(Clone)]
 pub struct CatalogManager {
     bundled: Vec<CanonicalApp>,
+    index: Arc<RwLock<CatalogIndex>>,
 }
 
 impl CatalogManager {
     pub fn new() -> Self {
         Self {
             bundled: bundled_catalog(),
+            index: Arc::new(RwLock::new(CatalogIndex::default())),
         }
+    }
+
+    /// Build the in-memory apt + Flathub indices once, in the background, at
+    /// daemon startup. Until this completes, `search` transparently falls back
+    /// to the live subprocess/HTTP providers, so early queries still work.
+    pub async fn warm(&self) {
+        let (apt, flathub) = tokio::join!(build_apt_index(), build_flathub_index());
+        let mut index = self.index.write().unwrap();
+        if apt.is_some() {
+            index.apt = apt;
+        }
+        if flathub.is_some() {
+            index.flathub = flathub;
+        }
+    }
+
+    /// Curated App Store–style landing: fixed collections of Flathub apps
+    /// resolved against the warm index for names/summaries, instant from
+    /// memory. Icons are derived from the app id, so cards render even before
+    /// the index finishes warming.
+    pub fn discover(&self) -> Vec<DiscoverCollection> {
+        let index = self.index.read().unwrap();
+        CURATED_COLLECTIONS
+            .iter()
+            .map(|(title, subtitle, ids)| DiscoverCollection {
+                title: title.to_string(),
+                subtitle: subtitle.to_string(),
+                apps: ids
+                    .iter()
+                    .map(|id| curated_flathub_app(&index, id))
+                    .collect(),
+            })
+            .collect()
     }
 
     pub async fn search(&self, params: SearchParams) -> SearchResponse {
@@ -44,22 +80,57 @@ impl CatalogManager {
             }
         }
 
-        // Fan out the three subprocess-backed providers concurrently; each is
-        // wrapped in a timeout so one slow source cannot stall the whole search.
         let want_flathub = wanted.contains(&SourceKind::Flathub);
         let want_system = wanted.contains(&SourceKind::System);
         let want_github = wanted.contains(&SourceKind::Github);
 
+        // Serve apt/flathub from the warmed in-memory index (the common case):
+        // a sub-millisecond substring filter, no subprocess, no network. A
+        // source whose index isn't ready yet falls back to its live provider
+        // below, so queries during startup still return results.
+        let (apt_ready, flathub_ready) = {
+            let idx = self.index.read().unwrap();
+            if want_system {
+                if let Some(apt) = idx.apt.as_ref() {
+                    results.append(&mut apt_index_search(apt, &query));
+                    push_provider(
+                        &mut providers,
+                        ProviderStatus {
+                            source: SourceKind::System,
+                            state: "ready".to_string(),
+                            message: Some("APT index".to_string()),
+                        },
+                    );
+                }
+            }
+            if want_flathub {
+                if let Some(flathub) = idx.flathub.as_ref() {
+                    results.append(&mut flathub_index_search(flathub, &query));
+                    push_provider(
+                        &mut providers,
+                        ProviderStatus {
+                            source: SourceKind::Flathub,
+                            state: "ready".to_string(),
+                            message: Some("Flathub index".to_string()),
+                        },
+                    );
+                }
+            }
+            (idx.apt.is_some(), idx.flathub.is_some())
+        };
+
+        // Only sources without a ready index run live; GitHub is always live
+        // (it can't be prefetched) and is the sole network source per query.
         let (flathub, system, github) = tokio::join!(
             async {
-                if want_flathub {
+                if want_flathub && !flathub_ready {
                     flathub_provider(&query).await
                 } else {
                     (Vec::new(), Vec::new())
                 }
             },
             async {
-                if want_system {
+                if want_system && !apt_ready {
                     system_provider(&query).await
                 } else {
                     (Vec::new(), Vec::new())
@@ -123,14 +194,311 @@ impl CatalogManager {
             enriched_variants.push(variant);
         }
         app.variants = enriched_variants;
+        // Flathub AppStream carries the real (media-hash) icon and screenshots
+        // for the details page; fetched on demand — one request when an app is
+        // opened, not during search.
+        if app.screenshots.is_empty() {
+            if let Some(flathub_id) = app
+                .variants
+                .iter()
+                .find(|v| v.source == SourceKind::Flathub)
+                .map(|v| v.package_id.clone())
+            {
+                if let Some((icon, shots)) = flathub_appstream(&flathub_id).await {
+                    if let Some(icon) = icon {
+                        app.icon = Some(icon);
+                    }
+                    app.screenshots = shots;
+                }
+            }
+        }
         app
     }
+}
+
+/// v2 AppStream for one Flathub app — the media-hash icon and screenshot URLs
+/// for the details page. Best-effort; None on any failure.
+async fn flathub_appstream(app_id: &str) -> Option<(Option<String>, Vec<String>)> {
+    let client = reqwest::Client::builder()
+        .user_agent("thallium-store")
+        .timeout(Duration::from_secs(8))
+        .build()
+        .ok()?;
+    let value: Value = client
+        .get(format!("https://flathub.org/api/v2/appstream/{app_id}"))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let icon = value
+        .get("icon")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let mut shots = Vec::new();
+    if let Some(screenshots) = value.get("screenshots").and_then(Value::as_array) {
+        for shot in screenshots {
+            let Some(sizes) = shot.get("sizes").and_then(Value::as_array) else {
+                continue;
+            };
+            // Pick the rendition closest to ~720px wide: big enough to look
+            // sharp in the carousel, small enough to load fast.
+            let best = sizes
+                .iter()
+                .filter_map(|size| {
+                    let width = size.get("width").and_then(Value::as_str)?.parse::<i64>().ok()?;
+                    let src = size.get("src").and_then(Value::as_str)?;
+                    Some((width, src))
+                })
+                .min_by_key(|(width, _)| (width - 720).abs());
+            if let Some((_, src)) = best {
+                shots.push(src.to_string());
+            }
+        }
+    }
+    Some((icon, shots))
 }
 
 impl Default for CatalogManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+struct AptEntry {
+    pkg: String,
+    summary: String,
+}
+
+struct FlathubEntry {
+    app_id: String,
+    name: String,
+    summary: String,
+    icon: Option<String>,
+}
+
+#[derive(Default)]
+struct CatalogIndex {
+    apt: Option<Vec<AptEntry>>,
+    flathub: Option<Vec<FlathubEntry>>,
+}
+
+/// `apt-cache search .` once — the full available-package list with summaries.
+/// Parsed into memory so per-query search is a substring filter, not a spawn.
+async fn build_apt_index() -> Option<Vec<AptEntry>> {
+    let output = Command::new("apt-cache")
+        .args(["search", "."])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let entries: Vec<AptEntry> = text
+        .lines()
+        .filter_map(|line| {
+            let (pkg, summary) = line.split_once(" - ")?;
+            Some(AptEntry {
+                pkg: pkg.to_string(),
+                summary: summary.to_string(),
+            })
+        })
+        .collect();
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+/// Full Flathub app list via `flatpak remote-ls` once — id, name and summary
+/// for every published app, read from the local AppStream cache (no network).
+/// Icons are left for the enrichment/image pass. Returns None on any failure
+/// so the live `flatpak search` fallback takes over.
+async fn build_flathub_index() -> Option<Vec<FlathubEntry>> {
+    let output = Command::new("flatpak")
+        .args([
+            "remote-ls",
+            "--user",
+            "flathub",
+            "--columns=application,name,description",
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let entries: Vec<FlathubEntry> = text
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split('\t');
+            let app_id = cols.next()?.trim();
+            if app_id.is_empty() {
+                return None;
+            }
+            let name = cols.next().unwrap_or(app_id).trim();
+            let summary = cols.next().unwrap_or("").trim();
+            Some(FlathubEntry {
+                app_id: app_id.to_string(),
+                name: name.to_string(),
+                summary: summary.to_string(),
+                icon: None,
+            })
+        })
+        .collect();
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+fn apt_index_search(entries: &[AptEntry], query: &str) -> Vec<CanonicalApp> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    entries
+        .iter()
+        .filter(|entry| {
+            let pkg = entry.pkg.to_ascii_lowercase();
+            if pkg.contains("-dev") || pkg.starts_with("lib") {
+                return false;
+            }
+            pkg.contains(query) || entry.summary.to_ascii_lowercase().contains(query)
+        })
+        .take(20)
+        .map(|entry| {
+            single_variant_app(
+                &format!("system:{}", entry.pkg),
+                &entry.pkg,
+                &entry.summary,
+                SourceKind::System,
+                &entry.pkg,
+                TrustLevel::SystemAccess,
+                true,
+            )
+        })
+        .collect()
+}
+
+const CURATED_COLLECTIONS: &[(&str, &str, &[&str])] = &[
+    (
+        "Essentials",
+        "Apps to get you started",
+        &[
+            "org.mozilla.firefox",
+            "org.videolan.VLC",
+            "com.spotify.Client",
+            "org.libreoffice.LibreOffice",
+            "com.discordapp.Discord",
+            "org.telegram.desktop",
+        ],
+    ),
+    (
+        "Create",
+        "Design, draw, and edit",
+        &[
+            "org.gimp.GIMP",
+            "org.blender.Blender",
+            "org.inkscape.Inkscape",
+            "org.kde.krita",
+            "org.audacityteam.Audacity",
+            "org.kde.kdenlive",
+        ],
+    ),
+    (
+        "Develop",
+        "Tools for building",
+        &[
+            "com.visualstudio.code",
+            "dev.zed.Zed",
+            "org.gnome.Builder",
+            "io.github.shiftey.Desktop",
+            "rest.insomnia.Insomnia",
+            "io.dbeaver.DBeaverCommunity",
+        ],
+    ),
+    (
+        "Play",
+        "Games and launchers",
+        &[
+            "com.valvesoftware.Steam",
+            "net.lutris.Lutris",
+            "org.prismlauncher.PrismLauncher",
+            "com.heroicgameslauncher.hgl",
+        ],
+    ),
+];
+
+/// Resolve a curated Flathub app id to a card: name/summary from the index
+/// when warm, otherwise a prettified id; the icon is always derivable.
+fn curated_flathub_app(index: &CatalogIndex, app_id: &str) -> CanonicalApp {
+    let (name, summary) = index
+        .flathub
+        .as_ref()
+        .and_then(|list| list.iter().find(|entry| entry.app_id == app_id))
+        .map(|entry| (entry.name.clone(), entry.summary.clone()))
+        .unwrap_or_else(|| (pretty_app_name(app_id), String::new()));
+    let mut app = single_variant_app(
+        &format!("flathub:{app_id}"),
+        &name,
+        &summary,
+        SourceKind::Flathub,
+        app_id,
+        TrustLevel::Sandboxed,
+        true,
+    );
+    app.icon = Some(flathub_icon_url(app_id));
+    app
+}
+
+/// `org.videolan.VLC` -> `VLC`; falls back to the whole id when it has no dots.
+fn pretty_app_name(app_id: &str) -> String {
+    app_id.rsplit('.').next().unwrap_or(app_id).to_string()
+}
+
+/// Predictable Flathub AppStream icon URL, derivable from the app id alone
+/// (no per-app request). Serves the search grid; the details page fetches the
+/// media-hash icon + screenshots via the v2 appstream endpoint.
+fn flathub_icon_url(app_id: &str) -> String {
+    format!("https://dl.flathub.org/repo/appstream/x86_64/icons/128x128/{app_id}.png")
+}
+
+fn flathub_index_search(entries: &[FlathubEntry], query: &str) -> Vec<CanonicalApp> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    entries
+        .iter()
+        .filter(|entry| {
+            entry.app_id.to_ascii_lowercase().contains(query)
+                || entry.name.to_ascii_lowercase().contains(query)
+                || entry.summary.to_ascii_lowercase().contains(query)
+        })
+        .take(20)
+        .map(|entry| {
+            let mut app = single_variant_app(
+                &format!("flathub:{}", entry.app_id),
+                &entry.name,
+                &entry.summary,
+                SourceKind::Flathub,
+                &entry.app_id,
+                TrustLevel::Sandboxed,
+                true,
+            );
+            app.icon = entry
+                .icon
+                .clone()
+                .or_else(|| Some(flathub_icon_url(&entry.app_id)));
+            app
+        })
+        .collect()
 }
 
 fn matches_query(app: &CanonicalApp, query: &str) -> bool {
@@ -200,7 +568,7 @@ async fn flatpak_search(query: &str) -> Result<Vec<CanonicalApp>> {
             let app_id = parts[0].trim();
             let name = parts.get(1).copied().unwrap_or(app_id).trim();
             let summary = parts.get(2).copied().unwrap_or("").trim();
-            Some(single_variant_app(
+            let mut app = single_variant_app(
                 &format!("flathub:{app_id}"),
                 name,
                 summary,
@@ -208,7 +576,9 @@ async fn flatpak_search(query: &str) -> Result<Vec<CanonicalApp>> {
                 app_id,
                 TrustLevel::Sandboxed,
                 true,
-            ))
+            );
+            app.icon = Some(flathub_icon_url(app_id));
+            Some(app)
         })
         .collect())
 }
@@ -248,7 +618,7 @@ async fn apt_search(query: &str) -> Result<Vec<CanonicalApp>> {
         .collect())
 }
 
-const SEARCH_TIMEOUT: Duration = Duration::from_secs(8);
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(3);
 
 async fn flathub_provider(query: &str) -> (Vec<CanonicalApp>, Vec<ProviderStatus>) {
     match tokio::time::timeout(SEARCH_TIMEOUT, flatpak_search(query)).await {
@@ -412,6 +782,9 @@ fn github_repo_to_app(item: &Value) -> Option<CanonicalApp> {
                 .map(ToString::to_string)
         });
     app.repository = Some(package_id.to_string());
+    if let Some((owner, _)) = package_id.split_once('/') {
+        app.icon = Some(format!("https://avatars.githubusercontent.com/{owner}"));
+    }
     app.rating = item
         .get("stargazers_count")
         .and_then(Value::as_f64)
@@ -685,6 +1058,12 @@ fn dedupe(apps: &mut Vec<CanonicalApp>) {
             existing
                 .merge_evidence
                 .push("name/package match".to_string());
+            if existing.icon.is_none() {
+                existing.icon = app.icon.take();
+            }
+            if existing.screenshots.is_empty() {
+                existing.screenshots = std::mem::take(&mut app.screenshots);
+            }
             dedupe_variants(&mut existing.variants);
             existing.recommended_variant_id = rank_variants(&mut existing.variants);
         } else {
