@@ -27,6 +27,14 @@ ShellRoot {
     property var searchCache: ({})
     property string activeSearchQuery: ""
     readonly property int searchCacheTtlMs: 60000
+    property bool sidebarCollapsed: false
+    property var storeLog: []
+
+    function pushLog(msg) {
+        const stamp = Qt.formatDateTime(new Date(), "HH:mm:ss")
+        const next = [stamp + "  " + msg].concat(root.storeLog)
+        root.storeLog = next.slice(0, 120)
+    }
 
     // Thallium 81 design tokens — Everforest palette, retro sci-fi HUD grown
     // out of Soviet brutalism. Green is THE accent; blue is retired.
@@ -141,7 +149,7 @@ ShellRoot {
     }
 
     function searchNow() {
-        activeView = "discover"
+        activeView = "search"
         const q = query
         const cached = searchCache[q]
         if (cached && (Date.now() - cached.ts) < searchCacheTtlMs) {
@@ -151,6 +159,7 @@ ShellRoot {
             return
         }
         status = "Searching"
+        pushLog("search » " + q)
         // GitHub is the slowest source (network HTTP); skip it while the query
         // is still 1-2 chars so early typing paints from the fast local sources.
         const sources = q.trim().length < 3
@@ -535,6 +544,7 @@ ShellRoot {
                     const message = JSON.parse(line)
                     if (message.error) {
                         root.status = message.error.message
+                        pushLog("✗ " + message.error.message)
                         return
                     }
                     const result = message.result
@@ -544,6 +554,7 @@ ShellRoot {
                         root.results = result.results
                         root.providers = result.providers || []
                         root.status = root.results.length + " result" + (root.results.length === 1 ? "" : "s")
+                        pushLog("results « " + root.results.length + " for “" + root.activeSearchQuery + "”")
                         const nextCache = root.searchCache
                         nextCache[root.activeSearchQuery] = {
                             results: result.results,
@@ -554,20 +565,25 @@ ShellRoot {
                     } else if (result.collections !== undefined) {
                         root.discover = result.collections
                         root.status = "Discover ready"
+                        pushLog("discover feed ready")
                     } else if (result.items !== undefined && root.activeMethod === "operations.list") {
                         root.operations = result.items
                         root.status = "Queue loaded"
                     } else if (result.items !== undefined && root.activeMethod === "installed.list") {
                         root.installedItems = result.items
                         root.status = root.installedItems.length + " installed item" + (root.installedItems.length === 1 ? "" : "s")
+                        pushLog("installed « " + root.installedItems.length + " apps")
                     } else if (result.items !== undefined && root.activeMethod === "updates.list") {
                         root.updateItems = result.items
                         root.status = root.updateItems.length + " update" + (root.updateItems.length === 1 ? "" : "s")
+                        pushLog("updates « " + root.updateItems.length)
                     } else if (result.id !== undefined && result.variants !== undefined && root.activeMethod === "catalog.appDetails") {
                         root.selectedApp = result
                         root.status = "Details loaded"
+                        pushLog("opened " + (result.name || result.id))
                     } else if (result.id && result.state !== undefined) {
                         root.status = result.message || "Queued"
+                        pushLog("queue » " + (result.message || result.id))
                         // Install/remove changes installed-state; drop cached
                         // search results so the next search reflects reality.
                         root.searchCache = ({})
@@ -587,8 +603,10 @@ ShellRoot {
         }
         stderr: SplitParser {
             onRead: line => {
-                if (line.length > 0)
+                if (line.length > 0) {
                     root.status = line
+                    pushLog("· " + line)
+                }
             }
         }
     }
@@ -653,38 +671,25 @@ ShellRoot {
         height: 44
         color: selected ? root.cBlueSoft : hovered ? root.cDim : "transparent"
         border.color: selected ? root.cGreen : "transparent"
-        radius: 4
-        scale: hovered ? 1.005 : 1.0
 
         Behavior on color { ColorAnimation { duration: 140 } }
-        Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
-
-        // green identity tick — the Thallium 81 selected marker
-        Rectangle {
-            visible: nav.selected
-            width: root.tickW
-            height: parent.height - 16
-            radius: 1
-            color: root.cGreen
-            anchors.left: parent.left
-            anchors.leftMargin: 4
-            anchors.verticalCenter: parent.verticalCenter
-        }
 
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: 14
-            anchors.rightMargin: 14
+            anchors.leftMargin: root.sidebarCollapsed ? 0 : 14
+            anchors.rightMargin: root.sidebarCollapsed ? 0 : 14
             spacing: 12
             Label {
                 text: nav.mark
-                color: nav.selected ? root.cBlue : root.cMuted
+                color: nav.selected ? root.cGreen : root.cMuted
                 font.family: root.fontMono
                 font.pixelSize: 17
-                Layout.preferredWidth: 24
+                Layout.preferredWidth: root.sidebarCollapsed ? -1 : 24
+                Layout.fillWidth: root.sidebarCollapsed
                 horizontalAlignment: Text.AlignHCenter
             }
             Label {
+                visible: !root.sidebarCollapsed
                 text: nav.label
                 color: nav.selected ? root.cFg : root.cMuted
                 font.family: root.fontHuman
@@ -702,6 +707,8 @@ ShellRoot {
             onExited: nav.hovered = false
             onClicked: {
                 root.activeView = nav.view
+                if (nav.view === "search")
+                    searchField.forceActiveFocus()
                 if (nav.view === "queue")
                     root.request("operations.list", {})
                 if (nav.view === "installed")
@@ -757,7 +764,7 @@ ShellRoot {
         property string title: ""
         property string sub: ""
         spacing: 10
-        Rectangle { width: root.tickW; height: 15; radius: 1; color: root.cGreen; Layout.alignment: Qt.AlignVCenter }
+        Rectangle { width: root.tickW; height: 15; radius: 0; color: root.cGreen; Layout.alignment: Qt.AlignVCenter }
         Label {
             text: title.toUpperCase()
             color: root.cFg
@@ -783,7 +790,7 @@ ShellRoot {
         property string trust: ""
         spacing: 5
         Rectangle {
-            width: 6; height: 6; radius: 3
+            width: 6; height: 6; radius: 0
             color: root.sourceAccent(source)
             anchors.verticalCenter: parent.verticalCenter
         }
@@ -798,7 +805,7 @@ ShellRoot {
         }
         Rectangle {
             visible: trust.length > 0
-            width: 5; height: 5; radius: 2.5
+            width: 5; height: 5; radius: 0.5
             color: root.trustColor(trust)
             anchors.verticalCenter: parent.verticalCenter
         }
@@ -812,7 +819,7 @@ ShellRoot {
         Layout.fillWidth: true
         color: root.cPanel
         border.color: root.cLine
-        radius: 3
+        radius: 0
         implicitHeight: sectionContent.implicitHeight + 32
 
         default property alias content: sectionContent.data
@@ -827,7 +834,7 @@ ShellRoot {
                 visible: panel.title.length > 0
                 Layout.fillWidth: true
                 spacing: 9
-                Rectangle { width: root.tickW; height: 14; radius: 1; color: root.cGreen; Layout.alignment: Qt.AlignVCenter }
+                Rectangle { width: root.tickW; height: 14; radius: 0; color: root.cGreen; Layout.alignment: Qt.AlignVCenter }
                 Label {
                     text: panel.title.toUpperCase()
                     color: root.cFg
@@ -931,7 +938,7 @@ ShellRoot {
         implicitWidth: actionText.implicitWidth + 28
         color: pressed ? Qt.darker(fill, 1.18) : hovered ? Qt.lighter(fill, 1.08) : fill
         border.color: fill === root.cPanel || fill === root.cDim ? root.cLine : fill
-        radius: 8
+        radius: 0
         scale: pressed ? 0.985 : hovered ? 1.008 : 1.0
         opacity: active ? 1.0 : 0.62
 
@@ -986,14 +993,17 @@ ShellRoot {
                 spacing: 0
 
                 Rectangle {
-                    Layout.preferredWidth: 246
+                    id: sidebar
+                    Layout.preferredWidth: root.sidebarCollapsed ? 64 : 246
                     Layout.fillHeight: true
                     color: root.cPanel
                     border.color: root.cLine
+                    clip: true
+                    Behavior on Layout.preferredWidth { NumberAnimation { duration: root.tMed; easing.type: Easing.OutCubic } }
 
                     ColumnLayout {
                         anchors.fill: parent
-                        anchors.margins: 18
+                        anchors.margins: root.sidebarCollapsed ? 11 : 18
                         spacing: 14
 
                         RowLayout {
@@ -1003,22 +1013,28 @@ ShellRoot {
                             Rectangle {
                                 Layout.preferredWidth: 42
                                 Layout.preferredHeight: 42
-                                radius: 8
                                 color: root.cGreen
 
                                 Label {
                                     anchors.centerIn: parent
                                     text: "T"
-                                    color: "white"
+                                    color: root.cBase
                                     font.family: root.fontBrand
                                     font.pixelSize: 21
                                     font.bold: true
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.sidebarCollapsed = !root.sidebarCollapsed
                                 }
                             }
 
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 spacing: 0
+                                visible: !root.sidebarCollapsed
 
                                 Label {
                                     text: "Thallium"
@@ -1037,145 +1053,104 @@ ShellRoot {
                                     Layout.fillWidth: true
                                 }
                             }
+
+                            Label {
+                                visible: !root.sidebarCollapsed
+                                text: "«"
+                                color: root.cMuted
+                                font.family: root.fontMono
+                                font.pixelSize: 18
+                                MouseArea {
+                                    anchors.fill: parent
+                                    anchors.margins: -8
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.sidebarCollapsed = true
+                                }
+                            }
                         }
 
                         Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
 
                         Label {
+                            visible: !root.sidebarCollapsed
                             text: root.status
                             color: root.cMuted
                             font.family: root.fontHuman
                             font.pixelSize: 13
                             wrapMode: Text.WordWrap
+                            maximumLineCount: 2
+                            elide: Text.ElideRight
                             Layout.fillWidth: true
                         }
 
-                        Rectangle {
-                            Layout.fillWidth: true
-                            height: 38
-                            radius: 8
-                            color: root.cDim
-                            border.color: sidebarSearch.activeFocus ? root.cBlue : "transparent"
-
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 12
-                                anchors.rightMargin: 12
-                                spacing: 8
-
-                                Label {
-                                    text: "⌕"
-                                    color: root.cMuted
-                                    font.family: root.fontMono
-                                    font.pixelSize: 16
-                                }
-
-                                TextField {
-                                    id: sidebarSearch
-                                    Layout.fillWidth: true
-                                    text: root.query
-                                    placeholderText: "Search"
-                                    color: root.cFg
-                                    placeholderTextColor: root.cMuted
-                                    background: Rectangle { color: "transparent" }
-                                    font.family: root.fontHuman
-                                    font.pixelSize: 14
-                                    onTextChanged: {
-                                        root.query = text
-                                        root.activeView = "discover"
-                                        searchDebounce.restart()
-                                    }
-                                }
-                            }
-                        }
-
-                        NavButton { label: "Discover"; view: "discover"; mark: "⌕" }
+                        NavButton { label: "Discover"; view: "discover"; mark: "◆" }
+                        NavButton { label: "Search"; view: "search"; mark: "⌕" }
                         NavButton { label: "Queue"; view: "queue"; mark: "▤" }
                         NavButton { label: "Installed"; view: "installed"; mark: "✓" }
                         NavButton { label: "Updates"; view: "updates"; mark: "↻" }
 
-                        Item { Layout.fillHeight: true }
-
+                        // Live store log — what the store is actually doing.
                         Rectangle {
                             Layout.fillWidth: true
-                            height: 164
+                            Layout.fillHeight: true
+                            Layout.topMargin: 6
+                            visible: !root.sidebarCollapsed
                             color: root.cBase
                             border.color: root.isBusy() ? root.cGreen : root.cLine
-                            radius: 8
                             clip: true
 
                             ColumnLayout {
                                 anchors.fill: parent
-                                anchors.margins: 14
+                                anchors.margins: 12
                                 spacing: 8
 
                                 RowLayout {
                                     Layout.fillWidth: true
-                                    spacing: 10
+                                    spacing: 8
+                                    Rectangle { width: root.tickW; height: 12; color: root.cGreen; Layout.alignment: Qt.AlignVCenter }
+                                    Label {
+                                        text: "LOG"
+                                        color: root.cFg
+                                        font.family: root.fontMono
+                                        font.pixelSize: 12
+                                        font.bold: true
+                                        font.letterSpacing: 2
+                                        Layout.fillWidth: true
+                                    }
                                     Label {
                                         text: root.activityGlyph()
                                         color: root.isBusy() ? root.cGreen : root.cMuted
                                         font.family: root.fontMono
-                                        font.pixelSize: 16
-                                        Layout.preferredWidth: 24
-                                    }
-                                    Label {
-                                        text: "Activity"
-                                        color: root.cFg
-                                        font.family: root.fontHuman
-                                        font.pixelSize: 14
-                                        font.bold: true
-                                        Layout.fillWidth: true
-                                    }
-                                }
-
-                                Label {
-                                    text: root.activityLabel()
-                                    color: root.cFg
-                                    font.family: root.fontHuman
-                                    font.pixelSize: 12
-                                    elide: Text.ElideRight
-                                    Layout.fillWidth: true
-                                }
-
-                                Rectangle {
-                                    Layout.fillWidth: true
-                                    height: 5
-                                    color: root.cDead
-                                    radius: 3
-                                    clip: true
-
-                                    Rectangle {
-                                        width: parent.width * 0.38
-                                        height: parent.height
-                                        color: root.cGreen
-                                        radius: 3
-                                        opacity: root.isBusy() ? 0.9 : 0.25
-                                        x: root.isBusy() ? ((root.activityFrame * 17) % Math.max(1, parent.width + width)) - width : 0
-
-                                        Behavior on opacity { NumberAnimation { duration: 160 } }
+                                        font.pixelSize: 12
                                     }
                                 }
 
                                 Rectangle { Layout.fillWidth: true; height: 1; color: root.cLine }
 
-                                Label {
-                                    text: "Mode"
-                                    color: root.cFg
-                                    font.family: root.fontHuman
-                                    font.pixelSize: 12
-                                    font.bold: true
+                                ListView {
                                     Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    clip: true
+                                    model: root.storeLog
+                                    spacing: 3
+                                    boundsBehavior: Flickable.StopAtBounds
+                                    delegate: Label {
+                                        width: ListView.view ? ListView.view.width : 0
+                                        text: modelData
+                                        color: root.cMuted
+                                        font.family: root.fontMono
+                                        font.pixelSize: 10
+                                        elide: Text.ElideRight
+                                        maximumLineCount: 1
+                                    }
                                 }
 
                                 Label {
-                                    text: root.fakeUniMode
-                                          ? "Fake UNI progress is active."
-                                          : "Real UNI JSON mode through " + (root.uniHealth.length > 0 ? root.uniHealth : "bundled UNI") + "."
-                                    color: root.cMuted
-                                    font.family: root.fontHuman
-                                    font.pixelSize: 11
-                                    wrapMode: Text.WordWrap
+                                    visible: root.storeLog.length === 0
+                                    text: "waiting for events…"
+                                    color: root.cLine
+                                    font.family: root.fontMono
+                                    font.pixelSize: 10
                                     Layout.fillWidth: true
                                 }
                             }
@@ -1189,9 +1164,12 @@ ShellRoot {
                     currentIndex: root.activeView === "details" ? 1 : root.activeView === "queue" ? 2 : root.activeView === "installed" ? 3 : root.activeView === "updates" ? 4 : 0
 
                     Item {
-                        opacity: root.activeView === "discover" ? 1 : 0
+                        id: discoverPage
+                        readonly property bool onSearch: root.activeView === "search"
+                        readonly property bool shown: root.activeView === "discover" || root.activeView === "search"
+                        opacity: shown ? 1 : 0
                         transform: Translate {
-                            y: root.activeView === "discover" ? 0 : 12
+                            y: discoverPage.shown ? 0 : 12
                             Behavior on y { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                         }
                         Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
@@ -1209,12 +1187,13 @@ ShellRoot {
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 14
+                                visible: !discoverPage.onSearch
 
                                 ColumnLayout {
                                     Layout.fillWidth: true
                                     spacing: 3
                                     Label {
-                                        text: root.query.length > 0 ? "Search Results" : "Discover"
+                                        text: discoverPage.onSearch ? "Search" : "Discover"
                                         color: root.cFg
                                         font.family: root.fontBrand
                                         font.pixelSize: Math.round(34 * root.uiScale())
@@ -1222,8 +1201,8 @@ ShellRoot {
                                         Layout.fillWidth: true
                                     }
                                     Label {
-                                        text: root.query.length > 0
-                                              ? root.results.length + " apps found across Thallium sources."
+                                        text: discoverPage.onSearch
+                                              ? (root.query.length > 0 ? root.results.length + " apps found across Thallium sources." : "Search apt, Flathub, GitHub and AppImage.")
                                               : "Curated picks from Flathub."
                                         color: root.cMuted
                                         font.family: root.fontHuman
@@ -1235,24 +1214,25 @@ ShellRoot {
                                 ActionButton {
                                     label: "Refresh"
                                     fill: root.cDim
-                                    textColor: root.cBlue
+                                    textColor: root.cGreen
                                     Layout.preferredWidth: Math.min(120, root.actionColumnWidth())
-                                    onClicked: root.searchNow()
+                                    onClicked: discoverPage.onSearch ? root.searchNow() : root.loadDiscover()
                                 }
                             }
 
                             Rectangle {
                                 Layout.fillWidth: true
+                                visible: discoverPage.onSearch
                                 height: 52
-                                radius: 8
+                                radius: 0
                                 color: root.cDim
-                                border.color: searchField.activeFocus ? root.cBlue : root.cLine
+                                border.color: searchField.activeFocus ? root.cGreen : root.cLine
                                 clip: true
 
                                 Rectangle {
                                     width: parent.width * 0.28
                                     height: parent.height
-                                    radius: 8
+                                    radius: 0
                                     color: "#a7c080"
                                     opacity: root.requestRunning && root.activeMethod === "catalog.search" ? 0.16 : 0
                                     x: root.requestRunning && root.activeMethod === "catalog.search" ? ((root.activityFrame * 20) % Math.max(1, parent.width + width)) - width : -width
@@ -1294,13 +1274,13 @@ ShellRoot {
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 8
-                                visible: root.query.length > 0
+                                visible: discoverPage.onSearch && root.query.length > 0
                                 Repeater {
                                     model: root.providers
                                     delegate: Rectangle {
                                         height: 26
                                         implicitWidth: providerText.implicitWidth + 18
-                                        radius: 8
+                                        radius: 0
                                         color: modelData.state === "ready" ? "#233024" : "#332b1a"
                                         border.color: modelData.state === "ready" ? "#4a5f3f" : "#5f4f2a"
                                         Label {
@@ -1323,7 +1303,7 @@ ShellRoot {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
-                                visible: root.query.length === 0
+                                visible: !discoverPage.onSearch
                                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
                                 ColumnLayout {
@@ -1346,11 +1326,9 @@ ShellRoot {
                                             anchors.margins: 28
                                             spacing: 24
                                             Rectangle {
-                                                Layout.preferredWidth: Math.round(120 * root.uiScale())
-                                                Layout.preferredHeight: Math.round(120 * root.uiScale())
-                                                radius: 8
-                                                color: root.cDim
-                                                border.color: root.cLine
+                                                Layout.preferredWidth: Math.round(112 * root.uiScale())
+                                                Layout.preferredHeight: Math.round(112 * root.uiScale())
+                                                color: "transparent"
                                                 clip: true
                                                 Label {
                                                     anchors.centerIn: parent
@@ -1431,14 +1409,12 @@ ShellRoot {
                                                     property var app: modelData
                                                     width: 132
                                                     height: 150
-                                                    radius: 3
+                                                    radius: 0
                                                     color: root.cPanel
                                                     border.color: railHover.hovered ? root.cGreen : root.cLine
-                                                    scale: railHover.hovered ? 1.03 : 1.0
 
                                                     HoverHandler { id: railHover }
                                                     Behavior on border.color { ColorAnimation { duration: 140 } }
-                                                    Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
 
                                                     MouseArea {
                                                         anchors.fill: parent
@@ -1452,11 +1428,9 @@ ShellRoot {
                                                         spacing: 8
                                                         Rectangle {
                                                             Layout.alignment: Qt.AlignHCenter
-                                                            Layout.preferredWidth: 62
-                                                            Layout.preferredHeight: 62
-                                                            radius: 6
-                                                            color: root.cDim
-                                                            border.color: root.cLine
+                                                            Layout.preferredWidth: 60
+                                                            Layout.preferredHeight: 60
+                                                            color: "transparent"
                                                             clip: true
                                                             Label {
                                                                 anchors.centerIn: parent
@@ -1507,7 +1481,7 @@ ShellRoot {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
-                                visible: root.query.length > 0
+                                visible: discoverPage.onSearch
 
                                 GridView {
                                     id: resultGrid
@@ -1527,12 +1501,10 @@ ShellRoot {
                                         height: Math.round(116 * root.uiScale())
                                         color: root.cPanel
                                         border.color: resultHover.hovered ? root.cGreen : root.cLine
-                                        radius: 3
+                                        radius: 0
                                         opacity: 0
                                         x: 7
                                         y: 4
-                                        scale: resultHover.hovered ? 1.018 : 1.0
-                                        transform: Translate { id: resultSlide; y: resultHover.hovered ? -4 : 8 }
                                         clip: true
 
                                         HoverHandler {
@@ -1540,14 +1512,9 @@ ShellRoot {
                                         }
 
                                         Behavior on border.color { ColorAnimation { duration: 140 } }
-                                        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
                                         Behavior on color { ColorAnimation { duration: 140 } }
-                                        Behavior on y { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
 
-                                        Component.onCompleted: {
-                                            resultFade.start()
-                                            resultLift.start()
-                                        }
+                                        Component.onCompleted: resultFade.start()
 
                                         NumberAnimation {
                                             id: resultFade
@@ -1555,16 +1522,6 @@ ShellRoot {
                                             property: "opacity"
                                             from: 0
                                             to: 1
-                                            duration: 180
-                                            easing.type: Easing.OutCubic
-                                        }
-
-                                        NumberAnimation {
-                                            id: resultLift
-                                            target: resultSlide
-                                            property: "y"
-                                            from: 8
-                                            to: 0
                                             duration: 180
                                             easing.type: Easing.OutCubic
                                         }
@@ -1595,11 +1552,9 @@ ShellRoot {
                                             spacing: 14
 
                                             Rectangle {
-                                                Layout.preferredWidth: Math.round(72 * root.uiScale())
-                                                Layout.preferredHeight: Math.round(72 * root.uiScale())
-                                                radius: 6
-                                                color: root.appSurface(appCard.app)
-                                                border.color: root.appAccent(appCard.app)
+                                                Layout.preferredWidth: Math.round(64 * root.uiScale())
+                                                Layout.preferredHeight: Math.round(64 * root.uiScale())
+                                                color: "transparent"
                                                 clip: true
                                                 Label {
                                                     anchors.centerIn: parent
@@ -1652,7 +1607,7 @@ ShellRoot {
                                                     Rectangle {
                                                         height: 22
                                                         implicitWidth: sourceChip.implicitWidth + 16
-                                                        radius: 11
+                                                        radius: 0
                                                         color: root.cDim
                                                         border.color: root.cLine
                                                         Label {
@@ -1717,7 +1672,7 @@ ShellRoot {
                                     height: Math.max(292, Math.round(320 * root.uiScale()))
                                     color: root.cPanel
                                     border.color: root.cLine
-                                    radius: 8
+                                    radius: 0
                                     clip: true
 
                                     ColumnLayout {
@@ -1758,11 +1713,9 @@ ShellRoot {
                                             spacing: 28
 
                                             Rectangle {
-                                                Layout.preferredWidth: Math.round(132 * root.uiScale())
-                                                Layout.preferredHeight: Math.round(132 * root.uiScale())
-                                                radius: 10
-                                                color: root.cBlueSoft
-                                                border.color: root.cGreen
+                                                Layout.preferredWidth: Math.round(120 * root.uiScale())
+                                                Layout.preferredHeight: Math.round(120 * root.uiScale())
+                                                color: "transparent"
                                                 clip: true
                                                 Label {
                                                     anchors.centerIn: parent
@@ -1875,7 +1828,7 @@ ShellRoot {
                                                     Layout.preferredHeight: 168
                                                     color: root.cDim
                                                     border.color: root.cLine
-                                                    radius: 8
+                                                    radius: 0
                                                     clip: true
 
                                                     Image {
@@ -1951,7 +1904,7 @@ ShellRoot {
                                             height: Math.max(138, Math.round(132 * root.uiScale()))
                                             color: modelData.id === root.selectedApp.recommended_variant_id ? "#233024" : root.cPanel
                                             border.color: modelData.id === root.selectedApp.recommended_variant_id ? "#4a5f3f" : root.cLine
-                                            radius: 8
+                                            radius: 0
                                             clip: true
 
                                             RowLayout {
@@ -2105,7 +2058,7 @@ ShellRoot {
                                 Layout.fillHeight: true
                                 color: root.cPanel
                                 border.color: root.cLine
-                                radius: 8
+                                radius: 0
                                 Label {
                                     anchors.centerIn: parent
                                     text: "No operations queued."
@@ -2142,7 +2095,7 @@ ShellRoot {
                                         y: 4
                                         color: root.cPanel
                                         border.color: queueHover.hovered ? "#5f7048" : root.cLine
-                                        radius: 8
+                                        radius: 0
                                         opacity: 0
                                         scale: queueHover.hovered ? 1.018 : 1.0
                                         transform: Translate { id: queueSlide; y: queueHover.hovered ? -4 : 8 }
@@ -2201,7 +2154,7 @@ ShellRoot {
                                                 Rectangle {
                                                     Layout.preferredWidth: Math.round(56 * root.uiScale())
                                                     Layout.preferredHeight: Math.round(56 * root.uiScale())
-                                                    radius: 14
+                                                    radius: 0
                                                     color: queueCard.stateSurface
                                                     border.color: queueCard.stateColor
 
@@ -2243,7 +2196,7 @@ ShellRoot {
                                                 Rectangle {
                                                     Layout.preferredWidth: stateChip.implicitWidth + 18
                                                     Layout.preferredHeight: 24
-                                                    radius: 12
+                                                    radius: 0
                                                     color: queueCard.stateSurface
                                                     border.color: queueCard.stateColor
 
@@ -2358,7 +2311,7 @@ ShellRoot {
                                 Layout.fillHeight: true
                                 color: root.cPanel
                                 border.color: root.cLine
-                                radius: 8
+                                radius: 0
                                 visible: root.installedItems.length === 0
                                 ColumnLayout {
                                     anchors.centerIn: parent
@@ -2413,7 +2366,7 @@ ShellRoot {
                                         y: 4
                                         color: root.cPanel
                                         border.color: installedHover.hovered ? "#5f7048" : root.cLine
-                                        radius: 8
+                                        radius: 0
                                         opacity: 0
                                         scale: installedHover.hovered ? 1.018 : 1.0
                                         transform: Translate { id: installedSlide; y: installedHover.hovered ? -4 : 8 }
@@ -2474,7 +2427,7 @@ ShellRoot {
                                             Rectangle {
                                                 Layout.preferredWidth: Math.round(72 * root.uiScale())
                                                 Layout.preferredHeight: Math.round(72 * root.uiScale())
-                                                radius: 6
+                                                radius: 0
                                                 color: installedCard.item.managedByUni ? root.sourceSurface(installedCard.itemSource) : "#332b1a"
                                                 border.color: installedCard.item.managedByUni ? root.sourceAccent(installedCard.itemSource) : "#5f4f2a"
                                                 Label {
@@ -2525,7 +2478,7 @@ ShellRoot {
                                                     Rectangle {
                                                         height: 22
                                                         implicitWidth: sourceChipInstalled.implicitWidth + 14
-                                                        radius: 8
+                                                        radius: 0
                                                         color: root.cDim
                                                         border.color: root.cLine
                                                         Label {
@@ -2541,7 +2494,7 @@ ShellRoot {
                                                     Rectangle {
                                                         height: 22
                                                         implicitWidth: managedChipInstalled.implicitWidth + 14
-                                                        radius: 8
+                                                        radius: 0
                                                         color: installedCard.item.managedByUni ? "#233024" : "#332b1a"
                                                         border.color: installedCard.item.managedByUni ? "#4a5f3f" : "#5f4f2a"
                                                         Label {
@@ -2632,7 +2585,7 @@ ShellRoot {
                                 Layout.fillHeight: true
                                 color: root.cPanel
                                 border.color: root.cLine
-                                radius: 8
+                                radius: 0
 
                                 ColumnLayout {
                                     anchors.centerIn: parent
@@ -2687,7 +2640,7 @@ ShellRoot {
                                         y: 4
                                         color: root.cPanel
                                         border.color: updateHover.hovered ? "#5f7048" : root.cLine
-                                        radius: 8
+                                        radius: 0
                                         opacity: 0
                                         scale: updateHover.hovered ? 1.018 : 1.0
                                         transform: Translate { id: updateSlide; y: updateHover.hovered ? -4 : 8 }
@@ -2748,7 +2701,7 @@ ShellRoot {
                                             Rectangle {
                                                 Layout.preferredWidth: Math.round(72 * root.uiScale())
                                                 Layout.preferredHeight: Math.round(72 * root.uiScale())
-                                                radius: 6
+                                                radius: 0
                                                 color: root.sourceSurface(updateCard.itemSource)
                                                 border.color: root.sourceAccent(updateCard.itemSource)
                                                 Label {
