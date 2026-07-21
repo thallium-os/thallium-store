@@ -29,7 +29,6 @@ ShellRoot {
     readonly property int searchCacheTtlMs: 60000
     property bool sidebarCollapsed: false
     property bool searchCommitted: false
-    property int featuredIndex: 0
     property var storeLog: []
 
     function pushLog(msg) {
@@ -197,12 +196,6 @@ ShellRoot {
         return pool
     }
 
-    function featuredApp() {
-        const pool = featuredPool()
-        if (pool.length === 0)
-            return null
-        return pool[root.featuredIndex % pool.length]
-    }
 
     function recommendedVariant(app) {
         if (!app || !app.variants)
@@ -658,12 +651,16 @@ ShellRoot {
         onTriggered: root.loadDiscover()
     }
 
-    // Rotate the featured app so Discover isn't a single static pick.
+    // Auto-advance the featured carousel so it slides between picks.
     Timer {
         interval: 5000
         repeat: true
         running: root.activeView === "discover" && root.discover.length > 0
-        onTriggered: root.featuredIndex = root.featuredIndex + 1
+        onTriggered: {
+            const count = root.featuredPool().length
+            if (count > 0)
+                featuredCarousel.currentIndex = (featuredCarousel.currentIndex + 1) % count
+        }
     }
 
     Timer {
@@ -1334,78 +1331,129 @@ ShellRoot {
                                     width: discoverScroll.availableWidth
                                     spacing: 26
 
-                                    ChamferPanel {
+                                    // Featured carousel — full-width cards that slide between picks.
+                                    Item {
                                         Layout.fillWidth: true
-                                        Layout.preferredHeight: Math.round(196 * root.uiScale())
-                                        visible: root.featuredApp() !== null
-                                        fill: root.cBlueSoft
-                                        accentEdge: true
-                                        MouseArea {
-                                            anchors.fill: parent
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: { if (root.featuredApp()) root.selectApp(root.featuredApp()) }
-                                        }
-                                        RowLayout {
-                                            anchors.fill: parent
-                                            anchors.margins: 28
-                                            spacing: 24
-                                            Rectangle {
-                                                Layout.preferredWidth: Math.round(112 * root.uiScale())
-                                                Layout.preferredHeight: Math.round(112 * root.uiScale())
-                                                color: "transparent"
-                                                clip: true
-                                                Label {
-                                                    anchors.centerIn: parent
-                                                    visible: featuredIcon.status !== Image.Ready
-                                                    text: root.featuredApp() ? root.featuredApp().name.substring(0, 1).toUpperCase() : ""
-                                                    color: root.cBlue
-                                                    font.family: root.fontBrand
-                                                    font.pixelSize: Math.round(48 * root.uiScale())
-                                                    font.bold: true
-                                                }
-                                                Image {
-                                                    id: featuredIcon
+                                        Layout.preferredHeight: Math.round(196 * root.uiScale()) + 24
+                                        visible: root.featuredPool().length > 0
+
+                                        ListView {
+                                            id: featuredCarousel
+                                            anchors.top: parent.top
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            height: Math.round(196 * root.uiScale())
+                                            orientation: ListView.Horizontal
+                                            snapMode: ListView.SnapOneItem
+                                            highlightRangeMode: ListView.StrictlyEnforceRange
+                                            highlightMoveDuration: root.tSlow
+                                            preferredHighlightBegin: 0
+                                            preferredHighlightEnd: 0
+                                            clip: true
+                                            model: root.featuredPool()
+                                            cacheBuffer: 4096
+
+                                            delegate: ChamferPanel {
+                                                id: featCard
+                                                width: featuredCarousel.width
+                                                height: featuredCarousel.height
+                                                property var app: modelData
+                                                fill: root.cBlueSoft
+                                                accentEdge: true
+
+                                                MouseArea {
                                                     anchors.fill: parent
-                                                    anchors.margins: 12
-                                                    source: root.featuredApp() && root.featuredApp().icon ? root.featuredApp().icon : ""
-                                                    fillMode: Image.PreserveAspectFit
-                                                    asynchronous: true
-                                                    cache: true
-                                                    smooth: true
-                                                    visible: status === Image.Ready
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: root.selectApp(featCard.app)
+                                                }
+
+                                                RowLayout {
+                                                    anchors.fill: parent
+                                                    anchors.margins: 28
+                                                    spacing: 24
+                                                    Rectangle {
+                                                        Layout.preferredWidth: Math.round(112 * root.uiScale())
+                                                        Layout.preferredHeight: Math.round(112 * root.uiScale())
+                                                        color: "transparent"
+                                                        clip: true
+                                                        Label {
+                                                            anchors.centerIn: parent
+                                                            visible: fIcon.status !== Image.Ready
+                                                            text: featCard.app.name.substring(0, 1).toUpperCase()
+                                                            color: root.cBlue
+                                                            font.family: root.fontBrand
+                                                            font.pixelSize: Math.round(48 * root.uiScale())
+                                                            font.bold: true
+                                                        }
+                                                        Image {
+                                                            id: fIcon
+                                                            anchors.fill: parent
+                                                            anchors.margins: 12
+                                                            source: featCard.app.icon ? featCard.app.icon : ""
+                                                            fillMode: Image.PreserveAspectFit
+                                                            asynchronous: true
+                                                            cache: true
+                                                            smooth: true
+                                                            visible: status === Image.Ready
+                                                        }
+                                                    }
+                                                    ColumnLayout {
+                                                        Layout.fillWidth: true
+                                                        Layout.minimumWidth: 0
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                        spacing: 6
+                                                        Label {
+                                                            text: "▚ FEATURED"
+                                                            color: root.cGreen
+                                                            font.family: root.fontMono
+                                                            font.pixelSize: 12
+                                                            font.bold: true
+                                                            font.letterSpacing: 3
+                                                        }
+                                                        Label {
+                                                            text: featCard.app.name
+                                                            color: root.cFg
+                                                            font.family: root.fontBrand
+                                                            font.pixelSize: Math.round(30 * root.uiScale())
+                                                            font.bold: true
+                                                            elide: Text.ElideRight
+                                                            Layout.fillWidth: true
+                                                        }
+                                                        Label {
+                                                            text: featCard.app.summary
+                                                            color: root.cMuted
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 15
+                                                            wrapMode: Text.WordWrap
+                                                            maximumLineCount: 2
+                                                            elide: Text.ElideRight
+                                                            Layout.fillWidth: true
+                                                        }
+                                                    }
                                                 }
                                             }
-                                            ColumnLayout {
-                                                Layout.fillWidth: true
-                                                Layout.minimumWidth: 0
-                                                Layout.alignment: Qt.AlignVCenter
-                                                spacing: 6
-                                                Label {
-                                                    text: "▚ FEATURED"
-                                                    color: root.cGreen
-                                                    font.family: root.fontMono
-                                                    font.pixelSize: 12
-                                                    font.bold: true
-                                                    font.letterSpacing: 3
-                                                }
-                                                Label {
-                                                    text: root.featuredApp() ? root.featuredApp().name : ""
-                                                    color: root.cFg
-                                                    font.family: root.fontBrand
-                                                    font.pixelSize: Math.round(30 * root.uiScale())
-                                                    font.bold: true
-                                                    elide: Text.ElideRight
-                                                    Layout.fillWidth: true
-                                                }
-                                                Label {
-                                                    text: root.featuredApp() ? root.featuredApp().summary : ""
-                                                    color: root.cMuted
-                                                    font.family: root.fontHuman
-                                                    font.pixelSize: 15
-                                                    wrapMode: Text.WordWrap
-                                                    maximumLineCount: 2
-                                                    elide: Text.ElideRight
-                                                    Layout.fillWidth: true
+                                        }
+
+                                        // page dots
+                                        Row {
+                                            anchors.top: featuredCarousel.bottom
+                                            anchors.topMargin: 12
+                                            anchors.horizontalCenter: parent.horizontalCenter
+                                            spacing: 7
+                                            Repeater {
+                                                model: root.featuredPool().length
+                                                delegate: Rectangle {
+                                                    width: featuredCarousel.currentIndex === index ? 18 : 6
+                                                    height: 6
+                                                    color: featuredCarousel.currentIndex === index ? root.cGreen : root.cLine
+                                                    Behavior on width { NumberAnimation { duration: root.tFast; easing.type: Easing.OutCubic } }
+                                                    Behavior on color { ColorAnimation { duration: root.tFast } }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        anchors.margins: -5
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: featuredCarousel.currentIndex = index
+                                                    }
                                                 }
                                             }
                                         }
