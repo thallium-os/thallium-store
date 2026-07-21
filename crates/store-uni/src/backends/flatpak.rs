@@ -40,13 +40,21 @@ pub async fn run(
         ensure_flathub_remote().await;
     }
 
+    // New installs go to the per-user installation, but removes/updates must
+    // target wherever the ref actually lives — apps installed system-wide
+    // (by the distro or a manual `flatpak install --system`) are invisible
+    // to `--user` and used to fail with "No installed refs found".
+    let scope = match action {
+        OperationAction::Remove | OperationAction::Update => installed_scope(package_id).await,
+        _ => "--user",
+    };
     let args: Vec<&str> = match action {
         OperationAction::Install => vec!["install", "-y", "--user", "flathub", package_id],
         OperationAction::Reinstall => {
             vec!["install", "-y", "--user", "--reinstall", "flathub", package_id]
         }
-        OperationAction::Update => vec!["update", "-y", "--user", package_id],
-        OperationAction::Remove => vec!["uninstall", "-y", "--user", package_id],
+        OperationAction::Update => vec!["update", "-y", scope, package_id],
+        OperationAction::Remove => vec!["uninstall", "-y", scope, package_id],
     };
 
     let mut cmd = Command::new("flatpak");
@@ -113,6 +121,24 @@ async fn stream_line(tx: &ProgressSender, line: &str) {
             emit(tx, state, percent, line.trim()).await;
         }
         None => emit(tx, OperationState::Installing, 50, line.trim()).await,
+    }
+}
+
+/// Which installation holds this ref: `--user` when present there (or on any
+/// probe failure, matching the old behaviour), `--system` otherwise.
+async fn installed_scope(package_id: &str) -> &'static str {
+    let user = Command::new("flatpak")
+        .args(["info", "--user", package_id])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(true);
+    if user {
+        "--user"
+    } else {
+        "--system"
     }
 }
 

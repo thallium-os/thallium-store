@@ -649,7 +649,14 @@ ShellRoot {
                         root.status = "Discover ready"
                         pushLog("discover feed ready")
                     } else if (result.items !== undefined && root.activeMethod === "operations.list") {
+                        const prevActive = root.activeOpsCount()
                         root.operations = result.items
+                        // An operation just finished — installed state changed,
+                        // refresh the Apps grid and drop stale search results.
+                        if (root.activeOpsCount() < prevActive) {
+                            root.searchCache = ({})
+                            root.request("installed.list", {})
+                        }
                         root.status = "Queue loaded"
                     } else if (result.items !== undefined && root.activeMethod === "installed.list") {
                         root.installedItems = result.items
