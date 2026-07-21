@@ -28,6 +28,8 @@ ShellRoot {
     property string activeSearchQuery: ""
     readonly property int searchCacheTtlMs: 60000
     property bool sidebarCollapsed: false
+    property bool searchCommitted: false
+    property int featuredIndex: 0
     property var storeLog: []
 
     function pushLog(msg) {
@@ -184,10 +186,22 @@ ShellRoot {
         request("catalog.discover", {})
     }
 
+    // Rotating featured pool — first two apps of each collection, cycled.
+    function featuredPool() {
+        let pool = []
+        for (let i = 0; i < root.discover.length; i++) {
+            const apps = root.discover[i].apps || []
+            for (let j = 0; j < Math.min(2, apps.length); j++)
+                pool.push(apps[j])
+        }
+        return pool
+    }
+
     function featuredApp() {
-        if (root.discover.length > 0 && root.discover[0].apps && root.discover[0].apps.length > 0)
-            return root.discover[0].apps[0]
-        return null
+        const pool = featuredPool()
+        if (pool.length === 0)
+            return null
+        return pool[root.featuredIndex % pool.length]
     }
 
     function recommendedVariant(app) {
@@ -642,6 +656,14 @@ ShellRoot {
         interval: 8500
         repeat: false
         onTriggered: root.loadDiscover()
+    }
+
+    // Rotate the featured app so Discover isn't a single static pick.
+    Timer {
+        interval: 5000
+        repeat: true
+        running: root.activeView === "discover" && root.discover.length > 0
+        onTriggered: root.featuredIndex = root.featuredIndex + 1
     }
 
     Timer {
@@ -1264,8 +1286,10 @@ ShellRoot {
                                         font.pixelSize: 16
                                         onTextChanged: {
                                             root.query = text
+                                            root.searchCommitted = false
                                             searchDebounce.restart()
                                         }
+                                        onAccepted: root.searchCommitted = true
                                         Component.onCompleted: forceActiveFocus()
                                     }
                                 }
@@ -1477,11 +1501,90 @@ ShellRoot {
                                 }
                             }
 
+                            // Empty search — prompt.
+                            Item {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                visible: discoverPage.onSearch && root.query.length === 0
+                                Label {
+                                    anchors.centerIn: parent
+                                    text: "TYPE TO SEARCH · APT · FLATHUB · GITHUB · APPIMAGE"
+                                    color: root.cLine
+                                    font.family: root.fontMono
+                                    font.pixelSize: 12
+                                    font.letterSpacing: 2
+                                }
+                            }
+
+                            // Typeahead suggestions — quick list while typing (press Enter for full cards).
                             ScrollView {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
-                                visible: discoverPage.onSearch
+                                visible: discoverPage.onSearch && root.query.length > 0 && !root.searchCommitted && root.results.length > 0
+
+                                ListView {
+                                    width: parent.width
+                                    model: root.results
+                                    spacing: 0
+                                    delegate: Rectangle {
+                                        id: sugRow
+                                        property var app: modelData
+                                        width: ListView.view ? ListView.view.width : 0
+                                        height: 50
+                                        color: sugHover.hovered ? root.cDim : "transparent"
+
+                                        HoverHandler { id: sugHover }
+                                        Behavior on color { ColorAnimation { duration: 120 } }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.selectApp(sugRow.app)
+                                        }
+
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 6
+                                            anchors.rightMargin: 12
+                                            spacing: 12
+                                            Label {
+                                                text: "⌕"
+                                                color: root.cMuted
+                                                font.family: root.fontMono
+                                                font.pixelSize: 15
+                                                Layout.preferredWidth: 22
+                                                horizontalAlignment: Text.AlignHCenter
+                                            }
+                                            Label {
+                                                text: sugRow.app.name
+                                                color: root.cFg
+                                                font.family: root.fontHuman
+                                                font.pixelSize: 15
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                            SourceTag {
+                                                source: sugRow.app.variants && sugRow.app.variants.length > 0 ? sugRow.app.variants[0].source : "flathub"
+                                                trust: sugRow.app.variants && sugRow.app.variants.length > 0 ? sugRow.app.variants[0].trust : ""
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            anchors.bottom: parent.bottom
+                                            width: parent.width
+                                            height: 1
+                                            color: root.cLine
+                                            opacity: 0.4
+                                        }
+                                    }
+                                }
+                            }
+
+                            ScrollView {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                clip: true
+                                visible: discoverPage.onSearch && root.searchCommitted
 
                                 GridView {
                                     id: resultGrid
