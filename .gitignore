@@ -6,3 +6,5 @@
 *.db-shm
 *.db-wal
 .claude/settings.local.json
+
+.tokensave/
