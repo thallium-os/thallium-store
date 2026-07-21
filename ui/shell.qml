@@ -1356,6 +1356,7 @@ ShellRoot {
                                                 clip: true
                                                 Label {
                                                     anchors.centerIn: parent
+                                                    visible: featuredIcon.status !== Image.Ready
                                                     text: root.featuredApp() ? root.featuredApp().name.substring(0, 1).toUpperCase() : ""
                                                     color: root.cBlue
                                                     font.family: root.fontBrand
@@ -1363,8 +1364,9 @@ ShellRoot {
                                                     font.bold: true
                                                 }
                                                 Image {
+                                                    id: featuredIcon
                                                     anchors.fill: parent
-                                                    anchors.margins: 16
+                                                    anchors.margins: 12
                                                     source: root.featuredApp() && root.featuredApp().icon ? root.featuredApp().icon : ""
                                                     fillMode: Image.PreserveAspectFit
                                                     asynchronous: true
@@ -1458,6 +1460,7 @@ ShellRoot {
                                                             clip: true
                                                             Label {
                                                                 anchors.centerIn: parent
+                                                                visible: railIcon.status !== Image.Ready
                                                                 text: railCard.app.name.substring(0, 1).toUpperCase()
                                                                 color: root.cGreen
                                                                 font.family: root.fontBrand
@@ -1465,8 +1468,9 @@ ShellRoot {
                                                                 font.bold: true
                                                             }
                                                             Image {
+                                                                id: railIcon
                                                                 anchors.fill: parent
-                                                                anchors.margins: 6
+                                                                anchors.margins: 2
                                                                 source: railCard.app.icon ? railCard.app.icon : ""
                                                                 fillMode: Image.PreserveAspectFit
                                                                 asynchronous: true
@@ -1661,6 +1665,7 @@ ShellRoot {
                                                 clip: true
                                                 Label {
                                                     anchors.centerIn: parent
+                                                    visible: resultIcon.status !== Image.Ready
                                                     text: appCard.app.name.substring(0, 1).toUpperCase()
                                                     color: root.appAccent(appCard.app)
                                                     font.family: root.fontBrand
@@ -1668,8 +1673,9 @@ ShellRoot {
                                                     font.bold: true
                                                 }
                                                 Image {
+                                                    id: resultIcon
                                                     anchors.fill: parent
-                                                    anchors.margins: 6
+                                                    anchors.margins: 4
                                                     source: appCard.app.icon ? appCard.app.icon : ""
                                                     fillMode: Image.PreserveAspectFit
                                                     asynchronous: true
@@ -1822,6 +1828,7 @@ ShellRoot {
                                                 clip: true
                                                 Label {
                                                     anchors.centerIn: parent
+                                                    visible: heroIcon.status !== Image.Ready
                                                     text: root.selectedApp ? root.selectedApp.name.substring(0, 1).toUpperCase() : ""
                                                     color: root.cBlue
                                                     font.family: root.fontBrand
@@ -1829,8 +1836,9 @@ ShellRoot {
                                                     font.bold: true
                                                 }
                                                 Image {
+                                                    id: heroIcon
                                                     anchors.fill: parent
-                                                    anchors.margins: 14
+                                                    anchors.margins: 8
                                                     source: root.selectedApp && root.selectedApp.icon ? root.selectedApp.icon : ""
                                                     fillMode: Image.PreserveAspectFit
                                                     asynchronous: true
