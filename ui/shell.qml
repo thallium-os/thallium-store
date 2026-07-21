@@ -28,23 +28,34 @@ ShellRoot {
     property string activeSearchQuery: ""
     readonly property int searchCacheTtlMs: 60000
 
-    readonly property color cBase: "#242628"
-    readonly property color cDim: "#35383c"
-    readonly property color cPanel: "#2d3033"
-    readonly property color cLine: "#45494f"
-    readonly property color cDead: "#202225"
-    readonly property color cGreen: "#0a84ff"
-    readonly property color cGreenSoft: "#31d158"
-    readonly property color cFg: "#f4f5f7"
-    readonly property color cMuted: "#a8afb8"
-    readonly property color cRed: "#ff453a"
-    readonly property color cWarn: "#ffb340"
-    readonly property color cBlue: "#0a84ff"
-    readonly property color cBlueSoft: "#263b53"
-    readonly property color cPurple: "#bf5af2"
-    readonly property string fontBrand: "Albert Sans"
+    // Thallium 81 design tokens — Everforest palette, retro sci-fi HUD grown
+    // out of Soviet brutalism. Green is THE accent; blue is retired.
+    readonly property color cBase: "#0d0d0f"      // void: page, deepest bg
+    readonly property color cPanel: "#15191b"     // raised surface: cards
+    readonly property color cDim: "#1e2326"       // inputs, insets, controls
+    readonly property color cLine: "#3a464c"      // hairlines, borders, dim labels
+    readonly property color cDead: "#232a2e"      // dead / inactive segments
+    readonly property color cGreen: "#a7c080"     // THE accent: active/focus/values
+    readonly property color cGreenSoft: "#83c092" // secondary green (aqua)
+    readonly property color cFg: "#d3c6aa"        // body text (Everforest cream)
+    readonly property color cMuted: "#8f9a91"     // secondary text
+    readonly property color cRed: "#e67e80"       // warnings only
+    readonly property color cWarn: "#dbbc7f"      // caution (Everforest yellow)
+    readonly property color cBlue: "#a7c080"      // legacy alias -> green accent
+    readonly property color cBlueSoft: "#2b3a2e"  // dim green wash (selected/featured)
+    readonly property color cPurple: "#d699b6"    // Everforest purple (source hue)
+    readonly property string fontBrand: "Unbounded"
     readonly property string fontHuman: "Albert Sans"
     readonly property string fontMono: "JetBrains Mono"
+
+    // Geometry + motion vocabulary
+    readonly property int chamfer: 14             // top-right corner cut, px
+    readonly property real shear: -0.42           // parallelogram shear for rails/bars
+    readonly property int tickW: 2                // green identity tick width
+    readonly property real letterSpace: 3.0       // default mono letter-spacing
+    readonly property int tFast: 120
+    readonly property int tMed: 220
+    readonly property int tSlow: 360
 
     function uiScale() {
         const w = window && window.width ? window.width : 1180
@@ -411,9 +422,9 @@ ShellRoot {
 
     function trustColor(trust) {
         if (trust === "unverified")
-            return cWarn
+            return cMuted
         if (trust === "system_access")
-            return cRed
+            return cWarn
         return cGreen
     }
 
@@ -455,26 +466,38 @@ ShellRoot {
 
     function sourceAccent(source) {
         if (source === "system" || source === "apt" || source === "dpkg")
-            return "#30d158"
+            return cWarn         // native system access — caution (Everforest yellow)
         if (source === "flathub" || source === "flatpak")
-            return "#0a84ff"
+            return cGreen        // sandboxed default — THE trusted green
         if (source === "github")
-            return "#bf5af2"
+            return cPurple       // curated release (Everforest purple)
         if (source === "appimage")
-            return "#ff9f0a"
-        return cBlue
+            return cGreenSoft    // portable (Everforest aqua)
+        return cGreen
     }
 
     function sourceSurface(source) {
         if (source === "system" || source === "apt" || source === "dpkg")
-            return "#20372b"
+            return "#33301f"
         if (source === "flathub" || source === "flatpak")
-            return "#263b53"
+            return "#2b3a2e"
         if (source === "github")
-            return "#382a49"
+            return "#352a33"
         if (source === "appimage")
-            return "#49351f"
+            return "#243530"
         return cBlueSoft
+    }
+
+    function sourceShort(source) {
+        if (source === "system" || source === "apt" || source === "dpkg")
+            return "APT"
+        if (source === "flathub" || source === "flatpak")
+            return "FLAT"
+        if (source === "github")
+            return "GH"
+        if (source === "appimage")
+            return "AIMG"
+        return "PKG"
     }
 
     function appAccent(app) {
@@ -484,7 +507,7 @@ ShellRoot {
 
     function appSurface(app) {
         const variant = recommendedVariant(app)
-        return app && app.installed ? "#203b33" : variant ? sourceSurface(variant.source) : cBlueSoft
+        return app && app.installed ? "#233024" : variant ? sourceSurface(variant.source) : cBlueSoft
     }
 
     function joinTags(tags) {
@@ -594,6 +617,15 @@ ShellRoot {
         onTriggered: root.activityFrame = root.activityFrame + 1
     }
 
+    // Re-fetch Discover once the daemon's Flathub index has warmed (~7s), so
+    // curated cards show real names/summaries instead of prettified ids.
+    Timer {
+        id: discoverWarmReload
+        interval: 8500
+        repeat: false
+        onTriggered: root.loadDiscover()
+    }
+
     Timer {
         id: initialLoadDelay
         interval: 650
@@ -601,6 +633,7 @@ ShellRoot {
         onTriggered: {
             root.request("system.health", {})
             root.loadDiscover()
+            discoverWarmReload.start()
         }
     }
 
@@ -617,14 +650,26 @@ ShellRoot {
         readonly property bool selected: root.activeView === view || (view === "discover" && root.activeView === "details")
 
         Layout.fillWidth: true
-        height: 46
+        height: 44
         color: selected ? root.cBlueSoft : hovered ? root.cDim : "transparent"
-        border.color: selected ? "#3b5e85" : "transparent"
-        radius: 8
+        border.color: selected ? root.cGreen : "transparent"
+        radius: 4
         scale: hovered ? 1.005 : 1.0
 
         Behavior on color { ColorAnimation { duration: 140 } }
         Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+
+        // green identity tick — the Thallium 81 selected marker
+        Rectangle {
+            visible: nav.selected
+            width: root.tickW
+            height: parent.height - 16
+            radius: 1
+            color: root.cGreen
+            anchors.left: parent.left
+            anchors.leftMargin: 4
+            anchors.verticalCenter: parent.verticalCenter
+        }
 
         RowLayout {
             anchors.fill: parent
@@ -667,6 +712,98 @@ ShellRoot {
         }
     }
 
+    // Signature Thallium 81 surface: a rectangle with the top-right corner cut
+    // (chamfer) and a green hairline along the cut. Children stack above it.
+    component ChamferPanel: Item {
+        id: panel
+        property color fill: root.cPanel
+        property color stroke: root.cLine
+        property bool accentEdge: true
+        property int cut: root.chamfer
+        Canvas {
+            anchors.fill: parent
+            antialiasing: true
+            onWidthChanged: requestPaint()
+            onHeightChanged: requestPaint()
+            onPaint: {
+                const ctx = getContext("2d"); ctx.reset()
+                const w = width, h = height, k = panel.cut
+                ctx.beginPath()
+                ctx.moveTo(0, 0)
+                ctx.lineTo(w - k, 0)
+                ctx.lineTo(w, k)
+                ctx.lineTo(w, h)
+                ctx.lineTo(0, h)
+                ctx.closePath()
+                ctx.fillStyle = panel.fill
+                ctx.fill()
+                ctx.strokeStyle = panel.stroke
+                ctx.lineWidth = 1
+                ctx.stroke()
+                if (panel.accentEdge) {
+                    ctx.strokeStyle = root.cGreen
+                    ctx.lineWidth = 1.5
+                    ctx.beginPath()
+                    ctx.moveTo(w - k, 0)
+                    ctx.lineTo(w, k)
+                    ctx.stroke()
+                }
+            }
+        }
+    }
+
+    // Machine-voice section header: green tick + mono uppercase label.
+    component HudRailHeader: RowLayout {
+        property string title: ""
+        property string sub: ""
+        spacing: 10
+        Rectangle { width: root.tickW; height: 15; radius: 1; color: root.cGreen; Layout.alignment: Qt.AlignVCenter }
+        Label {
+            text: title.toUpperCase()
+            color: root.cFg
+            font.family: root.fontMono
+            font.pixelSize: Math.round(15 * root.uiScale())
+            font.bold: true
+            font.letterSpacing: 2
+        }
+        Label {
+            text: sub
+            color: root.cLine
+            font.family: root.fontMono
+            font.pixelSize: 11
+            font.letterSpacing: 1
+            Layout.alignment: Qt.AlignVCenter
+            visible: sub.length > 0
+        }
+    }
+
+    // Source + trust readout: a source-hued dot, mono source tag, trust dot.
+    component SourceTag: Row {
+        property string source: "flathub"
+        property string trust: ""
+        spacing: 5
+        Rectangle {
+            width: 6; height: 6; radius: 3
+            color: root.sourceAccent(source)
+            anchors.verticalCenter: parent.verticalCenter
+        }
+        Text {
+            text: root.sourceShort(source)
+            color: root.sourceAccent(source)
+            font.family: root.fontMono
+            font.pixelSize: 9
+            font.letterSpacing: 1
+            font.bold: true
+            anchors.verticalCenter: parent.verticalCenter
+        }
+        Rectangle {
+            visible: trust.length > 0
+            width: 5; height: 5; radius: 2.5
+            color: root.trustColor(trust)
+            anchors.verticalCenter: parent.verticalCenter
+        }
+    }
+
     component SectionPanel: Rectangle {
         id: panel
         property string title: ""
@@ -675,7 +812,7 @@ ShellRoot {
         Layout.fillWidth: true
         color: root.cPanel
         border.color: root.cLine
-        radius: 8
+        radius: 3
         implicitHeight: sectionContent.implicitHeight + 32
 
         default property alias content: sectionContent.data
@@ -686,22 +823,29 @@ ShellRoot {
             anchors.margins: 14
             spacing: 10
 
-            Label {
+            RowLayout {
                 visible: panel.title.length > 0
-                text: panel.title
-                color: root.cFg
-                font.family: root.fontHuman
-                font.pixelSize: 16
-                font.bold: true
                 Layout.fillWidth: true
+                spacing: 9
+                Rectangle { width: root.tickW; height: 14; radius: 1; color: root.cGreen; Layout.alignment: Qt.AlignVCenter }
+                Label {
+                    text: panel.title.toUpperCase()
+                    color: root.cFg
+                    font.family: root.fontMono
+                    font.pixelSize: 14
+                    font.bold: true
+                    font.letterSpacing: 2
+                    Layout.fillWidth: true
+                }
             }
 
             Label {
                 visible: panel.subtitle.length > 0
                 text: panel.subtitle
                 color: root.cMuted
-                font.family: root.fontHuman
-                font.pixelSize: 13
+                font.family: root.fontMono
+                font.pixelSize: 12
+                font.letterSpacing: 1
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
@@ -713,18 +857,18 @@ ShellRoot {
         property string value: ""
         spacing: 12
         Label {
-            text: name
-            color: root.cMuted
-            font.family: root.fontHuman
-            font.pixelSize: 12
-            font.bold: true
+            text: name.toUpperCase()
+            color: root.cLine
+            font.family: root.fontMono
+            font.pixelSize: 11
+            font.letterSpacing: 1
             Layout.preferredWidth: 128
         }
         Label {
             text: value && value.length > 0 ? value : "Not provided"
             color: root.cFg
-            font.family: root.fontHuman
-            font.pixelSize: 14
+            font.family: root.fontMono
+            font.pixelSize: 13
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
         }
@@ -739,11 +883,11 @@ ShellRoot {
         Layout.minimumWidth: 86
 
         Label {
-            text: title
-            color: root.cMuted
-            font.family: root.fontHuman
-            font.pixelSize: 11
-            font.bold: true
+            text: title.toUpperCase()
+            color: root.cLine
+            font.family: root.fontMono
+            font.pixelSize: 10
+            font.letterSpacing: 1
             horizontalAlignment: Text.AlignHCenter
             Layout.fillWidth: true
             elide: Text.ElideRight
@@ -752,9 +896,10 @@ ShellRoot {
         Label {
             text: value && value.length > 0 ? value : "Not provided"
             color: root.cFg
-            font.family: root.fontBrand
-            font.pixelSize: Math.round(22 * root.uiScale())
+            font.family: root.fontMono
+            font.pixelSize: Math.round(20 * root.uiScale())
             font.bold: true
+            font.letterSpacing: 1
             horizontalAlignment: Text.AlignHCenter
             Layout.fillWidth: true
             elide: Text.ElideRight
@@ -1108,7 +1253,7 @@ ShellRoot {
                                     width: parent.width * 0.28
                                     height: parent.height
                                     radius: 8
-                                    color: "#0a84ff"
+                                    color: "#a7c080"
                                     opacity: root.requestRunning && root.activeMethod === "catalog.search" ? 0.16 : 0
                                     x: root.requestRunning && root.activeMethod === "catalog.search" ? ((root.activityFrame * 20) % Math.max(1, parent.width + width)) - width : -width
 
@@ -1156,8 +1301,8 @@ ShellRoot {
                                         height: 26
                                         implicitWidth: providerText.implicitWidth + 18
                                         radius: 8
-                                        color: modelData.state === "ready" ? "#203b33" : "#493a1f"
-                                        border.color: modelData.state === "ready" ? "#2f6f55" : "#8d6b2f"
+                                        color: modelData.state === "ready" ? "#233024" : "#332b1a"
+                                        border.color: modelData.state === "ready" ? "#4a5f3f" : "#5f4f2a"
                                         Label {
                                             id: providerText
                                             anchors.centerIn: parent
@@ -1185,17 +1330,12 @@ ShellRoot {
                                     width: discoverScroll.availableWidth
                                     spacing: 26
 
-                                    Rectangle {
+                                    ChamferPanel {
                                         Layout.fillWidth: true
                                         Layout.preferredHeight: Math.round(196 * root.uiScale())
-                                        radius: 18
                                         visible: root.featuredApp() !== null
-                                        border.color: root.cLine
-                                        gradient: Gradient {
-                                            orientation: Gradient.Horizontal
-                                            GradientStop { position: 0.0; color: root.cBlueSoft }
-                                            GradientStop { position: 1.0; color: root.cPanel }
-                                        }
+                                        fill: root.cBlueSoft
+                                        accentEdge: true
                                         MouseArea {
                                             anchors.fill: parent
                                             cursorShape: Qt.PointingHandCursor
@@ -1208,7 +1348,7 @@ ShellRoot {
                                             Rectangle {
                                                 Layout.preferredWidth: Math.round(120 * root.uiScale())
                                                 Layout.preferredHeight: Math.round(120 * root.uiScale())
-                                                radius: 24
+                                                radius: 8
                                                 color: root.cDim
                                                 border.color: root.cLine
                                                 clip: true
@@ -1237,11 +1377,12 @@ ShellRoot {
                                                 Layout.alignment: Qt.AlignVCenter
                                                 spacing: 6
                                                 Label {
-                                                    text: "FEATURED"
-                                                    color: root.cBlue
-                                                    font.family: root.fontHuman
+                                                    text: "▚ FEATURED"
+                                                    color: root.cGreen
+                                                    font.family: root.fontMono
                                                     font.pixelSize: 12
                                                     font.bold: true
+                                                    font.letterSpacing: 3
                                                 }
                                                 Label {
                                                     text: root.featuredApp() ? root.featuredApp().name : ""
@@ -1273,24 +1414,14 @@ ShellRoot {
                                             Layout.fillWidth: true
                                             spacing: 10
 
-                                            Label {
-                                                text: collection.title
-                                                color: root.cFg
-                                                font.family: root.fontBrand
-                                                font.pixelSize: Math.round(22 * root.uiScale())
-                                                font.bold: true
-                                            }
-                                            Label {
-                                                text: collection.subtitle
-                                                color: root.cMuted
-                                                font.family: root.fontHuman
-                                                font.pixelSize: 13
-                                                visible: collection.subtitle.length > 0
+                                            HudRailHeader {
+                                                title: collection.title
+                                                sub: collection.subtitle
                                             }
 
                                             ListView {
                                                 Layout.fillWidth: true
-                                                Layout.preferredHeight: 148
+                                                Layout.preferredHeight: 162
                                                 orientation: ListView.Horizontal
                                                 spacing: 12
                                                 clip: true
@@ -1299,10 +1430,10 @@ ShellRoot {
                                                     id: railCard
                                                     property var app: modelData
                                                     width: 132
-                                                    height: 138
-                                                    radius: 14
+                                                    height: 150
+                                                    radius: 3
                                                     color: root.cPanel
-                                                    border.color: railHover.hovered ? "#5c708a" : root.cLine
+                                                    border.color: railHover.hovered ? root.cGreen : root.cLine
                                                     scale: railHover.hovered ? 1.03 : 1.0
 
                                                     HoverHandler { id: railHover }
@@ -1323,14 +1454,14 @@ ShellRoot {
                                                             Layout.alignment: Qt.AlignHCenter
                                                             Layout.preferredWidth: 62
                                                             Layout.preferredHeight: 62
-                                                            radius: 14
+                                                            radius: 6
                                                             color: root.cDim
                                                             border.color: root.cLine
                                                             clip: true
                                                             Label {
                                                                 anchors.centerIn: parent
                                                                 text: railCard.app.name.substring(0, 1).toUpperCase()
-                                                                color: root.cBlue
+                                                                color: root.cGreen
                                                                 font.family: root.fontBrand
                                                                 font.pixelSize: 26
                                                                 font.bold: true
@@ -1358,6 +1489,11 @@ ShellRoot {
                                                             wrapMode: Text.WordWrap
                                                             Layout.fillWidth: true
                                                             Layout.alignment: Qt.AlignHCenter
+                                                        }
+                                                        SourceTag {
+                                                            Layout.alignment: Qt.AlignHCenter
+                                                            source: railCard.app.variants && railCard.app.variants.length > 0 ? railCard.app.variants[0].source : "flathub"
+                                                            trust: railCard.app.variants && railCard.app.variants.length > 0 ? railCard.app.variants[0].trust : ""
                                                         }
                                                     }
                                                 }
@@ -1390,8 +1526,8 @@ ShellRoot {
                                         width: resultGrid.cellWidth - 14
                                         height: Math.round(116 * root.uiScale())
                                         color: root.cPanel
-                                        border.color: resultHover.hovered ? "#5c708a" : root.cLine
-                                        radius: 8
+                                        border.color: resultHover.hovered ? root.cGreen : root.cLine
+                                        radius: 3
                                         opacity: 0
                                         x: 7
                                         y: 4
@@ -1461,7 +1597,7 @@ ShellRoot {
                                             Rectangle {
                                                 Layout.preferredWidth: Math.round(72 * root.uiScale())
                                                 Layout.preferredHeight: Math.round(72 * root.uiScale())
-                                                radius: 16
+                                                radius: 6
                                                 color: root.appSurface(appCard.app)
                                                 border.color: root.appAccent(appCard.app)
                                                 clip: true
@@ -1624,9 +1760,9 @@ ShellRoot {
                                             Rectangle {
                                                 Layout.preferredWidth: Math.round(132 * root.uiScale())
                                                 Layout.preferredHeight: Math.round(132 * root.uiScale())
-                                                radius: 26
+                                                radius: 10
                                                 color: root.cBlueSoft
-                                                border.color: "#3b5e85"
+                                                border.color: root.cGreen
                                                 clip: true
                                                 Label {
                                                     anchors.centerIn: parent
@@ -1813,8 +1949,8 @@ ShellRoot {
                                         delegate: Rectangle {
                                             Layout.fillWidth: true
                                             height: Math.max(138, Math.round(132 * root.uiScale()))
-                                            color: modelData.id === root.selectedApp.recommended_variant_id ? "#203b33" : root.cPanel
-                                            border.color: modelData.id === root.selectedApp.recommended_variant_id ? "#2f6f55" : root.cLine
+                                            color: modelData.id === root.selectedApp.recommended_variant_id ? "#233024" : root.cPanel
+                                            border.color: modelData.id === root.selectedApp.recommended_variant_id ? "#4a5f3f" : root.cLine
                                             radius: 8
                                             clip: true
 
@@ -1997,7 +2133,7 @@ ShellRoot {
                                     delegate: Rectangle {
                                         id: queueCard
                                         property color stateColor: modelData.state === "succeeded" ? root.cGreenSoft : modelData.state === "failed" ? root.cRed : root.cBlue
-                                        property color stateSurface: modelData.state === "succeeded" ? "#20372b" : modelData.state === "failed" ? "#4a2528" : root.cBlueSoft
+                                        property color stateSurface: modelData.state === "succeeded" ? "#233024" : modelData.state === "failed" ? "#33201f" : root.cBlueSoft
                                         property bool terminal: modelData.state === "succeeded" || modelData.state === "failed" || modelData.state === "cancelled"
 
                                         width: queueGrid.cellWidth - 14
@@ -2005,7 +2141,7 @@ ShellRoot {
                                         x: 7
                                         y: 4
                                         color: root.cPanel
-                                        border.color: queueHover.hovered ? "#5c708a" : root.cLine
+                                        border.color: queueHover.hovered ? "#5f7048" : root.cLine
                                         radius: 8
                                         opacity: 0
                                         scale: queueHover.hovered ? 1.018 : 1.0
@@ -2276,7 +2412,7 @@ ShellRoot {
                                         x: 7
                                         y: 4
                                         color: root.cPanel
-                                        border.color: installedHover.hovered ? "#5c708a" : root.cLine
+                                        border.color: installedHover.hovered ? "#5f7048" : root.cLine
                                         radius: 8
                                         opacity: 0
                                         scale: installedHover.hovered ? 1.018 : 1.0
@@ -2318,7 +2454,7 @@ ShellRoot {
                                             opacity: installedHover.hovered ? 0.16 : 0.08
                                             gradient: Gradient {
                                                 orientation: Gradient.Horizontal
-                                                GradientStop { position: 0.0; color: installedCard.item.managedByUni ? root.sourceSurface(installedCard.itemSource) : "#493a1f" }
+                                                GradientStop { position: 0.0; color: installedCard.item.managedByUni ? root.sourceSurface(installedCard.itemSource) : "#332b1a" }
                                                 GradientStop { position: 1.0; color: "transparent" }
                                             }
                                         }
@@ -2338,9 +2474,9 @@ ShellRoot {
                                             Rectangle {
                                                 Layout.preferredWidth: Math.round(72 * root.uiScale())
                                                 Layout.preferredHeight: Math.round(72 * root.uiScale())
-                                                radius: 16
-                                                color: installedCard.item.managedByUni ? root.sourceSurface(installedCard.itemSource) : "#493a1f"
-                                                border.color: installedCard.item.managedByUni ? root.sourceAccent(installedCard.itemSource) : "#8d6b2f"
+                                                radius: 6
+                                                color: installedCard.item.managedByUni ? root.sourceSurface(installedCard.itemSource) : "#332b1a"
+                                                border.color: installedCard.item.managedByUni ? root.sourceAccent(installedCard.itemSource) : "#5f4f2a"
                                                 Label {
                                                     anchors.centerIn: parent
                                                     text: installedCard.item.name.substring(0, 1).toUpperCase()
@@ -2406,8 +2542,8 @@ ShellRoot {
                                                         height: 22
                                                         implicitWidth: managedChipInstalled.implicitWidth + 14
                                                         radius: 8
-                                                        color: installedCard.item.managedByUni ? "#203b33" : "#493a1f"
-                                                        border.color: installedCard.item.managedByUni ? "#2f6f55" : "#8d6b2f"
+                                                        color: installedCard.item.managedByUni ? "#233024" : "#332b1a"
+                                                        border.color: installedCard.item.managedByUni ? "#4a5f3f" : "#5f4f2a"
                                                         Label {
                                                             id: managedChipInstalled
                                                             anchors.centerIn: parent
@@ -2550,7 +2686,7 @@ ShellRoot {
                                         x: 7
                                         y: 4
                                         color: root.cPanel
-                                        border.color: updateHover.hovered ? "#5c708a" : root.cLine
+                                        border.color: updateHover.hovered ? "#5f7048" : root.cLine
                                         radius: 8
                                         opacity: 0
                                         scale: updateHover.hovered ? 1.018 : 1.0
@@ -2612,7 +2748,7 @@ ShellRoot {
                                             Rectangle {
                                                 Layout.preferredWidth: Math.round(72 * root.uiScale())
                                                 Layout.preferredHeight: Math.round(72 * root.uiScale())
-                                                radius: 16
+                                                radius: 6
                                                 color: root.sourceSurface(updateCard.itemSource)
                                                 border.color: root.sourceAccent(updateCard.itemSource)
                                                 Label {
