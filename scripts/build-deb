@@ -60,7 +60,6 @@ Priority: optional
 Architecture: $arch
 Maintainer: Thallium OS <maintainers@thallium.local>
 Depends: quickshell, bash, curl, flatpak, apt, dpkg, pkexec
-Recommends: aria2, snapd
 Description: Graphical application store for Thallium OS
  Thallium Store searches system packages, Flathub, and curated GitHub
  applications, then delegates package changes to a JSON-capable UNI backend.
