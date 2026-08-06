@@ -1,13 +1,20 @@
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, RwLock};
+use std::time::{Duration, Instant};
 use store_core::{
     rank_variants, AppVariant, CanonicalApp, DiscoverCollection, LanguageStat, ProviderStatus,
     SearchParams, SearchResponse, SourceKind, TrustLevel,
 };
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use tokio::process::Command;
+
+/// Per-app Flathub artwork: an optional media-hash icon plus screenshot URLs.
+type FeaturedArt = std::collections::HashMap<String, (Option<String>, Vec<String>)>;
+
+/// Enriched app details keyed by canonical id, stamped with their fetch time.
+type DetailsCache = std::collections::HashMap<String, (std::time::Instant, CanonicalApp)>;
 
 #[derive(Clone)]
 pub struct CatalogManager {
@@ -16,10 +23,10 @@ pub struct CatalogManager {
     /// Flathub appstream art (media-hash icon + screenshots) for the curated
     /// featured apps, fetched once at warm-up so Discover cards can paint
     /// real artwork backdrops without a per-request network hit.
-    featured_art: Arc<RwLock<std::collections::HashMap<String, (Option<String>, Vec<String>)>>>,
+    featured_art: Arc<RwLock<FeaturedArt>>,
     /// Short-TTL cache of fully enriched app details, so reopening a details
     /// page skips the provider round-trips entirely.
-    details_cache: Arc<RwLock<std::collections::HashMap<String, (std::time::Instant, CanonicalApp)>>>,
+    details_cache: Arc<RwLock<DetailsCache>>,
 }
 
 impl CatalogManager {
@@ -314,11 +321,7 @@ impl CatalogManager {
                         .find(|v| v.source == SourceKind::Github)
                         .map(|v| v.package_id.clone())
                 })
-                .or_else(|| {
-                    app.homepage
-                        .as_deref()
-                        .and_then(github_repo_from_url)
-                });
+                .or_else(|| app.homepage.as_deref().and_then(github_repo_from_url));
             if let Some(repo) = repo {
                 if let Some(langs) = github_languages(&repo).await {
                     app.languages = langs;
@@ -373,7 +376,11 @@ async fn flathub_appstream(app_id: &str) -> Option<FlathubMeta> {
             let best = sizes
                 .iter()
                 .filter_map(|size| {
-                    let width = size.get("width").and_then(Value::as_str)?.parse::<i64>().ok()?;
+                    let width = size
+                        .get("width")
+                        .and_then(Value::as_str)?
+                        .parse::<i64>()
+                        .ok()?;
                     let src = size.get("src").and_then(Value::as_str)?;
                     Some((width, src))
                 })
@@ -870,21 +877,117 @@ fn github_request(client: &reqwest::Client, url: String) -> reqwest::RequestBuil
     request
 }
 
+/// How long a GitHub response stays servable without asking again.
+const GITHUB_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Responses keyed by full request URL (query string included).
+static GITHUB_CACHE: LazyLock<RwLock<HashMap<String, (Instant, Value)>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Set when GitHub says the budget is spent; no request goes out until it passes.
+static GITHUB_BACKOFF: LazyLock<RwLock<Option<Instant>>> = LazyLock::new(|| RwLock::new(None));
+
+/// GET a GitHub API URL through a TTL cache and a rate-limit circuit breaker.
+///
+/// Shipped installs run anonymous — nobody sets `GITHUB_TOKEN` — and
+/// api.github.com allows 60 requests/hour/IP unauthenticated. Opening a
+/// dozen detail pages (repo + languages + latest release each) exhausts that
+/// in a minute, after which every GitHub panel on the machine goes empty for
+/// the rest of the hour. So responses are cached for `GITHUB_TTL`, and once
+/// GitHub reports the budget is gone we stop asking until the reset it hands
+/// back, serving stale cache entries in the meantime.
+pub async fn github_json(url: String) -> Result<Value> {
+    if let Some(value) = cached(&url, GITHUB_TTL) {
+        return Ok(value);
+    }
+
+    if let Some(until) = *GITHUB_BACKOFF.read().unwrap() {
+        if let Some(remaining) = until.checked_duration_since(Instant::now()) {
+            // Stale beats blank while the quota is spent.
+            if let Some(value) = cached(&url, Duration::MAX) {
+                return Ok(value);
+            }
+            anyhow::bail!(
+                "GitHub rate limit reached; retrying in {}m",
+                remaining.as_secs() / 60 + 1
+            );
+        }
+    }
+
+    let client = github_client()?;
+    let response = github_request(&client, url.clone()).send().await?;
+
+    if matches!(response.status().as_u16(), 403 | 429) {
+        let retry_after = github_reset_after(&response);
+        *GITHUB_BACKOFF.write().unwrap() = Some(Instant::now() + retry_after);
+        if let Some(value) = cached(&url, Duration::MAX) {
+            return Ok(value);
+        }
+        anyhow::bail!(
+            "GitHub rate limit reached; retrying in {}m",
+            retry_after.as_secs() / 60 + 1
+        );
+    }
+
+    let value: Value = response.error_for_status()?.json().await?;
+    GITHUB_CACHE
+        .write()
+        .unwrap()
+        .insert(url, (Instant::now(), value.clone()));
+    Ok(value)
+}
+
+/// Cached response for `url` if its age is under `max_age`.
+fn cached(url: &str, max_age: Duration) -> Option<Value> {
+    let cache = GITHUB_CACHE.read().unwrap();
+    let (fetched, value) = cache.get(url)?;
+    (fetched.elapsed() < max_age).then(|| value.clone())
+}
+
+/// Seconds until the quota resets, from `x-ratelimit-reset` (epoch seconds)
+/// or `retry-after` (delta seconds), clamped to a sane 1m..1h window.
+fn github_reset_after(response: &reqwest::Response) -> Duration {
+    let header = |name: &str| -> Option<u64> {
+        response
+            .headers()
+            .get(name)?
+            .to_str()
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+
+    let seconds = header("x-ratelimit-reset")
+        .and_then(|reset| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            reset.checked_sub(now)
+        })
+        .or_else(|| header("retry-after"))
+        .unwrap_or(60);
+
+    Duration::from_secs(seconds.clamp(60, 3600))
+}
+
 async fn github_search(query: &str) -> Result<Vec<CanonicalApp>> {
     if query.is_empty() {
         return Ok(Vec::new());
     }
 
-    let client = github_client()?;
-    let request = github_request(
-        &client,
-        "https://api.github.com/search/repositories".to_string(),
-    )
-    .query(&[("q", query), ("per_page", "15")]);
-    let value: Value = request.send().await?.error_for_status()?.json().await?;
+    let url = reqwest::Url::parse_with_params(
+        "https://api.github.com/search/repositories",
+        &[("q", query), ("per_page", "15")],
+    )?;
+    let value = github_json(url.to_string()).await?;
 
     let empty = Vec::new();
-    let items = value.get("items").and_then(Value::as_array).unwrap_or(&empty);
+    let items = value
+        .get("items")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
     Ok(items.iter().filter_map(github_repo_to_app).collect())
 }
 
@@ -1097,17 +1200,9 @@ async fn github_languages(repo: &str) -> Option<Vec<LanguageStat>> {
     let repo = repo.trim_start_matches("github:");
     let repo = repo.split('#').next()?;
     let (owner, name) = repo.split_once('/')?;
-    let client = github_client().ok()?;
-    let value: Value = github_request(
-        &client,
-        format!("https://api.github.com/repos/{owner}/{name}/languages"),
-    )
-    .send()
-    .await
-    .ok()?
-    .error_for_status()
-    .ok()?
-    .json()
+    let value = github_json(format!(
+        "https://api.github.com/repos/{owner}/{name}/languages"
+    ))
     .await
     .ok()?;
     let map = value.as_object()?;
@@ -1131,20 +1226,10 @@ async fn github_languages(repo: &str) -> Option<Vec<LanguageStat>> {
 
 async fn github_info(package_id: &str) -> Option<PackageInfo> {
     let (owner, repo) = package_id.split_once('/')?;
-    let client = github_client().ok()?;
 
-    let repo_json: Value = github_request(
-        &client,
-        format!("https://api.github.com/repos/{owner}/{repo}"),
-    )
-    .send()
-    .await
-    .ok()?
-    .error_for_status()
-    .ok()?
-    .json()
-    .await
-    .ok()?;
+    let repo_json = github_json(format!("https://api.github.com/repos/{owner}/{repo}"))
+        .await
+        .ok()?;
 
     let mut info = PackageInfo {
         description: repo_json
@@ -1172,21 +1257,15 @@ async fn github_info(package_id: &str) -> Option<PackageInfo> {
         ..Default::default()
     };
 
-    if let Ok(response) = github_request(
-        &client,
-        format!("https://api.github.com/repos/{owner}/{repo}/releases/latest"),
-    )
-    .send()
+    if let Ok(release_json) = github_json(format!(
+        "https://api.github.com/repos/{owner}/{repo}/releases/latest"
+    ))
     .await
     {
-        if let Ok(response) = response.error_for_status() {
-            if let Ok(release_json) = response.json::<Value>().await {
-                info.version = release_json
-                    .get("tag_name")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string);
-            }
-        }
+        info.version = release_json
+            .get("tag_name")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
     }
 
     Some(info)
@@ -1248,7 +1327,9 @@ async fn apt_info(package_id: &str) -> Option<PackageInfo> {
     if !output.status.success() {
         return None;
     }
-    Some(parse_apt_cache_show(&String::from_utf8_lossy(&output.stdout)))
+    Some(parse_apt_cache_show(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 fn parse_apt_cache_show(text: &str) -> PackageInfo {

@@ -236,13 +236,16 @@ async fn handle_connection(stream: UnixStream, state: AppState) -> Result<()> {
         let replayed = replay_db.lock().await.list_operations();
         if let Ok(operations) = replayed {
             for operation in operations {
-                let _ = write_notification(&forward_writer, "event.operationProgress", &operation).await;
+                let _ = write_notification(&forward_writer, "event.operationProgress", &operation)
+                    .await;
             }
         }
         loop {
             match progress_rx.recv().await {
                 Ok(operation) => {
-                    let _ = write_notification(&forward_writer, "event.operationProgress", &operation).await;
+                    let _ =
+                        write_notification(&forward_writer, "event.operationProgress", &operation)
+                            .await;
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -318,7 +321,9 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
         "settings.get" => Ok(json!({ "settings": load_settings() })),
         "settings.set" => {
             let mut settings = load_settings();
-            if let (Some(target), Some(patch)) = (settings.as_object_mut(), request.params.as_object()) {
+            if let (Some(target), Some(patch)) =
+                (settings.as_object_mut(), request.params.as_object())
+            {
                 for (key, value) in patch {
                     target.insert(key.clone(), value.clone());
                 }
@@ -921,25 +926,13 @@ async fn read_github_updates() -> Vec<UpdateItem> {
         return Vec::new();
     }
 
-    let client = match reqwest::Client::builder()
-        .user_agent("thallium-store")
-        .build()
-    {
-        Ok(client) => client,
-        Err(err) => {
-            tracing::warn!("building GitHub client for updates failed: {err:#}");
-            return Vec::new();
-        }
-    };
-
     let semaphore = Arc::new(Semaphore::new(GITHUB_UPDATE_CONCURRENCY));
     let mut tasks = Vec::new();
     for (name, repo_id) in github_entries {
-        let client = client.clone();
         let semaphore = semaphore.clone();
         tasks.push(tokio::spawn(async move {
             let _permit = semaphore.acquire_owned().await.ok();
-            tokio::time::timeout(UPDATES_TIMEOUT, fetch_github_latest(&client, &name, &repo_id))
+            tokio::time::timeout(UPDATES_TIMEOUT, fetch_github_latest(&name, &repo_id))
                 .await
                 .ok()
                 .flatten()
@@ -955,19 +948,15 @@ async fn read_github_updates() -> Vec<UpdateItem> {
     items
 }
 
-async fn fetch_github_latest(
-    client: &reqwest::Client,
-    name: &str,
-    repo_id: &str,
-) -> Option<UpdateItem> {
+async fn fetch_github_latest(name: &str, repo_id: &str) -> Option<UpdateItem> {
     let (owner, repo) = repo_id.split_once('/')?;
-    let mut request = client.get(format!(
+    // Shared cache + rate-limit breaker: one update sweep is one request per
+    // installed GitHub app, which is most of an anonymous hourly budget.
+    let release = store_catalog::github_json(format!(
         "https://api.github.com/repos/{owner}/{repo}/releases/latest"
-    ));
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        request = request.bearer_auth(token);
-    }
-    let release: Value = request.send().await.ok()?.error_for_status().ok()?.json().await.ok()?;
+    ))
+    .await
+    .ok()?;
     let tag_name = release.get("tag_name").and_then(Value::as_str)?.to_string();
 
     Some(UpdateItem {
