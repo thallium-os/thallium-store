@@ -8,7 +8,12 @@ if [ -f "$HOME/.cargo/env" ]; then
   source "$HOME/.cargo/env"
 fi
 
-version="${THALLIUM_STORE_VERSION:-0.1.0}"
+# Single source of truth: the workspace version in Cargo.toml.
+version="${THALLIUM_STORE_VERSION:-$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)}"
+if [ -z "$version" ]; then
+  echo "could not read version from Cargo.toml" >&2
+  exit 1
+fi
 arch="$(dpkg --print-architecture)"
 pkg="thallium-store"
 build_root="$PWD/target/deb-root"
@@ -26,12 +31,19 @@ mkdir -p \
   "$pkg_dir/usr/share/thallium-store/data" \
   "$pkg_dir/usr/share/applications" \
   "$pkg_dir/usr/share/metainfo" \
+  "$pkg_dir/usr/share/icons/hicolor/scalable/apps" \
   "$pkg_dir/usr/share/doc/thallium-store"
 
 install -m 0755 target/release/thallium-store-backend "$pkg_dir/usr/bin/thallium-store-backend"
 install -m 0755 scripts/thallium-store "$pkg_dir/usr/bin/thallium-store"
 install -m 0755 vendor/uni/uni "$pkg_dir/usr/lib/thallium-store/uni/uni"
-install -m 0644 ui/shell.qml "$pkg_dir/usr/share/thallium-store/ui/shell.qml"
+# The whole ui/ tree, not just shell.qml -- same reason as scripts/install-local:
+# the moment the QML is split into components/ or pages/, shipping only the root
+# document produces a package whose UI fails to import and silently blanks.
+cp -a ui/. "$pkg_dir/usr/share/thallium-store/ui/"
+find "$pkg_dir/usr/share/thallium-store/ui" -type f -exec chmod 0644 {} +
+install -m 0644 data/icons/io.thallium.Store.svg \
+  "$pkg_dir/usr/share/icons/hicolor/scalable/apps/io.thallium.Store.svg"
 install -m 0644 data/github-apps.json "$pkg_dir/usr/share/thallium-store/data/github-apps.json"
 install -m 0644 data/appimages.json "$pkg_dir/usr/share/thallium-store/data/appimages.json"
 install -m 0644 data/canonical-aliases.json "$pkg_dir/usr/share/thallium-store/data/canonical-aliases.json"
@@ -47,8 +59,8 @@ Section: admin
 Priority: optional
 Architecture: $arch
 Maintainer: Thallium OS <maintainers@thallium.local>
-Depends: python3, curl, flatpak, apt, dpkg, sudo, pkexec
-Recommends: aria2
+Depends: quickshell, bash, curl, flatpak, apt, dpkg, pkexec
+Recommends: aria2, snapd
 Description: Graphical application store for Thallium OS
  Thallium Store searches system packages, Flathub, and curated GitHub
  applications, then delegates package changes to a JSON-capable UNI backend.
@@ -60,6 +72,10 @@ set -e
 
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+fi
+
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || true
 fi
 
 exit 0

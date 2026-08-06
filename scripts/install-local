@@ -15,19 +15,35 @@ data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
 app_home="$data_home/thallium-store"
 desktop_home="$data_home/applications"
 
-install -d "$bin_home" "$app_home/ui" "$app_home/data" "$app_home/uni" "$desktop_home"
+icon_home="$data_home/icons/hicolor/scalable/apps"
+
+install -d "$bin_home" "$app_home/data" "$app_home/uni" "$desktop_home" "$icon_home"
 install -m 0755 target/debug/thallium-store-backend "$bin_home/thallium-store-backend"
 install -m 0755 scripts/thallium-store "$bin_home/thallium-store"
 install -m 0755 vendor/uni/uni "$app_home/uni/uni"
-install -m 0644 ui/shell.qml "$app_home/ui/shell.qml"
+
+# The whole ui/ tree, not just shell.qml. The UI stopped being one file
+# (components/, pages/, services/, assets/) and installing only the root
+# document left the installed app running whatever monolith was last copied
+# there -- months of UI work sat in the repo while `thallium-store` kept
+# launching the old one. Cleared first so a QML file deleted upstream does
+# not linger and get imported by a stale qmldir.
+rm -rf "$app_home/ui"
+install -d "$app_home/ui"
+cp -a ui/. "$app_home/ui/"
 install -m 0644 data/github-apps.json "$app_home/data/github-apps.json"
 install -m 0644 data/appimages.json "$app_home/data/appimages.json"
 install -m 0644 data/canonical-aliases.json "$app_home/data/canonical-aliases.json"
 install -m 0644 data/io.thallium.Store.metainfo.xml "$app_home/data/io.thallium.Store.metainfo.xml"
 install -m 0644 data/io.thallium.Store.desktop "$desktop_home/io.thallium.Store.desktop"
+install -m 0644 data/icons/io.thallium.Store.svg "$icon_home/io.thallium.Store.svg"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$desktop_home" >/dev/null 2>&1 || true
+fi
+
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q "$data_home/icons/hicolor" >/dev/null 2>&1 || true
 fi
 
 echo "Installed Thallium Store locally."
