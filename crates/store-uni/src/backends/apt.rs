@@ -26,7 +26,13 @@ pub async fn run(
     network: &Arc<Semaphore>,
     mutation: &Arc<Semaphore>,
 ) {
-    emit(tx, OperationState::Resolving, 2, format!("Preparing apt for {app_name}")).await;
+    emit(
+        tx,
+        OperationState::Resolving,
+        2,
+        format!("Preparing apt for {app_name}"),
+    )
+    .await;
 
     // apt-get streams both dlstatus (download) and pmstatus (install) from a
     // single invocation under one dpkg lock, so download/install can't be

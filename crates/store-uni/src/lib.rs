@@ -171,14 +171,8 @@ mod tests {
                 privilege: false
             }
         );
-        assert_eq!(
-            readiness_from(false, false, true, false).privilege,
-            true
-        );
-        assert_eq!(
-            readiness_from(false, false, false, true).privilege,
-            true
-        );
+        assert_eq!(readiness_from(false, false, true, false).privilege, true);
+        assert_eq!(readiness_from(false, false, false, true).privilege, true);
     }
 
     #[test]

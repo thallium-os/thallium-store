@@ -28,7 +28,13 @@ pub async fn run(
         let _mutation_permit = permits.github_mutation.clone().acquire_owned().await.ok();
         match registry::remove(app_name).await {
             Ok(()) => {
-                emit(tx, OperationState::Succeeded, 100, format!("Removed {app_name}")).await
+                emit(
+                    tx,
+                    OperationState::Succeeded,
+                    100,
+                    format!("Removed {app_name}"),
+                )
+                .await
             }
             Err(err) => fail(tx, format!("removing {app_name} failed: {err}")).await,
         }
@@ -37,7 +43,13 @@ pub async fn run(
 
     if let Err(err) = install(action, app_name, package_id, tx, token, permits).await {
         if token.is_cancelled() {
-            emit(tx, OperationState::Cancelled, 0, format!("Cancelled installing {app_name}")).await;
+            emit(
+                tx,
+                OperationState::Cancelled,
+                0,
+                format!("Cancelled installing {app_name}"),
+            )
+            .await;
         } else {
             fail(tx, format!("installing {app_name} failed: {err}")).await;
         }
@@ -68,8 +80,9 @@ async fn install(
     }
     let release: Value = request.send().await?.error_for_status()?.json().await?;
 
-    let (url, name) = pick_best_asset(&release)
-        .ok_or_else(|| anyhow::anyhow!("no suitable Linux asset in latest {owner}/{repo} release"))?;
+    let (url, name) = pick_best_asset(&release).ok_or_else(|| {
+        anyhow::anyhow!("no suitable Linux asset in latest {owner}/{repo} release")
+    })?;
 
     let cache = appimage::cache_dir();
     tokio::fs::create_dir_all(&cache).await?;
@@ -109,7 +122,13 @@ async fn install_deb(
     tx: &ProgressSender,
     token: &CancellationToken,
 ) -> anyhow::Result<()> {
-    emit(tx, OperationState::Installing, 88, format!("Installing {app_name}")).await;
+    emit(
+        tx,
+        OperationState::Installing,
+        88,
+        format!("Installing {app_name}"),
+    )
+    .await;
     let path = dest.to_string_lossy().to_string();
     let mut child = privileged("apt-get", &["install", "-y", &path])
         .stdout(Stdio::piped())
@@ -127,7 +146,13 @@ async fn install_deb(
         anyhow::bail!("apt-get exited with {status}");
     }
     registry::add(app_name, "dpkg", repo).await?;
-    emit(tx, OperationState::Succeeded, 100, format!("{app_name} ready")).await;
+    emit(
+        tx,
+        OperationState::Succeeded,
+        100,
+        format!("{app_name} ready"),
+    )
+    .await;
     Ok(())
 }
 

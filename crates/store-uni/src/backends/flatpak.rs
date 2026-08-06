@@ -24,7 +24,13 @@ pub async fn run(
     network: &Arc<Semaphore>,
     mutation: &Arc<Semaphore>,
 ) {
-    emit(tx, OperationState::Resolving, 2, format!("Preparing flatpak for {app_name}")).await;
+    emit(
+        tx,
+        OperationState::Resolving,
+        2,
+        format!("Preparing flatpak for {app_name}"),
+    )
+    .await;
 
     // flatpak fetches and deploys in one invocation too (and serializes itself
     // internally via its own repo lock); hold both permits for the whole call
@@ -51,7 +57,14 @@ pub async fn run(
     let args: Vec<&str> = match action {
         OperationAction::Install => vec!["install", "-y", "--user", "flathub", package_id],
         OperationAction::Reinstall => {
-            vec!["install", "-y", "--user", "--reinstall", "flathub", package_id]
+            vec![
+                "install",
+                "-y",
+                "--user",
+                "--reinstall",
+                "flathub",
+                package_id,
+            ]
         }
         OperationAction::Update => vec!["update", "-y", scope, package_id],
         OperationAction::Remove => vec!["uninstall", "-y", scope, package_id],

@@ -41,8 +41,6 @@ pub(crate) fn is_root() -> bool {
 /// Whether `bin` resolves on PATH.
 pub(crate) fn has(bin: &str) -> bool {
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file())
-        })
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
         .unwrap_or(false)
 }

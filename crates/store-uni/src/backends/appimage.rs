@@ -30,15 +30,31 @@ pub async fn run(
         OperationAction::Remove => {
             let _mutation_permit = mutation.clone().acquire_owned().await.ok();
             match remove(app_name).await {
-                Ok(()) => emit(tx, OperationState::Succeeded, 100, format!("Removed {app_name}")).await,
+                Ok(()) => {
+                    emit(
+                        tx,
+                        OperationState::Succeeded,
+                        100,
+                        format!("Removed {app_name}"),
+                    )
+                    .await
+                }
                 Err(err) => fail(tx, format!("removing {app_name} failed: {err}")).await,
             }
         }
         _ => {
             let dest = appimage_dir().join(format!("{}.AppImage", sanitize(app_name)));
-            if let Err(err) = install(app_name, package_id, &dest, tx, token, network, mutation).await {
+            if let Err(err) =
+                install(app_name, package_id, &dest, tx, token, network, mutation).await
+            {
                 if token.is_cancelled() {
-                    emit(tx, OperationState::Cancelled, 0, format!("Cancelled installing {app_name}")).await;
+                    emit(
+                        tx,
+                        OperationState::Cancelled,
+                        0,
+                        format!("Cancelled installing {app_name}"),
+                    )
+                    .await;
                 } else {
                     fail(tx, format!("installing {app_name} failed: {err}")).await;
                 }
@@ -57,7 +73,13 @@ async fn install(
     network: &Arc<Semaphore>,
     mutation: &Arc<Semaphore>,
 ) -> anyhow::Result<()> {
-    emit(tx, OperationState::Resolving, 2, format!("Fetching {app_name}")).await;
+    emit(
+        tx,
+        OperationState::Resolving,
+        2,
+        format!("Fetching {app_name}"),
+    )
+    .await;
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -86,7 +108,13 @@ pub(super) async fn finalize(
     dest: &Path,
     tx: &ProgressSender,
 ) -> anyhow::Result<()> {
-    emit(tx, OperationState::Finalizing, 92, "Registering application").await;
+    emit(
+        tx,
+        OperationState::Finalizing,
+        92,
+        "Registering application",
+    )
+    .await;
 
     let mut perms = tokio::fs::metadata(dest).await?.permissions();
     perms.set_mode(0o755);
@@ -95,7 +123,13 @@ pub(super) async fn finalize(
     write_desktop_entry(app_name, dest).await?;
     registry::add(app_name, "appimage", &dest.to_string_lossy()).await?;
 
-    emit(tx, OperationState::Succeeded, 100, format!("{app_name} ready")).await;
+    emit(
+        tx,
+        OperationState::Succeeded,
+        100,
+        format!("{app_name} ready"),
+    )
+    .await;
     Ok(())
 }
 
@@ -134,10 +168,9 @@ fn spawn_progress_ticker(
             sleep(Duration::from_millis(200)).await;
             let total = total.load(Ordering::Relaxed);
             let done = done.load(Ordering::Relaxed);
-            let percent = if total > 0 {
-                base + ((done.min(total) * span as u64) / total) as u8
-            } else {
-                base
+            let percent = match (done.min(total) * span as u64).checked_div(total) {
+                Some(scaled) => base + scaled as u8,
+                None => base,
             };
             let mib = done as f64 / (1024.0 * 1024.0);
             emit(
@@ -153,7 +186,13 @@ fn spawn_progress_ticker(
 
 fn sanitize(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 

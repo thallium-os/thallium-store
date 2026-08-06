@@ -6,8 +6,8 @@
 //! `uni` bash script (which buffered all output and emitted fake 50%/90%
 //! milestones only after the child had already exited).
 
-mod apt;
 mod appimage;
+mod apt;
 mod download;
 mod flatpak;
 mod github;
@@ -46,20 +46,54 @@ pub async fn run(
 ) {
     match source {
         SourceKind::System => {
-            apt::run(action, &app_name, &package_id, &tx, &token, &permits.network, &permits.system_mutation).await
+            apt::run(
+                action,
+                &app_name,
+                &package_id,
+                &tx,
+                &token,
+                &permits.network,
+                &permits.system_mutation,
+            )
+            .await
         }
         SourceKind::Flathub => {
-            flatpak::run(action, &app_name, &package_id, &tx, &token, &permits.network, &permits.flatpak_mutation).await
+            flatpak::run(
+                action,
+                &app_name,
+                &package_id,
+                &tx,
+                &token,
+                &permits.network,
+                &permits.flatpak_mutation,
+            )
+            .await
         }
-        SourceKind::Github => github::run(action, &app_name, &package_id, &tx, &token, &permits).await,
+        SourceKind::Github => {
+            github::run(action, &app_name, &package_id, &tx, &token, &permits).await
+        }
         SourceKind::Appimage => {
-            appimage::run(action, &app_name, &package_id, &tx, &token, &permits.network, &permits.github_mutation).await
+            appimage::run(
+                action,
+                &app_name,
+                &package_id,
+                &tx,
+                &token,
+                &permits.network,
+                &permits.github_mutation,
+            )
+            .await
         }
     }
 }
 
 /// Emit a progress event, ignoring a closed receiver.
-pub(crate) async fn emit(tx: &ProgressSender, state: OperationState, percent: u8, message: impl Into<String>) {
+pub(crate) async fn emit(
+    tx: &ProgressSender,
+    state: OperationState,
+    percent: u8,
+    message: impl Into<String>,
+) {
     let _ = tx
         .send(Ok(UniProgress {
             state,
