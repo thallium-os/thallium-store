@@ -1,9 +1,21 @@
 # Known Limitations
 
-- Rust was not installed in the development container used for the initial scaffold, so local `cargo build` and `cargo test` could not be executed there.
-- Real UNI package mutations are disabled by default. The local UNI script now has initial JSON event support, but it is a lifecycle wrapper around existing human commands, not deep backend progress.
-- Updates, retry, cancellation of active jobs, and launching are contract stubs in this MVP.
-- APT search uses `apt-cache search` as a read-only supplement. It is not a replacement for proper AppStream metadata.
-- Flatpak search depends on the local Flatpak remote configuration.
-- The bundled catalog is deliberately small and exists to make the vertical slice usable immediately.
-- The QML client uses a backend `--request` helper and polling for queue updates. Direct persistent socket streaming should replace this after the core MVP is stable.
+- Retrying a failed operation is not implemented. `operations.retry` returns an
+  error; start the install again from the app's page instead.
+- Launching an installed app from the store is not implemented. `apps.launch`
+  returns an error; use your normal launcher.
+- Package changes are delegated to the bundled UNI wrapper, which drives the
+  system's own `apt`, `flatpak` and `snap` commands. Progress is only as detailed
+  as those tools report — some steps surface as a coarse percentage.
+- APT results come from an in-memory index built at daemon startup, seeded from
+  `apt-cache`. It is not AppStream metadata, so descriptions and artwork are
+  thinner than a native AppStream store would show.
+- Flatpak results come from the Flathub HTTP index; other configured remotes are
+  only consulted for locally installed apps.
+- GitHub metadata is fetched anonymously unless `GITHUB_TOKEN` is set. Anonymous
+  access is capped at 60 requests/hour/IP, so heavy browsing can leave GitHub
+  panels showing cached data until the quota resets.
+- The bundled curated catalog is deliberately small; it exists so the store is
+  useful on first launch, before any index has warmed up.
+- The QML client talks to the backend through `--request` invocations and polls
+  for queue updates. Persistent socket streaming should replace this.

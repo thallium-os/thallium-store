@@ -28,7 +28,7 @@ Build a Debian package and install it:
 
 ```bash
 ./scripts/build-deb
-sudo apt install ./thallium-store_*.deb
+sudo apt install ./dist/thallium-store_*.deb
 ```
 
 Or install into your user prefix without packaging:
@@ -47,7 +47,7 @@ thallium-store
 
 - **Home** — curated picks and collections.
 - **Search** — click the search icon in the ribbon; every source is queried as you type, press Enter for full results.
-- **Apps** — installed software and live operation activity (retry/cancel from here).
+- **Apps** — installed software and live operation activity (cancel a running job from here).
 - **Updates** — available updates from UNI.
 - **Settings** — cache storage controls, replay the first-run walkthrough, store info.
 

@@ -9,8 +9,20 @@
     <p>Thallium Store is a graphical application store for Thallium OS. It searches system packages, Flathub, and curated GitHub releases, then delegates package changes to UNI.</p>
   </description>
   <launchable type="desktop-id">io.thallium.Store.desktop</launchable>
+  <icon type="stock">io.thallium.Store</icon>
+  <categories>
+    <category>System</category>
+    <category>PackageManager</category>
+  </categories>
   <provides>
     <binary>thallium-store-backend</binary>
   </provides>
+  <releases>
+    <release version="0.1.0" date="2026-08-06">
+      <description>
+        <p>First release. Search across apt, Flathub, GitHub releases and AppImages, with install, remove and update handled through UNI.</p>
+      </description>
+    </release>
+  </releases>
 </component>
 
