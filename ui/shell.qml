@@ -102,6 +102,36 @@ ShellRoot {
         return n
     }
 
+    // Operations still in flight. Terminal ones are deliberately not shown:
+    // once an install has finished, its row is a log entry, and the Apps page
+    // is not a log -- the installed grid below already reflects the outcome.
+    function runningOperations() {
+        const live = []
+        for (let i = 0; i < operations.length; i++) {
+            const s = operations[i].state
+            if (s !== "succeeded" && s !== "failed" && s !== "cancelled")
+                live.push(operations[i])
+        }
+        return live
+    }
+
+    // XDG icon for something already on the machine. Flatpak and apt both name
+    // their icon after the package id far more often than after the app's
+    // display name, so that is tried first; iconPath's second argument makes a
+    // miss return "" instead of a broken-image placeholder.
+    function installedIconSource(item) {
+        const pkg = packageIdFromInstalled(item)
+        const candidates = [pkg, (item.name || "").toLowerCase(), item.name || ""]
+        for (let i = 0; i < candidates.length; i++) {
+            if (!candidates[i])
+                continue
+            const path = Quickshell.iconPath(candidates[i], true)
+            if (path)
+                return path
+        }
+        return ""
+    }
+
     function cardHeight() {
         return Math.round(126 * uiScale())
     }
@@ -201,6 +231,9 @@ ShellRoot {
 
     function selectApp(app) {
         searchDebounce.stop()
+        // Drop the caret out of the search box: while it holds focus, any event
+        // that returns focus to the window drags the view back to search.
+        searchField.focus = false
         selectedApp = app
         activeView = "details"
         if (app && app.id)
@@ -761,6 +794,12 @@ ShellRoot {
             root.request("system.health", {})
             root.request("settings.get", {})
             root.loadDiscover()
+            // Installed apps and updates are fetched up front, not only when the
+            // Apps tab is clicked. They share one page now, and a page that is
+            // empty until you click the tab that is already selected reads as
+            // "nothing installed".
+            root.request("installed.list", {})
+            root.request("updates.list", {})
             discoverWarmReload.start()
         }
     }
@@ -777,7 +816,7 @@ ShellRoot {
         property string view: ""
         property int badge: 0
         readonly property bool selected: root.activeView === view
-            || (view === "discover" && (root.activeView === "details" || root.activeView === "search"))
+            || (view === "search" && root.activeView === "details")
 
         width: tabRow.implicitWidth
         height: 64
@@ -834,8 +873,10 @@ ShellRoot {
                     root.request("installed.list", {})
                     root.request("operations.list", {})
                 }
-                if (tab.view === "updates")
+                if (tab.view === "installed")
                     root.request("updates.list", {})
+                if (tab.view === "search")
+                    searchField.forceActiveFocus()
                 if (tab.view === "settings") {
                     root.request("system.cacheInfo", {})
                     root.request("settings.get", {})
@@ -1263,7 +1304,7 @@ ShellRoot {
                         Behavior on opacity { NumberAnimation { duration: root.tMed; easing.type: Easing.OutCubic } }
                         TopTab { label: "Home"; view: "discover" }
                         TopTab { label: "Apps"; view: "installed"; badge: root.activeOpsCount() }
-                        TopTab { label: "Updates"; view: "updates" }
+                        TopTab { label: "Search"; view: "search" }
                         TopTab { label: "Settings"; view: "settings" }
                     }
 
@@ -1307,10 +1348,12 @@ ShellRoot {
                                 background: Rectangle { color: "transparent" }
                                 font.family: root.fontHuman
                                 font.pixelSize: 13
-                                onActiveFocusChanged: {
-                                    if (activeFocus)
-                                        root.activeView = "search"
-                                }
+                                // No onActiveFocusChanged handler on purpose. Steering the view
+                                // from focus meant an open app detail page snapped back to search
+                                // whenever focus returned to the window -- after a screenshot, a
+                                // polkit prompt, a workspace switch -- and the field taking focus
+                                // at startup dropped you on a stale search instead of Home.
+                                // Clicking the box and typing both switch the view explicitly.
                                 onTextChanged: {
                                     if (text === root.query)
                                         return
@@ -1367,7 +1410,8 @@ ShellRoot {
                 StackLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    currentIndex: root.activeView === "details" ? 1 : root.activeView === "settings" ? 2 : root.activeView === "installed" || root.activeView === "queue" ? 3 : root.activeView === "updates" ? 4 : 0
+                    // "updates" is no longer a page of its own; it lands on Apps, which carries the section.
+                    currentIndex: root.activeView === "details" ? 1 : root.activeView === "settings" ? 2 : (root.activeView === "installed" || root.activeView === "queue" || root.activeView === "updates") ? 3 : 0
 
                     Item {
                         id: discoverPage
@@ -2821,19 +2865,21 @@ ShellRoot {
                                 }
                             }
 
-                            // Activity — running and recent operations, merged from the old Queue page.
+                            // Activity — only what is happening right now. Finished operations
+                            // used to stay listed here, so the page led with a log of things the
+                            // user had already watched finish, pushing the actual apps below it.
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 spacing: 8
-                                visible: root.operations.length > 0
+                                visible: root.runningOperations().length > 0
 
                                 HudRailHeader {
                                     title: "Activity"
-                                    sub: root.activeOpsCount() > 0 ? root.activeOpsCount() + " running" : "recent"
+                                    sub: root.activeOpsCount() + " running"
                                 }
 
                                 Repeater {
-                                    model: root.operations.slice(0, 6)
+                                    model: root.runningOperations()
                                     delegate: Rectangle {
                                         id: opRow
                                         property var op: modelData
@@ -2937,281 +2983,25 @@ ShellRoot {
                                 }
                             }
 
-                            ScrollView {
+                            // Updates, folded into this page. They were a separate tab, which
+                            // meant the answer to "what is on this machine and is any of it out
+                            // of date" lived on two screens. Hidden entirely when nothing is
+                            // pending, so the page stays about installed apps.
+                            ColumnLayout {
                                 Layout.fillWidth: true
-                                Layout.fillHeight: true
-                                clip: true
-                                visible: root.installedItems.length > 0
+                                // Two full rows, then scroll. A fixed height cut the second
+                                // row of cards in half, which reads as a rendering fault
+                                // rather than as more content below.
+                                Layout.preferredHeight: root.updateItems.length > 0
+                                    ? Math.round(142 * root.uiScale()) * Math.min(2, Math.ceil(root.updateItems.length / 2)) + 34
+                                    : 0
+                                spacing: 8
+                                visible: root.updateItems.length > 0
 
-                                GridView {
-                                    id: installedGrid
-                                    width: parent.width
-                                    height: parent.height
-                                    model: root.installedItems
-                                    cellWidth: {
-                                        const columns = Math.max(1, Math.floor(width / 320))
-                                        return Math.floor(width / columns)
-                                    }
-                                    cellHeight: Math.round(142 * root.uiScale())
-                                    delegate: Rectangle {
-                                        id: installedCard
-                                        property var item: modelData
-                                        property string packageId: root.packageIdFromInstalled(item)
-                                        property string itemSource: root.operationSource(item.source)
-
-                                        width: installedGrid.cellWidth - 14
-                                        height: Math.round(126 * root.uiScale())
-                                        x: 7
-                                        y: 4
-                                        color: root.cPanel
-                                        border.color: installedHover.hovered ? "#5f7048" : root.cLine
-                                        radius: 0
-                                        opacity: 0
-                                        transform: Translate { id: installedSlide; y: 8 }
-                                        clip: true
-
-                                        Component.onCompleted: {
-                                            installedFade.start()
-                                            installedLift.start()
-                                        }
-
-                                        HoverHandler { id: installedHover }
-                                        Behavior on border.color { ColorAnimation { duration: 140 } }
-
-                                        NumberAnimation {
-                                            id: installedFade
-                                            target: installedCard
-                                            property: "opacity"
-                                            from: 0
-                                            to: 1
-                                            duration: 180
-                                            easing.type: Easing.OutCubic
-                                        }
-
-                                        NumberAnimation {
-                                            id: installedLift
-                                            target: installedSlide
-                                            property: "y"
-                                            from: 8
-                                            to: 0
-                                            duration: 180
-                                            easing.type: Easing.OutCubic
-                                        }
-
-                                        Rectangle {
-                                            width: parent.width
-                                            height: parent.height
-                                            opacity: installedHover.hovered ? 0.16 : 0.08
-                                            gradient: Gradient {
-                                                orientation: Gradient.Horizontal
-                                                GradientStop { position: 0.0; color: installedCard.item.managedByUni ? root.sourceSurface(installedCard.itemSource) : "#332b1a" }
-                                                GradientStop { position: 1.0; color: "transparent" }
-                                            }
-                                        }
-
-                                        MouseArea {
-                                            anchors.fill: parent
-                                            cursorShape: Qt.PointingHandCursor
-                                            acceptedButtons: Qt.LeftButton
-                                            onClicked: root.selectApp(root.appFromInstalled(installedCard.item))
-                                        }
-
-                                        RowLayout {
-                                            anchors.fill: parent
-                                            anchors.margins: 14
-                                            spacing: 12
-
-                                            Rectangle {
-                                                Layout.preferredWidth: Math.round(72 * root.uiScale())
-                                                Layout.preferredHeight: Math.round(72 * root.uiScale())
-                                                radius: 0
-                                                color: installedCard.item.managedByUni ? root.sourceSurface(installedCard.itemSource) : "#332b1a"
-                                                border.color: installedCard.item.managedByUni ? root.sourceAccent(installedCard.itemSource) : "#5f4f2a"
-                                                Label {
-                                                    anchors.centerIn: parent
-                                                    text: installedCard.item.name.substring(0, 1).toUpperCase()
-                                                    color: installedCard.item.managedByUni ? root.sourceAccent(installedCard.itemSource) : root.cWarn
-                                                    font.family: root.fontBrand
-                                                    font.pixelSize: Math.round(30 * root.uiScale())
-                                                    font.bold: true
-                                                }
-                                            }
-
-                                            ColumnLayout {
-                                                Layout.fillWidth: true
-                                                Layout.minimumWidth: 0
-                                                Layout.alignment: Qt.AlignVCenter
-                                                spacing: 5
-                                                Label {
-                                                    text: installedCard.item.name
-                                                    color: root.cFg
-                                                    font.family: root.fontHuman
-                                                    font.pixelSize: Math.round(15 * root.uiScale())
-                                                    font.bold: true
-                                                    Layout.fillWidth: true
-                                                    elide: Text.ElideRight
-                                                }
-                                                Label {
-                                                    text: root.sourceLabel(root.operationSource(installedCard.item.source))
-                                                          + (installedCard.item.version ? " " + installedCard.item.version : "")
-                                                          + " · " + installedCard.packageId
-                                                    color: root.cMuted
-                                                    font.family: root.fontHuman
-                                                    font.pixelSize: 11
-                                                    Layout.fillWidth: true
-                                                    elide: Text.ElideRight
-                                                }
-                                                Label {
-                                                    text: installedCard.item.detail
-                                                    color: root.cMuted
-                                                    font.family: root.fontHuman
-                                                    font.pixelSize: 11
-                                                    Layout.fillWidth: true
-                                                    elide: Text.ElideRight
-                                                }
-                                                Flow {
-                                                    Layout.fillWidth: true
-                                                    spacing: 8
-                                                    Rectangle {
-                                                        height: 22
-                                                        implicitWidth: sourceChipInstalled.implicitWidth + 14
-                                                        radius: 0
-                                                        color: root.cDim
-                                                        border.color: root.cLine
-                                                        Label {
-                                                            id: sourceChipInstalled
-                                                            anchors.centerIn: parent
-                                                            text: root.sourceLabel(root.operationSource(installedCard.item.source))
-                                                            color: root.cMuted
-                                                            font.family: root.fontHuman
-                                                            font.pixelSize: 10
-                                                            font.bold: true
-                                                        }
-                                                    }
-                                                    Rectangle {
-                                                        height: 22
-                                                        implicitWidth: managedChipInstalled.implicitWidth + 14
-                                                        radius: 0
-                                                        color: installedCard.item.managedByUni ? "#233024" : "#332b1a"
-                                                        border.color: installedCard.item.managedByUni ? "#4a5f3f" : "#5f4f2a"
-                                                        Label {
-                                                            id: managedChipInstalled
-                                                            anchors.centerIn: parent
-                                                            text: installedCard.item.managedByUni ? "Managed by UNI" : "Detected"
-                                                            color: installedCard.item.managedByUni ? root.cGreen : root.cWarn
-                                                            font.family: root.fontHuman
-                                                            font.pixelSize: 10
-                                                            font.bold: true
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            ColumnLayout {
-                                                Layout.preferredWidth: 92
-                                                Layout.maximumWidth: 92
-                                                Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
-                                                spacing: 8
-                                                ActionButton {
-                                                    label: "Details"
-                                                    fill: root.cDim
-                                                    textColor: root.cBlue
-                                                    Layout.fillWidth: true
-                                                    onClicked: root.selectApp(root.appFromInstalled(installedCard.item))
-                                                }
-                                                ActionButton {
-                                                    label: "Uninstall"
-                                                    fill: root.cRed
-                                                    textColor: "white"
-                                                    Layout.fillWidth: true
-                                                    onClicked: root.enqueueUninstallInstalled(installedCard.item)
-                                                }
-                                            }
-                                        }
-                                    }
+                                HudRailHeader {
+                                    title: "Updates"
+                                    sub: root.updateItems.length + " available"
                                 }
-                            }
-                        }
-                    }
-
-                    Item {
-                        opacity: root.activeView === "updates" ? 1 : 0
-                        transform: Translate {
-                            y: root.activeView === "updates" ? 0 : 12
-                            Behavior on y { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
-                        }
-                        Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
-                        ColumnLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: root.contentSideMargin()
-                            anchors.rightMargin: root.contentSideMargin()
-                            anchors.topMargin: root.pagePad()
-                            anchors.bottomMargin: root.pagePad()
-                            spacing: 14
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 3
-                                    Label {
-                                        text: "Updates"
-                                        color: root.cFg
-                                        font.family: root.fontBrand
-                                        font.pixelSize: Math.round(32 * root.uiScale())
-                                        font.bold: true
-                                        Layout.fillWidth: true
-                                    }
-                                    Label {
-                                        text: root.updateItems.length + " updates available."
-                                        color: root.cMuted
-                                        font.family: root.fontHuman
-                                        font.pixelSize: 15
-                                        Layout.fillWidth: true
-                                    }
-                                }
-                                ActionButton {
-                                    label: "Refresh"
-                                    fill: root.cDim
-                                    textColor: root.cBlue
-                                    Layout.preferredWidth: Math.min(120, root.actionColumnWidth())
-                                    onClicked: root.request("updates.list", {})
-                                }
-                            }
-
-                            Rectangle {
-                                visible: root.updateItems.length === 0
-                                Layout.fillWidth: true
-                                Layout.fillHeight: true
-                                color: root.cPanel
-                                border.color: root.cLine
-                                radius: 0
-
-                                ColumnLayout {
-                                    anchors.centerIn: parent
-                                    width: Math.min(parent.width - 48, 620)
-                                    spacing: 10
-
-                                    Label {
-                                        text: "No updates found"
-                                        color: root.cFg
-                                        font.family: root.fontBrand
-                                        font.pixelSize: Math.round(22 * root.uiScale())
-                                        horizontalAlignment: Text.AlignHCenter
-                                        Layout.fillWidth: true
-                                    }
-
-                                    Label {
-                                        text: "If UNI does not expose detailed updates yet, Thallium Store shows zero updates instead of guessing from terminal output."
-                                        color: root.cMuted
-                                        font.family: root.fontHuman
-                                        font.pixelSize: 14
-                                        horizontalAlignment: Text.AlignHCenter
-                                        wrapMode: Text.WordWrap
-                                        Layout.fillWidth: true
-                                    }
-                                }
-                            }
 
                             ScrollView {
                                 Layout.fillWidth: true
@@ -3380,8 +3170,223 @@ ShellRoot {
                                     }
                                 }
                             }
+                            }
+
+                            ScrollView {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                clip: true
+                                visible: root.installedItems.length > 0
+
+                                GridView {
+                                    id: installedGrid
+                                    width: parent.width
+                                    height: parent.height
+                                    model: root.installedItems
+                                    cellWidth: {
+                                        const columns = Math.max(1, Math.floor(width / 320))
+                                        return Math.floor(width / columns)
+                                    }
+                                    cellHeight: Math.round(142 * root.uiScale())
+                                    delegate: Rectangle {
+                                        id: installedCard
+                                        property var item: modelData
+                                        property string packageId: root.packageIdFromInstalled(item)
+                                        property string itemSource: root.operationSource(item.source)
+
+                                        width: installedGrid.cellWidth - 14
+                                        height: Math.round(126 * root.uiScale())
+                                        x: 7
+                                        y: 4
+                                        color: root.cPanel
+                                        border.color: installedHover.hovered ? "#5f7048" : root.cLine
+                                        radius: 0
+                                        opacity: 0
+                                        transform: Translate { id: installedSlide; y: 8 }
+                                        clip: true
+
+                                        Component.onCompleted: {
+                                            installedFade.start()
+                                            installedLift.start()
+                                        }
+
+                                        HoverHandler { id: installedHover }
+                                        Behavior on border.color { ColorAnimation { duration: 140 } }
+
+                                        NumberAnimation {
+                                            id: installedFade
+                                            target: installedCard
+                                            property: "opacity"
+                                            from: 0
+                                            to: 1
+                                            duration: 180
+                                            easing.type: Easing.OutCubic
+                                        }
+
+                                        NumberAnimation {
+                                            id: installedLift
+                                            target: installedSlide
+                                            property: "y"
+                                            from: 8
+                                            to: 0
+                                            duration: 180
+                                            easing.type: Easing.OutCubic
+                                        }
+
+                                        Rectangle {
+                                            width: parent.width
+                                            height: parent.height
+                                            opacity: installedHover.hovered ? 0.16 : 0.08
+                                            gradient: Gradient {
+                                                orientation: Gradient.Horizontal
+                                                GradientStop { position: 0.0; color: installedCard.item.managedByUni ? root.sourceSurface(installedCard.itemSource) : "#332b1a" }
+                                                GradientStop { position: 1.0; color: "transparent" }
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            acceptedButtons: Qt.LeftButton
+                                            onClicked: root.selectApp(root.appFromInstalled(installedCard.item))
+                                        }
+
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.margins: 14
+                                            spacing: 12
+
+                                            Rectangle {
+                                                Layout.preferredWidth: Math.round(72 * root.uiScale())
+                                                Layout.preferredHeight: Math.round(72 * root.uiScale())
+                                                radius: 0
+                                                color: installedCard.item.managedByUni ? root.sourceSurface(installedCard.itemSource) : "#332b1a"
+                                                border.color: installedCard.item.managedByUni ? root.sourceAccent(installedCard.itemSource) : "#5f4f2a"
+                                                clip: true
+                                                // Real icon when the machine has one, initial as the
+                                                // fallback. Installed cards never even tried to load an
+                                                // icon, so a page about apps you already have was a wall
+                                                // of letters -- the one place the icon is guaranteed to
+                                                // exist locally.
+                                                Label {
+                                                    anchors.centerIn: parent
+                                                    visible: installedIcon.status !== Image.Ready
+                                                    text: installedCard.item.name.substring(0, 1).toUpperCase()
+                                                    color: installedCard.item.managedByUni ? root.sourceAccent(installedCard.itemSource) : root.cWarn
+                                                    font.family: root.fontBrand
+                                                    font.pixelSize: Math.round(30 * root.uiScale())
+                                                    font.bold: true
+                                                }
+                                                Image {
+                                                    id: installedIcon
+                                                    anchors.fill: parent
+                                                    anchors.margins: 8
+                                                    source: root.installedIconSource(installedCard.item)
+                                                    fillMode: Image.PreserveAspectFit
+                                                    asynchronous: true
+                                                    cache: true
+                                                    smooth: true
+                                                    visible: status === Image.Ready
+                                                }
+                                            }
+
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                Layout.minimumWidth: 0
+                                                Layout.alignment: Qt.AlignVCenter
+                                                spacing: 5
+                                                Label {
+                                                    text: installedCard.item.name
+                                                    color: root.cFg
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: Math.round(15 * root.uiScale())
+                                                    font.bold: true
+                                                    Layout.fillWidth: true
+                                                    elide: Text.ElideRight
+                                                }
+                                                Label {
+                                                    text: root.sourceLabel(root.operationSource(installedCard.item.source))
+                                                          + (installedCard.item.version ? " " + installedCard.item.version : "")
+                                                          + " · " + installedCard.packageId
+                                                    color: root.cMuted
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: 11
+                                                    Layout.fillWidth: true
+                                                    elide: Text.ElideRight
+                                                }
+                                                Label {
+                                                    text: installedCard.item.detail
+                                                    color: root.cMuted
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: 11
+                                                    Layout.fillWidth: true
+                                                    elide: Text.ElideRight
+                                                }
+                                                Flow {
+                                                    Layout.fillWidth: true
+                                                    spacing: 8
+                                                    Rectangle {
+                                                        height: 22
+                                                        implicitWidth: sourceChipInstalled.implicitWidth + 14
+                                                        radius: 0
+                                                        color: root.cDim
+                                                        border.color: root.cLine
+                                                        Label {
+                                                            id: sourceChipInstalled
+                                                            anchors.centerIn: parent
+                                                            text: root.sourceLabel(root.operationSource(installedCard.item.source))
+                                                            color: root.cMuted
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 10
+                                                            font.bold: true
+                                                        }
+                                                    }
+                                                    Rectangle {
+                                                        height: 22
+                                                        implicitWidth: managedChipInstalled.implicitWidth + 14
+                                                        radius: 0
+                                                        color: installedCard.item.managedByUni ? "#233024" : "#332b1a"
+                                                        border.color: installedCard.item.managedByUni ? "#4a5f3f" : "#5f4f2a"
+                                                        Label {
+                                                            id: managedChipInstalled
+                                                            anchors.centerIn: parent
+                                                            text: installedCard.item.managedByUni ? "Managed by UNI" : "Detected"
+                                                            color: installedCard.item.managedByUni ? root.cGreen : root.cWarn
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 10
+                                                            font.bold: true
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            ColumnLayout {
+                                                Layout.preferredWidth: 92
+                                                Layout.maximumWidth: 92
+                                                Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                                                spacing: 8
+                                                ActionButton {
+                                                    label: "Details"
+                                                    fill: root.cDim
+                                                    textColor: root.cBlue
+                                                    Layout.fillWidth: true
+                                                    onClicked: root.selectApp(root.appFromInstalled(installedCard.item))
+                                                }
+                                                ActionButton {
+                                                    label: "Uninstall"
+                                                    fill: root.cRed
+                                                    textColor: "white"
+                                                    Layout.fillWidth: true
+                                                    onClicked: root.enqueueUninstallInstalled(installedCard.item)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
+
                 }
 
             }
