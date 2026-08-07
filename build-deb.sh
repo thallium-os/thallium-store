@@ -16,7 +16,7 @@
 set -euo pipefail
 
 STORE_REPO=dronzer-tb/thallium-store
-PINNED_COMMIT=4202c772f1663d0b35507f909a4a497400830183
+PINNED_COMMIT=21b8642cb5c859d4f15afee7c163628ec61e42c9
 
 OUT_DIR="${1:-$PWD}"
 WORK="$(mktemp -d)"
