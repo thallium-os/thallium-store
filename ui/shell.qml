@@ -26,6 +26,8 @@ ShellRoot {
     property bool fakeUniMode: true
     property string uniHealth: ""
     property string storeVersion: ""
+    // Screenshot opened over the page; empty means the viewer is closed.
+    property string viewerSource: ""
     property int activityFrame: 0
     property var searchCache: ({})
     property string activeSearchQuery: ""
@@ -1036,6 +1038,54 @@ ShellRoot {
             color: root.cLine
             opacity: 0.45
         }
+    }
+
+    // Language breakdown as a ring. A stacked bar reads as one long smear at
+    // this width; a ring gives each slice its own arc and leaves the middle
+    // free for the dominant language, which is the fact people actually want.
+    component LangRing: Item {
+        id: ring
+        property var languages: []
+
+        Canvas {
+            id: ringCanvas
+            anchors.fill: parent
+            onPaint: {
+                const ctx = getContext("2d")
+                ctx.reset()
+                const cx = width / 2
+                const cy = height / 2
+                const outer = Math.min(width, height) / 2 - 2
+                const inner = outer * 0.58
+                let start = -Math.PI / 2
+                for (let i = 0; i < ring.languages.length; i++) {
+                    const sweep = (ring.languages[i].percent / 100) * Math.PI * 2
+                    // Hairline gap between slices, but never so large that a
+                    // sub-percent language disappears entirely.
+                    const gap = Math.min(0.03, sweep * 0.12)
+                    ctx.beginPath()
+                    ctx.arc(cx, cy, outer, start + gap / 2, start + sweep - gap / 2, false)
+                    ctx.arc(cx, cy, inner, start + sweep - gap / 2, start + gap / 2, true)
+                    ctx.closePath()
+                    ctx.fillStyle = root.langColor(i)
+                    ctx.fill()
+                    start += sweep
+                }
+            }
+        }
+
+        Label {
+            anchors.centerIn: parent
+            text: ring.languages.length > 0 ? Math.round(ring.languages[0].percent) + "%" : ""
+            color: root.cFg
+            font.family: root.fontBrand
+            font.pixelSize: Math.round(18 * root.uiScale())
+            font.bold: true
+        }
+
+        onLanguagesChanged: ringCanvas.requestPaint()
+        onWidthChanged: ringCanvas.requestPaint()
+        onHeightChanged: ringCanvas.requestPaint()
     }
 
     // Source + trust readout: a source-hued dot, mono source tag, trust dot.
@@ -2182,144 +2232,211 @@ ShellRoot {
                                     onClicked: root.activeView = "discover"
                                 }
 
-                                // Hero banner — accent gradient, icon left, name/tagline right.
-                                Rectangle {
+
+                                // Hero and the stat rail sit on one row, both the same height.
+                                RowLayout {
                                     Layout.fillWidth: true
-                                    height: Math.max(188, Math.round(210 * root.uiScale()))
-                                    radius: 0
-                                    clip: true
-                                    color: root.cPanel
-                                    border.color: root.cLine
+                                    Layout.preferredHeight: Math.max(188, Math.round(210 * root.uiScale()))
+                                    spacing: 14
 
-                                    gradient: Gradient {
-                                        orientation: Gradient.Horizontal
-                                        GradientStop { position: 0.0; color: root.selectedApp ? root.appSurface(root.selectedApp) : root.cPanel }
-                                        GradientStop { position: 0.55; color: Qt.rgba(0, 0, 0, 0.10) }
-                                        GradientStop { position: 1.0; color: "transparent" }
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        height: Math.max(188, Math.round(210 * root.uiScale()))
+                                        radius: 0
+                                        clip: true
+                                        color: root.cPanel
+                                        border.color: root.cLine
+    
+                                        gradient: Gradient {
+                                            orientation: Gradient.Horizontal
+                                            GradientStop { position: 0.0; color: root.selectedApp ? root.appSurface(root.selectedApp) : root.cPanel }
+                                            GradientStop { position: 0.55; color: Qt.rgba(0, 0, 0, 0.10) }
+                                            GradientStop { position: 1.0; color: "transparent" }
+                                        }
+    
+                                        // Ghost monogram bleeding off the right edge.
+                                        Label {
+                                            anchors.right: parent.right
+                                            anchors.rightMargin: Math.round(24 * root.uiScale())
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: root.selectedApp ? root.selectedApp.name.substring(0, 1).toUpperCase() : ""
+                                            color: root.selectedApp ? root.appAccent(root.selectedApp) : root.cGreen
+                                            opacity: 0.07
+                                            font.family: root.fontBrand
+                                            font.pixelSize: Math.round(220 * root.uiScale())
+                                            font.bold: true
+                                        }
+    
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.margins: 28
+                                            spacing: 26
+    
+                                            Rectangle {
+                                                Layout.preferredWidth: Math.round(120 * root.uiScale())
+                                                Layout.preferredHeight: Math.round(120 * root.uiScale())
+                                                Layout.alignment: Qt.AlignVCenter
+                                                color: "transparent"
+                                                clip: true
+                                                Label {
+                                                    anchors.centerIn: parent
+                                                    visible: heroIcon.status !== Image.Ready
+                                                    text: root.selectedApp ? root.selectedApp.name.substring(0, 1).toUpperCase() : ""
+                                                    color: root.selectedApp ? root.appAccent(root.selectedApp) : root.cGreen
+                                                    font.family: root.fontBrand
+                                                    font.pixelSize: Math.round(54 * root.uiScale())
+                                                    font.bold: true
+                                                }
+                                                Image {
+                                                    id: heroIcon
+                                                    anchors.fill: parent
+                                                    source: root.selectedApp && root.selectedApp.icon ? root.selectedApp.icon : ""
+                                                    fillMode: Image.PreserveAspectFit
+                                                    asynchronous: true
+                                                    cache: true
+                                                    smooth: true
+                                                    visible: status === Image.Ready
+                                                }
+                                            }
+    
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                Layout.minimumWidth: 0
+                                                Layout.alignment: Qt.AlignVCenter
+                                                spacing: 8
+                                                Label {
+                                                    text: root.selectedApp ? root.selectedApp.name : ""
+                                                    color: root.cFg
+                                                    font.family: root.fontBrand
+                                                    font.pixelSize: Math.round(38 * root.uiScale())
+                                                    font.bold: true
+                                                    Layout.fillWidth: true
+                                                    elide: Text.ElideRight
+                                                }
+                                                Label {
+                                                    text: root.selectedApp ? root.selectedApp.summary : ""
+                                                    color: root.cFg
+                                                    opacity: 0.86
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: 17
+                                                    wrapMode: Text.WordWrap
+                                                    maximumLineCount: 2
+                                                    elide: Text.ElideRight
+                                                    Layout.fillWidth: true
+                                                }
+                                                Label {
+                                                    text: {
+                                                        const v = root.recommendedVariant(root.selectedApp)
+                                                        if (!v) return "Free"
+                                                        return "Free · " + root.sourceLabel(v.source) + " · " + root.formatLabel(v.source)
+                                                    }
+                                                    color: root.cFg
+                                                    opacity: 0.62
+                                                    font.family: root.fontMono
+                                                    font.pixelSize: 12
+                                                    font.letterSpacing: 1
+                                                    Layout.fillWidth: true
+                                                    elide: Text.ElideRight
+                                                }
+                                            }
+    
+                                            // Primary action lives in the hero, Apple-style.
+                                            ColumnLayout {
+                                                Layout.alignment: Qt.AlignVCenter
+                                                spacing: 6
+                                                ActionButton {
+                                                    label: root.selectedApp && root.selectedApp.installed ? "Uninstall" : "Get"
+                                                    fill: root.selectedApp && root.selectedApp.installed ? root.cRed : root.cGreen
+                                                    textColor: root.selectedApp && root.selectedApp.installed ? "white" : root.cBase
+                                                    Layout.preferredWidth: 132
+                                                    onClicked: {
+                                                        if (root.selectedApp && root.selectedApp.installed)
+                                                            root.enqueueUninstall(root.selectedApp)
+                                                        else
+                                                            root.openInstall(root.selectedApp)
+                                                    }
+                                                }
+                                                Label {
+                                                    // Version sits with the action, where the decision
+                                                    // is made -- it used to appear only in Sources.
+                                                    text: {
+                                                        const v = root.recommendedVariant(root.selectedApp)
+                                                        if (v && v.version)
+                                                            return v.version.charAt(0) === "v" ? v.version : "v" + v.version
+                                                        return root.selectedApp && root.selectedApp.installed ? "ON THIS SYSTEM" : "FREE"
+                                                    }
+                                                    color: root.cFg
+                                                    opacity: 0.45
+                                                    font.family: root.fontMono
+                                                    font.pixelSize: 9
+                                                    font.letterSpacing: 2
+                                                    Layout.alignment: Qt.AlignHCenter
+                                                }
+                                            }
+                                        }
                                     }
 
-                                    // Ghost monogram bleeding off the right edge.
-                                    Label {
-                                        anchors.right: parent.right
-                                        anchors.rightMargin: Math.round(24 * root.uiScale())
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        text: root.selectedApp ? root.selectedApp.name.substring(0, 1).toUpperCase() : ""
-                                        color: root.selectedApp ? root.appAccent(root.selectedApp) : root.cGreen
-                                        opacity: 0.07
-                                        font.family: root.fontBrand
-                                        font.pixelSize: Math.round(220 * root.uiScale())
-                                        font.bold: true
-                                    }
-
-                                    RowLayout {
-                                        anchors.fill: parent
-                                        anchors.margins: 28
-                                        spacing: 26
-
+                                    // Vertical stat rail beside the hero: the numbers you check before
+                                    // installing, in one column instead of a strip under the banner.
                                         Rectangle {
-                                            Layout.preferredWidth: Math.round(120 * root.uiScale())
-                                            Layout.preferredHeight: Math.round(120 * root.uiScale())
-                                            Layout.alignment: Qt.AlignVCenter
-                                            color: "transparent"
-                                            clip: true
-                                            Label {
-                                                anchors.centerIn: parent
-                                                visible: heroIcon.status !== Image.Ready
-                                                text: root.selectedApp ? root.selectedApp.name.substring(0, 1).toUpperCase() : ""
-                                                color: root.selectedApp ? root.appAccent(root.selectedApp) : root.cGreen
-                                                font.family: root.fontBrand
-                                                font.pixelSize: Math.round(54 * root.uiScale())
-                                                font.bold: true
-                                            }
-                                            Image {
-                                                id: heroIcon
-                                                anchors.fill: parent
-                                                source: root.selectedApp && root.selectedApp.icon ? root.selectedApp.icon : ""
-                                                fillMode: Image.PreserveAspectFit
-                                                asynchronous: true
-                                                cache: true
-                                                smooth: true
-                                                visible: status === Image.Ready
-                                            }
-                                        }
+                                        Layout.preferredWidth: Math.round(220 * root.uiScale())
+                                        Layout.fillHeight: true
+                                        color: root.cPanel
+                                        border.color: root.cLine
+                                        radius: 0
 
                                         ColumnLayout {
-                                            Layout.fillWidth: true
-                                            Layout.minimumWidth: 0
-                                            Layout.alignment: Qt.AlignVCenter
-                                            spacing: 8
-                                            Label {
-                                                text: root.selectedApp ? root.selectedApp.name : ""
-                                                color: root.cFg
-                                                font.family: root.fontBrand
-                                                font.pixelSize: Math.round(38 * root.uiScale())
-                                                font.bold: true
-                                                Layout.fillWidth: true
-                                                elide: Text.ElideRight
-                                            }
-                                            Label {
-                                                text: root.selectedApp ? root.selectedApp.summary : ""
-                                                color: root.cFg
-                                                opacity: 0.86
-                                                font.family: root.fontHuman
-                                                font.pixelSize: 17
-                                                wrapMode: Text.WordWrap
-                                                maximumLineCount: 2
-                                                elide: Text.ElideRight
-                                                Layout.fillWidth: true
-                                            }
-                                            Label {
-                                                text: {
+                                            anchors.fill: parent
+                                            anchors.margins: 16
+                                            spacing: 0
+
+                                            Repeater {
+                                                model: {
                                                     const v = root.recommendedVariant(root.selectedApp)
-                                                    if (!v) return "Free"
-                                                    return "Free · " + root.sourceLabel(v.source) + " · " + root.formatLabel(v.source)
+                                                    return [
+                                                        { t: "RATING",    val: (root.selectedApp && root.selectedApp.rating) ? Math.round(root.selectedApp.rating) + "\u2605" : "\u2014" },
+                                                        { t: "TRUST",     val: v ? root.trustLabel(v.trust) : "\u2014" },
+                                                        { t: "SOURCE",    val: v ? root.sourceLabel(v.source) : "\u2014" },
+                                                        { t: "DEVELOPER", val: root.compactDeveloper(root.selectedApp) || "\u2014" },
+                                                        { t: "SIZE",      val: root.sizeLabel(root.selectedApp) }
+                                                    ]
                                                 }
-                                                color: root.cFg
-                                                opacity: 0.62
-                                                font.family: root.fontMono
-                                                font.pixelSize: 12
-                                                font.letterSpacing: 1
-                                                Layout.fillWidth: true
-                                                elide: Text.ElideRight
-                                            }
-                                        }
-
-                                        // Primary action lives in the hero, Apple-style.
-                                        ColumnLayout {
-                                            Layout.alignment: Qt.AlignVCenter
-                                            spacing: 6
-                                            ActionButton {
-                                                label: root.selectedApp && root.selectedApp.installed ? "Uninstall" : "Get"
-                                                fill: root.selectedApp && root.selectedApp.installed ? root.cRed : root.cGreen
-                                                textColor: root.selectedApp && root.selectedApp.installed ? "white" : root.cBase
-                                                Layout.preferredWidth: 132
-                                                onClicked: {
-                                                    if (root.selectedApp && root.selectedApp.installed)
-                                                        root.enqueueUninstall(root.selectedApp)
-                                                    else
-                                                        root.openInstall(root.selectedApp)
+                                                delegate: ColumnLayout {
+                                                    Layout.fillWidth: true
+                                                    Layout.fillHeight: true
+                                                    spacing: 1
+                                                    Label {
+                                                        text: modelData.t
+                                                        color: root.cMuted
+                                                        font.family: root.fontMono
+                                                        font.pixelSize: 9
+                                                        font.letterSpacing: 1.5
+                                                    }
+                                                    Label {
+                                                        text: modelData.val
+                                                        color: root.cFg
+                                                        font.family: root.fontBrand
+                                                        font.pixelSize: Math.round(15 * root.uiScale())
+                                                        font.bold: true
+                                                        elide: Text.ElideRight
+                                                        Layout.fillWidth: true
+                                                    }
                                                 }
-                                            }
-                                            Label {
-                                                text: root.selectedApp && root.selectedApp.installed ? "ON THIS SYSTEM" : "FREE"
-                                                color: root.cFg
-                                                opacity: 0.45
-                                                font.family: root.fontMono
-                                                font.pixelSize: 9
-                                                font.letterSpacing: 2
-                                                Layout.alignment: Qt.AlignHCenter
                                             }
                                         }
                                     }
                                 }
 
-                                // App information strip — Apple-style metric row in the space under the banner.
+                                // Developer / licence / homepage / identifier on one line. These are
+                                // reference details, not headline numbers, so they get a strip rather
+                                // than a panel of their own.
                                 Rectangle {
                                     Layout.fillWidth: true
-                                    Layout.preferredHeight: 78
+                                    Layout.preferredHeight: 56
                                     color: root.cPanel
                                     border.color: root.cLine
                                     radius: 0
+                                    visible: root.selectedApp !== null
 
                                     RowLayout {
                                         anchors.fill: parent
@@ -2328,57 +2445,43 @@ ShellRoot {
                                         spacing: 0
 
                                         Repeater {
-                                            model: {
-                                                const v = root.recommendedVariant(root.selectedApp)
-                                                return [
-                                                    { t: "RATING",    val: (root.selectedApp && root.selectedApp.rating) ? Math.round(root.selectedApp.rating) + "★" : "—",           cap: "Catalog" },
-                                                    { t: "TRUST",     val: v ? root.trustLabel(v.trust) : "—",                                                                             cap: v && v.verified ? "Verified" : "Metadata" },
-                                                    { t: "SOURCE",    val: v ? root.sourceLabel(v.source) : "—",                                                                            cap: "Recommended" },
-                                                    { t: "DEVELOPER", val: (root.selectedApp && root.selectedApp.developer) ? root.selectedApp.developer : "—",                            cap: "Publisher" },
-                                                    { t: "VERSION",   val: v ? (v.version || "—") : "—",                                                                                    cap: "Latest" },
-                                                    { t: "SIZE",      val: root.sizeLabel(root.selectedApp),                                                                                cap: "Download" }
-                                                ]
-                                            }
+                                            model: [
+                                                { t: "DEVELOPER",  val: root.compactDeveloper(root.selectedApp) },
+                                                { t: "LICENSE",    val: root.selectedApp && root.selectedApp.license ? root.selectedApp.license : "\u2014" },
+                                                { t: "HOMEPAGE",   val: root.selectedApp && root.selectedApp.homepage ? root.selectedApp.homepage : "\u2014" },
+                                                { t: "IDENTIFIER", val: root.selectedApp ? root.selectedApp.id : "\u2014" }
+                                            ]
                                             delegate: RowLayout {
                                                 Layout.fillWidth: true
                                                 Layout.fillHeight: true
                                                 spacing: 0
-
                                                 ColumnLayout {
                                                     Layout.fillWidth: true
+                                                    Layout.minimumWidth: 0
                                                     Layout.alignment: Qt.AlignVCenter
-                                                    spacing: 3
+                                                    spacing: 2
                                                     Label {
                                                         text: modelData.t
                                                         color: root.cMuted
                                                         font.family: root.fontMono
-                                                        font.pixelSize: 10
+                                                        font.pixelSize: 9
                                                         font.letterSpacing: 1.5
-                                                        Layout.alignment: Qt.AlignHCenter
                                                     }
                                                     Label {
-                                                        text: modelData.val
+                                                        text: modelData.val || "\u2014"
                                                         color: root.cFg
-                                                        font.family: root.fontBrand
-                                                        font.pixelSize: 17
-                                                        font.bold: true
+                                                        font.family: root.fontMono
+                                                        font.pixelSize: 11
                                                         elide: Text.ElideRight
-                                                        horizontalAlignment: Text.AlignHCenter
                                                         Layout.fillWidth: true
-                                                        Layout.maximumWidth: 140
-                                                    }
-                                                    Label {
-                                                        text: modelData.cap
-                                                        color: root.cMuted
-                                                        font.family: root.fontHuman
-                                                        font.pixelSize: 10
-                                                        Layout.alignment: Qt.AlignHCenter
                                                     }
                                                 }
                                                 Rectangle {
-                                                    visible: index < 5
+                                                    visible: index < 3
                                                     Layout.preferredWidth: 1
-                                                    Layout.preferredHeight: 40
+                                                    Layout.preferredHeight: 28
+                                                    Layout.rightMargin: 14
+                                                    Layout.leftMargin: 14
                                                     Layout.alignment: Qt.AlignVCenter
                                                     color: root.cLine
                                                 }
@@ -2387,76 +2490,139 @@ ShellRoot {
                                     }
                                 }
 
-                                // Preview — screenshot gallery, App Store proportions.
-                                ColumnLayout {
+                                // Preview and composition share a row: a wide gallery beside a compact
+                                // language breakdown, rather than two full-width bands stacked.
+                                RowLayout {
                                     Layout.fillWidth: true
-                                    spacing: 10
-                                    visible: root.selectedApp && root.selectedApp.screenshots && root.selectedApp.screenshots.length > 0
+                                    spacing: 14
+                                    visible: (root.selectedApp && root.selectedApp.screenshots && root.selectedApp.screenshots.length > 0)
+                                             || (root.selectedApp && root.selectedApp.languages && root.selectedApp.languages.length > 0)
 
-                                    HudRailHeader { title: "Preview" }
-
-                                    ListView {
+                                    ColumnLayout {
                                         Layout.fillWidth: true
-                                        Layout.preferredHeight: Math.round(210 * root.uiScale())
-                                        orientation: ListView.Horizontal
-                                        snapMode: ListView.SnapToItem
-                                        clip: true
-                                        spacing: 14
-                                        model: root.selectedApp ? root.selectedApp.screenshots : []
-                                        delegate: Rectangle {
-                                            width: Math.round(348 * root.uiScale())
-                                            height: Math.round(210 * root.uiScale())
-                                            color: root.cDim
-                                            border.color: root.cLine
-                                            radius: 0
+                                        Layout.minimumWidth: 0
+                                        spacing: 10
+                                        visible: root.selectedApp && root.selectedApp.screenshots && root.selectedApp.screenshots.length > 0
+
+                                        HudRailHeader { title: "Preview" }
+
+                                        ListView {
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: Math.round(210 * root.uiScale())
+                                            orientation: ListView.Horizontal
+                                            snapMode: ListView.SnapToItem
                                             clip: true
-                                            Image {
-                                                id: shotImg
-                                                anchors.fill: parent
-                                                anchors.margins: 1
-                                                source: modelData
-                                                fillMode: Image.PreserveAspectCrop
-                                                asynchronous: true
-                                                cache: true
-                                                visible: status === Image.Ready
-                                            }
-                                            Label {
-                                                anchors.centerIn: parent
-                                                visible: shotImg.status !== Image.Ready
-                                                text: "…"
-                                                color: root.cMuted
-                                                font.family: root.fontMono
-                                                font.pixelSize: 14
+                                            spacing: 14
+                                            model: root.selectedApp ? root.selectedApp.screenshots : []
+                                            delegate: Rectangle {
+                                                width: Math.round(300 * root.uiScale())
+                                                height: Math.round(210 * root.uiScale())
+                                                color: root.cDim
+                                                border.color: shotHover.hovered ? root.cGreen : root.cLine
+                                                radius: 0
+                                                clip: true
+                                                HoverHandler { id: shotHover }
+                                                Behavior on border.color { ColorAnimation { duration: 140 } }
+                                                Image {
+                                                    id: shotImg
+                                                    anchors.fill: parent
+                                                    anchors.margins: 1
+                                                    source: modelData
+                                                    fillMode: Image.PreserveAspectCrop
+                                                    asynchronous: true
+                                                    cache: true
+                                                    visible: status === Image.Ready
+                                                }
+                                                Label {
+                                                    anchors.centerIn: parent
+                                                    visible: shotImg.status !== Image.Ready
+                                                    text: "\u2026"
+                                                    color: root.cMuted
+                                                    font.family: root.fontMono
+                                                    font.pixelSize: 14
+                                                }
+                                                // Cropped thumbnails cut the screenshot; clicking opens the
+                                                // whole thing over the page.
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: root.viewerSource = modelData
+                                                }
                                             }
                                         }
                                     }
-                                }
 
-                                // About — full description.
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 10
-                                    visible: root.selectedApp && root.selectedApp.description && root.selectedApp.description.length > 0
-
-                                    HudRailHeader { title: "About" }
-
-                                    Rectangle {
+                                    // Absorbs the slack when there are no screenshots, so the
+                                    // composition panel stays a right-hand panel instead of
+                                    // stretching across the page with a ring stranded in it.
+                                    Item {
                                         Layout.fillWidth: true
-                                        color: root.cPanel
-                                        border.color: root.cLine
-                                        radius: 0
-                                        implicitHeight: aboutText.implicitHeight + 36
-                                        Label {
-                                            id: aboutText
-                                            anchors.fill: parent
-                                            anchors.margins: 18
-                                            text: root.selectedApp && root.selectedApp.description ? root.selectedApp.description : ""
-                                            color: root.cFg
-                                            opacity: 0.9
-                                            font.family: root.fontHuman
-                                            font.pixelSize: 14
-                                            lineHeight: 1.3
-                                            wrapMode: Text.WordWrap
+                                        visible: !(root.selectedApp && root.selectedApp.screenshots && root.selectedApp.screenshots.length > 0)
+                                    }
+
+                                    ColumnLayout {
+                                        Layout.preferredWidth: Math.round(330 * root.uiScale())
+                                        Layout.maximumWidth: Math.round(330 * root.uiScale())
+                                        spacing: 10
+                                        visible: root.selectedApp && root.selectedApp.languages && root.selectedApp.languages.length > 0
+
+                                        HudRailHeader { title: "Composition"; sub: "languages" }
+
+                                        Rectangle {
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: Math.round(210 * root.uiScale())
+                                            color: root.cPanel
+                                            border.color: root.cLine
+                                            radius: 0
+
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                anchors.margins: 16
+                                                spacing: 12
+
+                                                // Index first, ring second -- the names are what is read.
+                                                ColumnLayout {
+                                                    Layout.fillWidth: true
+                                                    Layout.minimumWidth: 0
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    spacing: 5
+                                                    Repeater {
+                                                        model: root.selectedApp ? root.selectedApp.languages.slice(0, 6) : []
+                                                        delegate: RowLayout {
+                                                            Layout.fillWidth: true
+                                                            spacing: 6
+                                                            Rectangle {
+                                                                width: 8; height: 8; radius: 0
+                                                                color: root.langColor(index)
+                                                                Layout.alignment: Qt.AlignVCenter
+                                                            }
+                                                            Label {
+                                                                text: modelData.name
+                                                                color: root.cFg
+                                                                font.family: root.fontHuman
+                                                                font.pixelSize: 11
+                                                                elide: Text.ElideRight
+                                                                Layout.fillWidth: true
+                                                                Layout.minimumWidth: 0
+                                                            }
+                                                            Label {
+                                                                text: modelData.percent.toFixed(1) + "%"
+                                                                color: root.cMuted
+                                                                font.family: root.fontMono
+                                                                font.pixelSize: 10
+                                                                Layout.alignment: Qt.AlignVCenter
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                LangRing {
+                                                    Layout.preferredWidth: Math.round(120 * root.uiScale())
+                                                    Layout.preferredHeight: Math.round(120 * root.uiScale())
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    languages: root.selectedApp ? root.selectedApp.languages : []
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -2534,111 +2700,6 @@ ShellRoot {
                                                     Layout.alignment: Qt.AlignVCenter
                                                 }
                                             }
-                                        }
-                                    }
-                                }
-
-                                // Composition — GitHub linguist breakdown, stacked bar + legend.
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 10
-                                    visible: root.selectedApp && root.selectedApp.languages && root.selectedApp.languages.length > 0
-
-                                    HudRailHeader { title: "Composition"; sub: "source languages" }
-
-                                    Rectangle {
-                                        Layout.fillWidth: true
-                                        color: root.cPanel
-                                        border.color: root.cLine
-                                        radius: 0
-                                        implicitHeight: langCol.implicitHeight + 36
-
-                                        ColumnLayout {
-                                            id: langCol
-                                            anchors.left: parent.left
-                                            anchors.right: parent.right
-                                            anchors.top: parent.top
-                                            anchors.margins: 18
-                                            spacing: 14
-
-                                            Item {
-                                                id: langBar
-                                                Layout.fillWidth: true
-                                                height: 10
-                                                Row {
-                                                    anchors.fill: parent
-                                                    spacing: 2
-                                                    Repeater {
-                                                        model: root.selectedApp ? root.selectedApp.languages : []
-                                                        delegate: Rectangle {
-                                                            height: 10
-                                                            width: Math.max(3, (langBar.width - (root.selectedApp.languages.length - 1) * 2) * modelData.percent / 100)
-                                                            color: root.langColor(index)
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            Flow {
-                                                Layout.fillWidth: true
-                                                spacing: 18
-                                                Repeater {
-                                                    model: root.selectedApp ? root.selectedApp.languages : []
-                                                    delegate: Row {
-                                                        spacing: 7
-                                                        Rectangle {
-                                                            width: 8; height: 8; radius: 0
-                                                            color: root.langColor(index)
-                                                            anchors.verticalCenter: parent.verticalCenter
-                                                        }
-                                                        Label {
-                                                            text: modelData.name
-                                                            color: root.cFg
-                                                            font.family: root.fontHuman
-                                                            font.pixelSize: 12
-                                                            font.bold: true
-                                                            anchors.verticalCenter: parent.verticalCenter
-                                                        }
-                                                        Label {
-                                                            text: modelData.percent.toFixed(1) + "%"
-                                                            color: root.cMuted
-                                                            font.family: root.fontMono
-                                                            font.pixelSize: 11
-                                                            anchors.verticalCenter: parent.verticalCenter
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Information — metadata readout.
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 10
-                                    visible: root.selectedApp !== null
-
-                                    HudRailHeader { title: "Information" }
-
-                                    Rectangle {
-                                        Layout.fillWidth: true
-                                        color: root.cPanel
-                                        border.color: root.cLine
-                                        radius: 0
-                                        implicitHeight: infoCol.implicitHeight + 36
-
-                                        ColumnLayout {
-                                            id: infoCol
-                                            anchors.left: parent.left
-                                            anchors.right: parent.right
-                                            anchors.top: parent.top
-                                            anchors.margins: 18
-                                            spacing: 10
-                                            StatRow { name: "Developer"; value: root.compactDeveloper(root.selectedApp) }
-                                            StatRow { name: "License"; value: root.selectedApp && root.selectedApp.license ? root.selectedApp.license : "" }
-                                            StatRow { name: "Homepage"; value: root.selectedApp && root.selectedApp.homepage ? root.selectedApp.homepage : "" }
-                                            StatRow { name: "Identifier"; value: root.selectedApp ? root.selectedApp.id : "" }
                                         }
                                     }
                                 }
@@ -3423,6 +3484,46 @@ ShellRoot {
 
                 }
 
+            }
+
+            // Screenshot viewer. Gallery thumbnails are cropped to a fixed
+            // aspect, so the only way to see a whole screenshot is to open it.
+            // Click anywhere or press Escape to close.
+            Rectangle {
+                anchors.fill: parent
+                visible: root.viewerSource !== ""
+                color: "#e8060607"
+                z: 940
+
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: root.viewerSource = ""
+                }
+
+                Image {
+                    anchors.centerIn: parent
+                    width: Math.min(parent.width - 80, sourceSize.width > 0 ? sourceSize.width : parent.width - 80)
+                    height: Math.min(parent.height - 120, sourceSize.height > 0 ? sourceSize.height : parent.height - 120)
+                    source: root.viewerSource
+                    fillMode: Image.PreserveAspectFit
+                    asynchronous: true
+                    cache: true
+                    smooth: true
+                }
+
+                Label {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 34
+                    text: "CLICK ANYWHERE TO CLOSE"
+                    color: root.cMuted
+                    font.family: root.fontMono
+                    font.pixelSize: 10
+                    font.letterSpacing: 2
+                }
+
+                Keys.onEscapePressed: root.viewerSource = ""
+                focus: root.viewerSource !== ""
             }
 
             // First-launch setup — three-step brand walkthrough, shown once.
