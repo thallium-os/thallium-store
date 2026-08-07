@@ -21,6 +21,8 @@ ShellRoot {
     property string activeMethod: ""
     property string status: "Starting backend"
     property string activeView: "discover"
+    // Updates start capped at two rows on the Apps page; the header toggles it.
+    property bool updatesExpanded: false
     property bool fakeUniMode: true
     property string uniHealth: ""
     property int activityFrame: 0
@@ -2992,9 +2994,38 @@ ShellRoot {
                                 spacing: 8
                                 visible: root.updateItems.length > 0
 
-                                HudRailHeader {
-                                    title: "Updates"
-                                    sub: root.updateItems.length + " available"
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+
+                                    HudRailHeader {
+                                        Layout.fillWidth: true
+                                        title: "Updates"
+                                        sub: root.updateItems.length + " available"
+                                    }
+
+                                    // Two rows is a deliberate cap so the section does not
+                                    // bury the installed apps, but "7 available" above four
+                                    // visible cards, with nothing to say the rest exist, is
+                                    // just wrong. This says how many are hidden and shows them.
+                                    Label {
+                                        visible: root.updateItems.length > updatesGrid.columns * 2
+                                        text: root.updatesExpanded
+                                              ? "SHOW LESS"
+                                              : "SHOW ALL " + root.updateItems.length
+                                        color: updatesToggle.hovered ? root.cFg : root.cGreen
+                                        font.family: root.fontMono
+                                        font.pixelSize: 10
+                                        font.letterSpacing: 2
+                                        Layout.alignment: Qt.AlignVCenter
+                                        HoverHandler { id: updatesToggle }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            anchors.margins: -8
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.updatesExpanded = !root.updatesExpanded
+                                        }
+                                    }
                                 }
 
                             ScrollView {
@@ -3003,7 +3034,10 @@ ShellRoot {
                                 // partial row -- a card cut through the middle reads as a
                                 // rendering fault, not as "there is more below".
                                 Layout.preferredHeight: Math.round(142 * root.uiScale())
-                                    * Math.min(2, Math.ceil(root.updateItems.length / updatesGrid.columns))
+                                    * (root.updatesExpanded
+                                       ? Math.ceil(root.updateItems.length / updatesGrid.columns)
+                                       : Math.min(2, Math.ceil(root.updateItems.length / updatesGrid.columns)))
+                                Behavior on Layout.preferredHeight { NumberAnimation { duration: root.tMed; easing.type: Easing.OutCubic } }
                                 clip: true
                                 visible: root.updateItems.length > 0
 
