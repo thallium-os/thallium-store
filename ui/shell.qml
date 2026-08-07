@@ -2241,7 +2241,11 @@ ShellRoot {
 
                                     Rectangle {
                                         Layout.fillWidth: true
-                                        height: Math.max(188, Math.round(210 * root.uiScale()))
+                                        // fillHeight, not height: a RowLayout ignores plain height,
+                                        // so the hero sized itself to its own text while the stat
+                                        // rail beside it filled the row -- two different heights,
+                                        // and a gap under the hero that changed with every app.
+                                        Layout.fillHeight: true
                                         radius: 0
                                         clip: true
                                         color: root.cPanel
@@ -2507,6 +2511,12 @@ ShellRoot {
                                         HudRailHeader { title: "Preview" }
 
                                         ListView {
+                                            id: shotList
+                                            // Cards tile the row exactly. A fixed card width left
+                                            // whatever did not divide evenly sliced down the middle
+                                            // at the right edge, and the slice moved with the window.
+                                            readonly property int columns: Math.max(1, Math.round(width / Math.round(314 * root.uiScale())))
+                                            readonly property int cardWidth: Math.floor((width - spacing * (columns - 1)) / columns)
                                             Layout.fillWidth: true
                                             Layout.preferredHeight: Math.round(210 * root.uiScale())
                                             orientation: ListView.Horizontal
@@ -2515,7 +2525,7 @@ ShellRoot {
                                             spacing: 14
                                             model: root.selectedApp ? root.selectedApp.screenshots : []
                                             delegate: Rectangle {
-                                                width: Math.round(300 * root.uiScale())
+                                                width: shotList.cardWidth
                                                 height: Math.round(210 * root.uiScale())
                                                 color: root.cDim
                                                 border.color: shotHover.hovered ? root.cGreen : root.cLine
