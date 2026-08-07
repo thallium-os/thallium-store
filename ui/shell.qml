@@ -1317,6 +1317,10 @@ ShellRoot {
                         anchors.right: parent.right
                         anchors.rightMargin: 20
                         anchors.verticalCenter: parent.verticalCenter
+                        // No resting magnifier in the corner: SEARCH is a nav tab now,
+                        // so the icon was a second, quieter control for the same thing.
+                        // The field appears when that tab puts the view on search.
+                        visible: expanded
                         width: expanded ? Math.min(640, Math.round(window.width * 0.42)) : 36
                         height: 36
                         z: 10
@@ -1395,15 +1399,6 @@ ShellRoot {
                             }
                         }
 
-                        MouseArea {
-                            visible: !searchBox.expanded
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                root.activeView = "search"
-                                searchField.forceActiveFocus()
-                            }
-                        }
                     }
                 }
 
