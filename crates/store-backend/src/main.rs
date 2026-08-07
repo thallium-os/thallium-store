@@ -221,6 +221,29 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
     std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!("listening on {}", socket_path.display());
 
+    // Take the socket file with us on the way out. The UI owns this process and
+    // kills it when its window closes, which otherwise leaves a socket nobody
+    // is listening on -- and the next launch spends its startup connecting to
+    // that corpse and printing "connection refused" over the splash screen.
+    {
+        let socket_path = socket_path.clone();
+        tokio::spawn(async move {
+            let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(sig) => sig,
+                Err(err) => {
+                    tracing::warn!("cannot watch for SIGTERM: {err}");
+                    return;
+                }
+            };
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+            let _ = std::fs::remove_file(&socket_path);
+            std::process::exit(0);
+        });
+    }
+
     loop {
         let (stream, _) = listener.accept().await?;
         let state = state.clone();
@@ -666,8 +689,10 @@ async fn client_request(socket_path: &Path, method: &str, params: &str) -> Resul
 
 async fn connect_with_retry(socket_path: &Path) -> Result<UnixStream> {
     let mut last_error = None;
+    let mut refusals = 0;
+    let mut swept = false;
 
-    for _ in 0..30 {
+    for _ in 0..60 {
         match UnixStream::connect(socket_path).await {
             Ok(stream) => return Ok(stream),
             Err(err)
@@ -676,6 +701,21 @@ async fn connect_with_retry(socket_path: &Path) -> Result<UnixStream> {
                     ErrorKind::NotFound | ErrorKind::ConnectionRefused | ErrorKind::WouldBlock
                 ) =>
             {
+                // ConnectionRefused on a unix socket means the file is there and
+                // nobody is behind it: the daemon was killed without cleaning up,
+                // which is exactly what happens when the UI exits and takes its
+                // child with it. Retrying that forever just spells the corpse's
+                // error onto the splash screen. Unlink it once -- after a few
+                // refusals, so a daemon binding this instant is not disturbed --
+                // and let the next attempt find the socket the UI's backend
+                // process is about to create.
+                if err.kind() == ErrorKind::ConnectionRefused {
+                    refusals += 1;
+                    if refusals >= 3 && !swept {
+                        swept = true;
+                        let _ = tokio::fs::remove_file(socket_path).await;
+                    }
+                }
                 last_error = Some(err);
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
