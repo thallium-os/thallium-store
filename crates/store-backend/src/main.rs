@@ -356,6 +356,9 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
             let readiness = state.uni.native_readiness();
             Ok(json!({
                 "status": "ready",
+                // The UI used to print a hardcoded version string, which had
+                // drifted five releases behind the package it shipped in.
+                "version": env!("CARGO_PKG_VERSION"),
                 "fakeUni": state.fake_uni,
                 "mode": if state.fake_uni { "fake" } else { "real-json" },
                 "apt": readiness.apt,

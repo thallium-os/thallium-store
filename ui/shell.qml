@@ -25,6 +25,7 @@ ShellRoot {
     property bool updatesExpanded: false
     property bool fakeUniMode: true
     property string uniHealth: ""
+    property string storeVersion: ""
     property int activityFrame: 0
     property var searchCache: ({})
     property string activeSearchQuery: ""
@@ -726,6 +727,7 @@ ShellRoot {
                     } else if (result.status !== undefined) {
                         root.fakeUniMode = result.fakeUni === true
                         root.uniHealth = result.uni || ""
+                        root.storeVersion = result.version || ""
                         root.status = result.status + " - " + result.uni
                     }
                 } catch (err) {
@@ -2801,10 +2803,12 @@ ShellRoot {
                                             anchors.top: parent.top
                                             anchors.margins: 18
                                             spacing: 10
-                                            StatRow { name: "Version"; value: "0.1.0 · MVP" }
+                                            // Version comes from the backend's own crate version.
+                                            // It was a literal here and had been reading 0.1.0 for
+                                            // five releases; "MVP" outlived the MVP.
+                                            StatRow { name: "Version"; value: root.storeVersion || "—" }
                                             StatRow { name: "Backend"; value: "UNI " + (root.fakeUniMode ? "simulated (fake mode)" : (root.uniHealth || "connected")) }
                                             StatRow { name: "Sources"; value: "APT · Flathub · GitHub · AppImage" }
-                                            StatRow { name: "Design"; value: "Thallium 81 · Everforest" }
                                         }
                                     }
 
