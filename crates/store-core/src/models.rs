@@ -47,6 +47,11 @@ pub struct CanonicalApp {
     pub license: Option<String>,
     pub repository: Option<String>,
     pub rating: Option<f32>,
+    /// GitHub repository that is itself a fork. Search ranks forks below the
+    /// upstream they copy: a fork with a handful of stars is almost never what
+    /// someone typing the project's name is looking for.
+    #[serde(default)]
+    pub fork: bool,
     #[serde(default)]
     pub tags: Vec<String>,
     pub icon: Option<String>,

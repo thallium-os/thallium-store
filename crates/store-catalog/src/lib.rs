@@ -275,14 +275,39 @@ impl CatalogManager {
             }
         };
 
+        // The language breakdown used to run only after every lookup above had
+        // finished, adding a whole GitHub round-trip to the end of the page.
+        // When the repo is already known -- an explicit repository, or a GitHub
+        // variant -- it can be fetched alongside them instead. Repos that only
+        // turn up via Flathub metadata still take the slower path below.
+        let early_repo = if app.languages.is_empty() {
+            app.repository.clone().or_else(|| {
+                variants
+                    .iter()
+                    .find(|v| v.source == SourceKind::Github)
+                    .map(|v| v.package_id.clone())
+            })
+        } else {
+            None
+        };
+        let langs_fut = async {
+            match &early_repo {
+                Some(repo) => github_languages(repo).await,
+                None => None,
+            }
+        };
+
         let mut infos: Vec<Option<PackageInfo>> = (0..variants.len()).map(|_| None).collect();
-        let (meta, ()) = tokio::join!(meta_fut, async {
+        let (meta, early_langs, ()) = tokio::join!(meta_fut, langs_fut, async {
             while let Some(res) = info_set.join_next().await {
                 if let Ok((i, info)) = res {
                     infos[i] = info;
                 }
             }
         });
+        if let Some(langs) = early_langs {
+            app.languages = langs;
+        }
 
         let mut enriched_variants = Vec::with_capacity(variants.len());
         for (mut variant, info) in variants.into_iter().zip(infos) {
@@ -1030,6 +1055,7 @@ fn github_repo_to_app(item: &Value) -> Option<CanonicalApp> {
         .get("stargazers_count")
         .and_then(Value::as_f64)
         .map(|stars| stars as f32);
+    app.fork = item.get("fork").and_then(Value::as_bool).unwrap_or(false);
 
     let mut tags = default_tags(SourceKind::Github, name, summary);
     if let Some(topics) = item.get("topics").and_then(Value::as_array) {
@@ -1227,9 +1253,18 @@ async fn github_languages(repo: &str) -> Option<Vec<LanguageStat>> {
 async fn github_info(package_id: &str) -> Option<PackageInfo> {
     let (owner, repo) = package_id.split_once('/')?;
 
-    let repo_json = github_json(format!("https://api.github.com/repos/{owner}/{repo}"))
-        .await
-        .ok()?;
+    // Both calls go out together. Serially this was two round-trips to
+    // api.github.com before the page could show a version, and the release
+    // lookup does not need anything the repo lookup returns. Cost of the
+    // change: a repo that 404s now spends a second request against the 60/hr
+    // anonymous budget -- rare, since these ids come from search results.
+    let (repo_res, release_res) = tokio::join!(
+        github_json(format!("https://api.github.com/repos/{owner}/{repo}")),
+        github_json(format!(
+            "https://api.github.com/repos/{owner}/{repo}/releases/latest"
+        )),
+    );
+    let repo_json = repo_res.ok()?;
 
     let mut info = PackageInfo {
         description: repo_json
@@ -1257,11 +1292,7 @@ async fn github_info(package_id: &str) -> Option<PackageInfo> {
         ..Default::default()
     };
 
-    if let Ok(release_json) = github_json(format!(
-        "https://api.github.com/repos/{owner}/{repo}/releases/latest"
-    ))
-    .await
-    {
+    if let Ok(release_json) = release_res {
         info.version = release_json
             .get("tag_name")
             .and_then(Value::as_str)
@@ -1430,8 +1461,26 @@ fn dedupe_variants(variants: &mut Vec<AppVariant>) {
     *variants = unique;
 }
 
+/// Relevance first, then popularity. Text/source scoring puts a handful of
+/// results in the same bucket and used to leave them in provider order, which
+/// for GitHub is whatever the search API felt like returning -- a 40-star fork
+/// could sit above the 30k-star project it copied. Within a bucket: forks go
+/// last, then more stars wins.
 fn sort_results(apps: &mut [CanonicalApp], query: &str) {
-    apps.sort_by_key(|app| result_score(app, query));
+    apps.sort_by(|a, b| {
+        result_score(a, query)
+            .cmp(&result_score(b, query))
+            // false < true, so non-forks come first.
+            .then_with(|| a.fork.cmp(&b.fork))
+            .then_with(|| popularity(b).total_cmp(&popularity(a)))
+    });
+}
+
+/// Stars for GitHub, Flathub's own rating otherwise. Only ever compared inside
+/// one relevance bucket, and `result_score` folds the source in, so the two
+/// scales are never weighed against each other.
+fn popularity(app: &CanonicalApp) -> f32 {
+    app.rating.unwrap_or(0.0)
 }
 
 fn result_score(app: &CanonicalApp, query: &str) -> u16 {
@@ -1590,6 +1639,7 @@ fn single_variant_app(
         license: None,
         repository: None,
         rating: None,
+        fork: false,
         tags: default_tags(source, name, summary),
         icon: None,
         screenshots: Vec::new(),
@@ -1721,6 +1771,39 @@ mod tests {
         assert_eq!(variant.source, SourceKind::Github);
         assert_eq!(variant.package_id, "zed-industries/zed");
         assert_eq!(variant.repository.as_deref(), Some("zed-industries/zed"));
+    }
+
+    #[test]
+    fn github_search_results_rank_by_stars_with_forks_last() {
+        let repo = |full_name: &str, stars: f64, fork: bool| {
+            github_repo_to_app(&serde_json::json!({
+                "full_name": full_name,
+                "name": full_name.split('/').next_back().unwrap(),
+                "description": "code editor",
+                "stargazers_count": stars,
+                "fork": fork,
+            }))
+            .expect("mapping should succeed")
+        };
+
+        // Deliberately worst-case input order: the fork first, the popular
+        // upstream last -- which is what the search API can hand back.
+        let mut apps = vec![
+            repo("randomdev/zed", 40.0, true),
+            repo("someone/zed", 900.0, false),
+            repo("zed-industries/zed", 42000.0, false),
+        ];
+        sort_results(&mut apps, "zed");
+
+        let order: Vec<&str> = apps.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "github:zed-industries/zed",
+                "github:someone/zed",
+                "github:randomdev/zed",
+            ]
+        );
     }
 
     #[test]
