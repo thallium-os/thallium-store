@@ -1,7 +1,8 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::path::Path;
-use store_core::{Operation, OperationLog};
+use chrono::Utc;
+use store_core::{Operation, OperationLog, OperationState};
 
 pub struct StoreDb {
     conn: Connection,
@@ -73,6 +74,32 @@ impl StoreDb {
             operations.push(serde_json::from_str(&row?)?);
         }
         Ok(operations)
+    }
+
+    /// Mark every operation left mid-flight by a previous run as cancelled.
+    ///
+    /// Nothing survives the process that was driving it: the child was killed
+    /// with the backend, so an operation still recorded as Downloading or
+    /// Installing at startup is a corpse. Left alone it shows up in Activity as
+    /// a live install with a progress bar that never moves and a Cancel button
+    /// that cancels nothing. Returns how many were reaped.
+    pub fn reap_orphaned_operations(&self) -> Result<usize> {
+        let mut reaped = 0;
+        for mut op in self.list_operations()? {
+            let terminal = matches!(
+                op.state,
+                OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
+            );
+            if terminal {
+                continue;
+            }
+            op.state = OperationState::Cancelled;
+            op.message = "interrupted by a backend restart".to_string();
+            op.updated_at = Utc::now();
+            self.upsert_operation(&op)?;
+            reaped += 1;
+        }
+        Ok(reaped)
     }
 
     pub fn get_operation(&self, id: &str) -> Result<Option<Operation>> {

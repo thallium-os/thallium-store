@@ -1314,8 +1314,9 @@ ShellRoot {
                         id: searchBox
                         readonly property bool expanded: searchField.activeFocus
                             || root.query.length > 0 || root.activeView === "search"
-                        anchors.right: parent.right
-                        anchors.rightMargin: 20
+                        // Centred: it opens over the nav row, in the same place the eye
+                        // already is, rather than off in the corner the icon used to sit in.
+                        anchors.horizontalCenter: parent.horizontalCenter
                         anchors.verticalCenter: parent.verticalCenter
                         // No resting magnifier in the corner: SEARCH is a nav tab now,
                         // so the icon was a second, quieter control for the same thing.
@@ -2984,12 +2985,10 @@ ShellRoot {
                             // pending, so the page stays about installed apps.
                             ColumnLayout {
                                 Layout.fillWidth: true
-                                // Two full rows, then scroll. A fixed height cut the second
-                                // row of cards in half, which reads as a rendering fault
-                                // rather than as more content below.
-                                Layout.preferredHeight: root.updateItems.length > 0
-                                    ? Math.round(142 * root.uiScale()) * Math.min(2, Math.ceil(root.updateItems.length / 2)) + 34
-                                    : 0
+                                // Height comes from the grid below, which is sized to whole
+                                // rows. Setting it here meant guessing the header's height and
+                                // being wrong by exactly enough to slice the next row of cards
+                                // in half.
                                 spacing: 8
                                 visible: root.updateItems.length > 0
 
@@ -3000,19 +2999,21 @@ ShellRoot {
 
                             ScrollView {
                                 Layout.fillWidth: true
-                                Layout.fillHeight: true
+                                // Exactly two rows of cards, scrolled for the rest. Never a
+                                // partial row -- a card cut through the middle reads as a
+                                // rendering fault, not as "there is more below".
+                                Layout.preferredHeight: Math.round(142 * root.uiScale())
+                                    * Math.min(2, Math.ceil(root.updateItems.length / updatesGrid.columns))
                                 clip: true
                                 visible: root.updateItems.length > 0
 
                                 GridView {
                                     id: updatesGrid
+                                    readonly property int columns: Math.max(1, Math.floor(width / 320))
                                     width: parent.width
                                     height: parent.height
                                     model: root.updateItems
-                                    cellWidth: {
-                                        const columns = Math.max(1, Math.floor(width / 320))
-                                        return Math.floor(width / columns)
-                                    }
+                                    cellWidth: Math.floor(width / columns)
                                     cellHeight: Math.round(142 * root.uiScale())
                                     delegate: Rectangle {
                                         id: updateCard

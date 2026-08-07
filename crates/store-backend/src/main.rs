@@ -178,13 +178,24 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
         }
     }
 
-    let fake_uni =
-        std::env::var("THALLIUM_STORE_FAKE_UNI").unwrap_or_else(|_| "1".to_string()) != "0";
+    // Simulation is opt-in. It used to be the default, so a backend started
+    // without the wrapper script -- by hand, by a launcher, by anything that
+    // did not export the variable -- silently faked every install: progress
+    // bars that move, an operation that "downloads" without touching the
+    // network, and nothing on disk at the end of it.
+    let fake_uni = std::env::var("THALLIUM_STORE_FAKE_UNI").unwrap_or_else(|_| "0".to_string()) != "0";
     let db_path = data_home().join("thallium-store/store.db");
     let (progress_tx, _) = broadcast::channel(256);
+    let db = StoreDb::open(&db_path)?;
+    // Anything still mid-flight belongs to a process that is already gone.
+    match db.reap_orphaned_operations() {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("cancelled {n} operation(s) left running by a previous backend"),
+        Err(err) => tracing::warn!("could not reap orphaned operations: {err}"),
+    }
     let state = AppState {
         catalog: CatalogManager::new(),
-        db: Arc::new(Mutex::new(StoreDb::open(&db_path)?)),
+        db: Arc::new(Mutex::new(db)),
         uni: UniAdapter::new(fake_uni),
         fake_uni,
         recent_apps: Arc::new(Mutex::new(HashMap::new())),
