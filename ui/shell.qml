@@ -1,13 +1,10 @@
-import Quickshell
-import Quickshell.Io
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-ShellRoot {
+Item {
     id: root
 
-    property string backendBinary: Quickshell.env("THALLIUM_STORE_BACKEND") || "thallium-store-backend"
     property string query: ""
     property var results: []
     property var providers: []
@@ -127,14 +124,7 @@ ShellRoot {
     function installedIconSource(item) {
         const pkg = packageIdFromInstalled(item)
         const candidates = [pkg, (item.name || "").toLowerCase(), item.name || ""]
-        for (let i = 0; i < candidates.length; i++) {
-            if (!candidates[i])
-                continue
-            const path = Quickshell.iconPath(candidates[i], true)
-            if (path)
-                return path
-        }
-        return ""
+        return storeClient.iconSource(candidates)
     }
 
     function cardHeight() {
@@ -202,8 +192,7 @@ ShellRoot {
         activeMethod = item.method
         if (item.method === "catalog.search")
             activeSearchQuery = item.params.query
-        rpc.command = [backendBinary, "--request", item.method, JSON.stringify(item.params)]
-        rpc.running = true
+        storeClient.request(item.method, item.params)
     }
 
     function searchNow() {
@@ -643,107 +632,116 @@ ShellRoot {
         return tags && tags.length > 0 ? tags.join(", ") : "Not provided"
     }
 
-    Process {
-        id: backend
-        command: [root.backendBinary]
-        running: true
+    function handleRpcResult(method, result) {
+        if (!result)
+            return
+        if (result.results !== undefined) {
+            root.results = result.results
+            root.providers = result.providers || []
+            root.status = root.results.length + " result" + (root.results.length === 1 ? "" : "s")
+            pushLog("results « " + root.results.length + " for “" + root.activeSearchQuery + "”")
+            const nextCache = root.searchCache
+            nextCache[root.activeSearchQuery] = {
+                results: result.results,
+                providers: result.providers || [],
+                ts: Date.now()
+            }
+            root.searchCache = nextCache
+        } else if (result.collections !== undefined) {
+            root.discover = result.collections
+            root.status = "Discover ready"
+            pushLog("discover feed ready")
+        } else if (result.items !== undefined && method === "operations.list") {
+            const prevActive = root.activeOpsCount()
+            root.operations = result.items
+            // An operation just finished — installed state changed,
+            // refresh the Apps grid and drop stale search results.
+            if (root.activeOpsCount() < prevActive) {
+                root.searchCache = ({})
+                root.request("installed.list", {})
+            }
+            root.status = "Queue loaded"
+        } else if (result.items !== undefined && method === "installed.list") {
+            root.installedItems = result.items
+            root.status = root.installedItems.length + " installed item" + (root.installedItems.length === 1 ? "" : "s")
+            pushLog("installed « " + root.installedItems.length + " apps")
+        } else if (result.items !== undefined && method === "updates.list") {
+            root.updateItems = result.items
+            root.status = root.updateItems.length + " update" + (root.updateItems.length === 1 ? "" : "s")
+            pushLog("updates « " + root.updateItems.length)
+        } else if (result.id !== undefined && result.variants !== undefined && method === "catalog.appDetails") {
+            root.selectedApp = result
+            root.status = "Details loaded"
+            pushLog("opened " + (result.name || result.id))
+        } else if (result.id && result.state !== undefined) {
+            root.status = result.message || "Queued"
+            pushLog("queue » " + (result.message || result.id))
+            // Install/remove changes installed-state; drop cached search results.
+            root.searchCache = ({})
+            root.request("operations.list", {})
+        } else if (result.accepted !== undefined) {
+            root.status = result.message || "Operation updated"
+            root.request("operations.list", {})
+        } else if (result.settings !== undefined) {
+            root.storeSettings = result.settings
+            if (method === "settings.get" && result.settings.first_run_done !== true) {
+                root.setupStep = 0
+                root.setupOpen = true
+            }
+        } else if (result.iconBytes !== undefined) {
+            root.cacheInfo = result
+        } else if (result.status !== undefined) {
+            root.fakeUniMode = result.fakeUni === true
+            root.uniHealth = result.privilege ? "ready" : "privilege helper missing"
+            root.storeVersion = result.version || ""
+            root.status = result.status + " · APT " + (result.apt ? "ready" : "missing")
+                + " · Flatpak " + (result.flatpak ? "ready" : "missing")
+        }
     }
 
-    Process {
-        id: rpc
-        running: false
-        onRunningChanged: {
-            if (!running && root.requestRunning) {
-                root.requestRunning = false
-                root.drainRequests()
+    function handleNotification(method, params) {
+        if (method !== "event.operationProgress" || !params || !params.id)
+            return
+
+        const nextOperations = root.operations.slice()
+        let existingIndex = -1
+        for (let i = 0; i < nextOperations.length; i++) {
+            if (nextOperations[i].id === params.id) {
+                existingIndex = i
+                break
             }
         }
-        stdout: SplitParser {
-            onRead: line => {
-                try {
-                    const message = JSON.parse(line)
-                    if (message.error) {
-                        root.status = message.error.message
-                        pushLog("✗ " + message.error.message)
-                        return
-                    }
-                    const result = message.result
-                    if (!result)
-                        return
-                    if (result.results !== undefined) {
-                        root.results = result.results
-                        root.providers = result.providers || []
-                        root.status = root.results.length + " result" + (root.results.length === 1 ? "" : "s")
-                        pushLog("results « " + root.results.length + " for “" + root.activeSearchQuery + "”")
-                        const nextCache = root.searchCache
-                        nextCache[root.activeSearchQuery] = {
-                            results: result.results,
-                            providers: result.providers || [],
-                            ts: Date.now()
-                        }
-                        root.searchCache = nextCache
-                    } else if (result.collections !== undefined) {
-                        root.discover = result.collections
-                        root.status = "Discover ready"
-                        pushLog("discover feed ready")
-                    } else if (result.items !== undefined && root.activeMethod === "operations.list") {
-                        const prevActive = root.activeOpsCount()
-                        root.operations = result.items
-                        // An operation just finished — installed state changed,
-                        // refresh the Apps grid and drop stale search results.
-                        if (root.activeOpsCount() < prevActive) {
-                            root.searchCache = ({})
-                            root.request("installed.list", {})
-                        }
-                        root.status = "Queue loaded"
-                    } else if (result.items !== undefined && root.activeMethod === "installed.list") {
-                        root.installedItems = result.items
-                        root.status = root.installedItems.length + " installed item" + (root.installedItems.length === 1 ? "" : "s")
-                        pushLog("installed « " + root.installedItems.length + " apps")
-                    } else if (result.items !== undefined && root.activeMethod === "updates.list") {
-                        root.updateItems = result.items
-                        root.status = root.updateItems.length + " update" + (root.updateItems.length === 1 ? "" : "s")
-                        pushLog("updates « " + root.updateItems.length)
-                    } else if (result.id !== undefined && result.variants !== undefined && root.activeMethod === "catalog.appDetails") {
-                        root.selectedApp = result
-                        root.status = "Details loaded"
-                        pushLog("opened " + (result.name || result.id))
-                    } else if (result.id && result.state !== undefined) {
-                        root.status = result.message || "Queued"
-                        pushLog("queue » " + (result.message || result.id))
-                        // Install/remove changes installed-state; drop cached
-                        // search results so the next search reflects reality.
-                        root.searchCache = ({})
-                        root.request("operations.list", {})
-                    } else if (result.accepted !== undefined && result.operation !== undefined) {
-                        root.status = result.message || "Operation updated"
-                        root.request("operations.list", {})
-                    } else if (result.settings !== undefined) {
-                        root.storeSettings = result.settings
-                        if (root.activeMethod === "settings.get" && result.settings.first_run_done !== true) {
-                            root.setupStep = 0
-                            root.setupOpen = true
-                        }
-                    } else if (result.iconBytes !== undefined) {
-                        root.cacheInfo = result
-                    } else if (result.status !== undefined) {
-                        root.fakeUniMode = result.fakeUni === true
-                        root.uniHealth = result.uni || ""
-                        root.storeVersion = result.version || ""
-                        root.status = result.status + " - " + result.uni
-                    }
-                } catch (err) {
-                    root.status = "Invalid backend response"
-                }
-            }
+        if (existingIndex >= 0)
+            nextOperations[existingIndex] = params
+        else
+            nextOperations.unshift(params)
+        root.operations = nextOperations
+    }
+
+    Connections {
+        target: storeClient
+
+        function onResponse(method, result) {
+            root.activeMethod = method
+            root.handleRpcResult(method, result)
+            root.requestRunning = false
+            root.drainRequests()
         }
-        stderr: SplitParser {
-            onRead: line => {
-                if (line.length > 0) {
-                    root.status = line
-                    pushLog("· " + line)
-                }
-            }
+
+        function onRequestFailed(method, message) {
+            root.status = message
+            root.pushLog("✗ " + method + ": " + message)
+            root.requestRunning = false
+            root.drainRequests()
+        }
+
+        function onBackendLog(message) {
+            if (message.length > 0)
+                root.pushLog("· " + message)
+        }
+
+        function onNotification(method, params) {
+            root.handleNotification(method, params)
         }
     }
 
@@ -937,7 +935,7 @@ ShellRoot {
         id: loader
         property bool running: true
         property color stroke: root.cGreen
-        property real phase: 0
+        property real phase
         property real lineScale: 1
 
         implicitWidth: 72
@@ -1280,10 +1278,12 @@ ShellRoot {
         }
     }
 
-    FloatingWindow {
+    ApplicationWindow {
         id: window
-        implicitWidth: 1280
-        implicitHeight: 820
+        width: 1280
+        height: 820
+        minimumWidth: 900
+        minimumHeight: 620
         visible: true
         title: "Thallium Store"
         color: root.cBase
@@ -3885,6 +3885,7 @@ ShellRoot {
                             spacing: 8
                             model: root.installApp ? root.installApp.variants : []
                             delegate: Rectangle {
+                                id: variantDelegate
                                 width: variantList.width
                                 height: 62
                                 property bool selected: modelData.id === root.installVariantId
@@ -3910,12 +3911,12 @@ ShellRoot {
                                         Layout.alignment: Qt.AlignVCenter
                                         radius: 0
                                         color: "transparent"
-                                        border.color: parent.parent.selected ? root.cGreen : root.cLine
+                                        border.color: variantDelegate.selected ? root.cGreen : root.cLine
                                         Rectangle {
                                             anchors.centerIn: parent
                                             width: 7; height: 7; radius: 0
                                             color: root.cGreen
-                                            visible: parent.parent.parent.selected
+                                            visible: variantDelegate.selected
                                         }
                                     }
 

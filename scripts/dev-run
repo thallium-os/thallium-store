@@ -8,7 +8,7 @@ if [ -f "$HOME/.cargo/env" ]; then
   source "$HOME/.cargo/env"
 fi
 
-cargo build
+./scripts/build-native
 
 export PATH="$PWD/target/debug:$PATH"
 export LANG="${LANG:-C.UTF-8}"
@@ -19,4 +19,4 @@ if [ -x "$PWD/vendor/uni/uni" ]; then
 fi
 export THALLIUM_STORE_FAKE_UNI="${THALLIUM_STORE_FAKE_UNI:-0}"
 
-exec "$PWD/target/debug/thallium-store-backend" --web
+exec "$PWD/target/native/thallium-store-native"

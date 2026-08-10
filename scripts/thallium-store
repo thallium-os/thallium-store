@@ -27,4 +27,23 @@ if [ -x "$uni_path" ]; then
 fi
 export THALLIUM_STORE_FAKE_UNI="${THALLIUM_STORE_FAKE_UNI:-0}"
 
+native_binary="${THALLIUM_STORE_NATIVE:-}"
+if [ -z "$native_binary" ]; then
+  for candidate in \
+    "$HOME/.local/libexec/thallium-store/thallium-store-native" \
+    "/usr/libexec/thallium-store/thallium-store-native" \
+    "$repo_dir/target/native/thallium-store-native"; do
+    if [ -x "$candidate" ]; then
+      native_binary="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ -n "$native_binary" ] && [ -x "$native_binary" ]; then
+  exec "$native_binary"
+fi
+
+# Keep the loopback browser client as a recovery path for packages built before
+# the Qt client or systems where the native payload was removed manually.
 exec thallium-store-backend --web

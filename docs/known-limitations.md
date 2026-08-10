@@ -17,9 +17,6 @@
   panels showing cached data until the quota resets.
 - The bundled curated catalog is deliberately small; it exists so the store is
   useful on first launch, before any index has warmed up.
-- The desktop-independent frontend opens in the system's default browser rather
-  than a dedicated native window. It polls operation progress while its tab is
-  open; closing the tab lets the local server exit after its idle timeout.
 - Browser clients poll operation state rather than subscribing to the backend's
   Unix-socket progress stream. This adds a small delay (up to roughly two
-  seconds) before a progress change appears in the UI.
+  seconds) when the recovery frontend is in use.

@@ -8,7 +8,7 @@ if [ -f "$HOME/.cargo/env" ]; then
   source "$HOME/.cargo/env"
 fi
 
-cargo build
+./scripts/build-native
 
 bin_home="$HOME/.local/bin"
 data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -16,10 +16,12 @@ app_home="$data_home/thallium-store"
 desktop_home="$data_home/applications"
 
 icon_home="$data_home/icons/hicolor/scalable/apps"
+libexec_home="$HOME/.local/libexec/thallium-store"
 
-install -d "$bin_home" "$app_home/data" "$app_home/uni" "$desktop_home" "$icon_home"
+install -d "$bin_home" "$app_home/data" "$app_home/uni" "$desktop_home" "$icon_home" "$libexec_home"
 install -m 0755 target/debug/thallium-store-backend "$bin_home/thallium-store-backend"
 install -m 0755 scripts/thallium-store "$bin_home/thallium-store"
+install -m 0755 target/native/thallium-store-native "$libexec_home/thallium-store-native"
 install -m 0755 vendor/uni/uni "$app_home/uni/uni"
 
 install -m 0644 data/github-apps.json "$app_home/data/github-apps.json"

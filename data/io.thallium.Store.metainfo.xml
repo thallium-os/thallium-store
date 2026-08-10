@@ -6,7 +6,7 @@
   <metadata_license>FSFAP</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <description>
-    <p>Thallium Store is a graphical application store for Debian-based systems. It searches system packages, Flathub, and curated GitHub releases, then delegates package changes to UNI. Its local browser interface works across desktop environments without Quickshell or Hyprland.</p>
+    <p>Thallium Store is a native Qt application store for Debian-based systems. It searches system packages, Flathub, and curated GitHub releases, then delegates package changes to UNI. It works across desktop environments without Quickshell, Hyprland, Electron, or an embedded browser.</p>
   </description>
   <launchable type="desktop-id">io.thallium.Store.desktop</launchable>
   <icon type="stock">io.thallium.Store</icon>

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+build_type="${THALLIUM_NATIVE_BUILD_TYPE:-Debug}"
+if [ "$build_type" = "Release" ]; then
+  build_dir="${THALLIUM_NATIVE_BUILD_DIR:-$PWD/target/native-release}"
+  cargo_profile="--release"
+else
+  build_dir="${THALLIUM_NATIVE_BUILD_DIR:-$PWD/target/native}"
+  cargo_profile=""
+fi
+
+if ! command -v cmake >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+The native client needs CMake and the Qt 6 development packages.
+
+On Debian 12 / Ubuntu 24.04 or newer, install them with:
+  sudo apt install cmake g++ qt6-base-dev qt6-declarative-dev \
+    qml6-module-qtquick qml6-module-qtquick-controls \
+    qml6-module-qtquick-layouts qt6-qpa-plugins
+EOF
+  exit 1
+fi
+
+if [ -f "$HOME/.cargo/env" ]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+
+if [ -n "$cargo_profile" ]; then
+  cargo build "$cargo_profile"
+else
+  cargo build
+fi
+
+cmake -S native -B "$build_dir" \
+  -DCMAKE_BUILD_TYPE="$build_type" \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build "$build_dir" --parallel
+
+echo "$build_dir/thallium-store-native"

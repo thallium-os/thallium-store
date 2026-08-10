@@ -19,13 +19,39 @@ pkg="thallium-store"
 build_root="$PWD/target/deb-root"
 out_dir="$PWD/dist"
 pkg_dir="$build_root/${pkg}_${version}_${arch}"
+native_binary="$PWD/target/native-release/thallium-store-native"
 
-cargo build --release
+THALLIUM_NATIVE_BUILD_TYPE=Release ./scripts/build-native
+
+if ! command -v dpkg-shlibdeps >/dev/null 2>&1; then
+  echo "dpkg-shlibdeps is required; install the dpkg-dev package" >&2
+  exit 1
+fi
+
+# dpkg-shlibdeps needs Debian source metadata even when its result is emitted
+# to stdout. Keep that helper metadata separate from the package staging tree.
+rm -rf "$build_root/debian"
+mkdir -p "$build_root/debian"
+cat > "$build_root/debian/control" <<EOF
+Source: $pkg
+Section: admin
+Priority: optional
+Maintainer: Thallium OS <maintainers@thallium.local>
+Standards-Version: 4.7.0
+
+Package: $pkg
+Architecture: any
+Depends: \${shlibs:Depends}
+Description: Native Qt application store for Debian-based systems
+EOF
+qt_deps="$(cd "$build_root" && dpkg-shlibdeps -O "$native_binary" \
+  | sed -n 's/^shlibs:Depends=//p')"
 
 rm -rf "$pkg_dir"
 mkdir -p \
   "$pkg_dir/DEBIAN" \
   "$pkg_dir/usr/bin" \
+  "$pkg_dir/usr/libexec/thallium-store" \
   "$pkg_dir/usr/lib/thallium-store/uni" \
   "$pkg_dir/usr/share/thallium-store/data" \
   "$pkg_dir/usr/share/applications" \
@@ -35,6 +61,8 @@ mkdir -p \
 
 install -m 0755 target/release/thallium-store-backend "$pkg_dir/usr/bin/thallium-store-backend"
 install -m 0755 scripts/thallium-store "$pkg_dir/usr/bin/thallium-store"
+install -m 0755 target/native-release/thallium-store-native \
+  "$pkg_dir/usr/libexec/thallium-store/thallium-store-native"
 install -m 0755 vendor/uni/uni "$pkg_dir/usr/lib/thallium-store/uni/uni"
 install -m 0644 data/icons/io.thallium.Store.svg \
   "$pkg_dir/usr/share/icons/hicolor/scalable/apps/io.thallium.Store.svg"
@@ -53,10 +81,10 @@ Section: admin
 Priority: optional
 Architecture: $arch
 Maintainer: Thallium OS <maintainers@thallium.local>
-Depends: bash, curl, flatpak, apt, dpkg, pkexec, xdg-utils
-Description: Graphical application store for Debian-based systems
+Depends: $qt_deps, qml6-module-qtquick, qml6-module-qtquick-controls, qml6-module-qtquick-layouts, qt6-qpa-plugins, bash, curl, flatpak, apt, dpkg, pkexec, xdg-utils
+Description: Native Qt application store for Debian-based systems
  Thallium Store searches system packages, Flathub, and curated GitHub
- applications in a local browser UI, then delegates package changes to UNI.
+ applications in a native Qt interface, then delegates package changes to UNI.
 EOF
 
 cat > "$pkg_dir/DEBIAN/postinst" <<'EOF'

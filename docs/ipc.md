@@ -107,6 +107,15 @@ Long-lived clients receive notifications:
 The browser frontend polls `operations.list`; long-lived Unix-socket clients can
 consume the progress notifications directly.
 
+## Native Qt transport
+
+The Qt client keeps one `QLocalSocket` connection open for the lifetime of the
+application. Its C++ bridge assigns request IDs, queues requests until the Rust
+backend is ready, matches responses to QML callbacks, and forwards
+`event.operationProgress` notifications. The client starts
+`thallium-store-backend` as a child when no daemon is available; a helper exits
+cleanly when another process already owns the per-user socket.
+
 ## Browser transport
 
 `thallium-store-backend --web` embeds the desktop-independent frontend and

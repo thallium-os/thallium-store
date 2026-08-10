@@ -1,8 +1,7 @@
-# Legacy Quickshell UI
+# Native Qt Quick UI
 
-This client is retained as a design and migration reference on the
-`compat/no-quickshell` branch. The supported frontend is the embedded local web
-application under `web/`, launched with:
+The QML interface is hosted by the Qt 6 executable under `native/`; it has no
+Quickshell imports. Build and launch it from the repository root with:
 
 ```bash
 ./scripts/dev-run

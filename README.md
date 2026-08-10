@@ -1,6 +1,6 @@
 # Thallium Store
 
-> A desktop-independent store for Debian-based systems — one place to find and install software from apt, Flathub, GitHub releases and AppImages, ranked by trust and installed through UNI.
+> A native Qt store for Debian-based systems — one place to find and install software from apt, Flathub, GitHub releases and AppImages, ranked by trust and installed through UNI.
 
 ## What it does
 
@@ -17,10 +17,13 @@ Thallium Store merges four package sources into a single catalog. Search once an
 ```bash
 git clone https://github.com/dronzer-tb/thallium-store.git
 cd thallium-store
+sudo apt install cmake g++ qt6-base-dev qt6-declarative-dev \
+  qml6-module-qtquick qml6-module-qtquick-controls \
+  qml6-module-qtquick-layouts qt6-qpa-plugins
 ./scripts/dev-run
 ```
 
-`dev-run` builds the workspace, starts the local web frontend, and opens it in your default browser against a freshly built backend using real UNI. Set `THALLIUM_STORE_NO_OPEN=1` to print the local URL without opening a browser.
+`dev-run` builds the Rust workspace and launches the native Qt 6 client against a freshly built backend using real UNI. The interface is Qt Quick/QML; it does not embed Chromium, Node, Electron, or a webview.
 
 ## Installation
 
@@ -45,7 +48,7 @@ Launch the store with the bundled wrapper (added to `PATH` by the package):
 thallium-store
 ```
 
-The wrapper starts an HTTP server bound to a random **loopback-only** port and opens the store in the default browser. The server is not exposed to the network, accepts mutations only from its per-launch session token, and exits after 15 minutes without browser activity. It works on GNOME, KDE Plasma, Xfce, Cinnamon, Sway, Hyprland, and other X11 or Wayland sessions; Quickshell is not installed or required.
+The wrapper launches the native Qt executable on GNOME, KDE Plasma, Xfce, Cinnamon, Sway, Hyprland, and other X11 or Wayland sessions. Quickshell is not installed or required. The loopback browser client remains available as an automatic recovery path if the native payload is missing.
 
 - **Home** — curated picks and collections.
 - **Search** — use the header search box; every configured source is queried together.
@@ -63,6 +66,7 @@ Set via environment variables (the wrappers in `scripts/` set sensible defaults)
 | `THALLIUM_STORE_FAKE_UNI` | `0` | `1` runs a safe simulator — progress and state without real package mutations. |
 | `THALLIUM_STORE_UNI` | bundled `vendor/uni/uni` | Path to the UNI binary. |
 | `UNI_PRIVILEGE_BACKEND` | `pkexec` | Privilege escalation for apt/system flatpak mutations (`pkexec` or `sudo`). |
+| `THALLIUM_STORE_NATIVE` | installed native client | Override the native Qt executable path. |
 | `THALLIUM_STORE_NO_OPEN` | unset | Set to any value to print the local URL without opening a browser. |
 | `THALLIUM_STORE_WEB_IDLE_SECONDS` | `900` | Shut down the local server after this many seconds without requests (minimum 30). |
 
@@ -70,7 +74,7 @@ State lives under `~/.local/share/thallium-store/` (SQLite DB, icon cache) and `
 
 ## Architecture
 
-A Rust backend embeds and serves a dependency-free HTML/CSS/JavaScript frontend over loopback HTTP. Browser requests call the same JSON-RPC handlers used by the Unix-socket CLI. The backend is a Cargo workspace:
+A native Qt 6/QML client and Rust backend communicate through newline-delimited JSON-RPC on a per-user Unix socket. The backend is a Cargo workspace:
 
 | Crate | Responsibility |
 | --- | --- |
@@ -80,13 +84,14 @@ A Rust backend embeds and serves a dependency-free HTML/CSS/JavaScript frontend 
 | `store-db` | SQLite operation history. |
 | `store-core` | Shared models and the trust-ranking logic. |
 
-The active frontend lives in `web/` and is embedded into the backend binary at build time, so the Debian package has no web-server or GUI-toolkit runtime dependency. The previous Quickshell client remains under `ui/` as a design and migration reference. Curated catalog data lives in `data/`.
+The active frontend lives in `ui/shell.qml`. A small Qt/C++ host under `native/` owns the application window, starts the backend, exposes themed desktop icons, and bridges QML requests to the Unix socket. The embedded frontend under `web/` remains a fallback. Curated catalog data lives in `data/`.
 
 ## Contributing
 
 ```bash
 cargo build          # build the workspace
 cargo test           # run tests
+./scripts/build-native # build the Rust backend and native Qt client
 ./scripts/check      # fmt + clippy + tests
 ```
 
