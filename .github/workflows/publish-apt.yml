@@ -77,9 +77,56 @@ jobs:
           path: dist/*.deb
           if-no-files-found: error
 
+  smoke:
+    name: Test ${{ matrix.suite }} package
+    needs: build
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: bookworm
+            image: debian:12-slim
+          - suite: trixie
+            image: debian:13-slim
+          - suite: noble
+            image: ubuntu:24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Download suite package
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.suite }}
+          path: package
+
+      - name: Install package in a clean system
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y ./package/*.deb
+
+      - name: Launch native QML application offscreen
+        shell: bash
+        run: |
+          set +e
+          QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software timeout 8s \
+            /usr/libexec/thallium-store/thallium-store-native \
+            >native-smoke.log 2>&1
+          status=$?
+          set -e
+          cat native-smoke.log
+          if [ "$status" -ne 124 ]; then
+            echo "native application exited during its startup smoke test (status $status)" >&2
+            exit 1
+          fi
+
   repository:
     name: Sign repository
-    needs: build
+    needs: smoke
     runs-on: ubuntu-24.04
     permissions:
       contents: write

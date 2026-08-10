@@ -12,8 +12,12 @@ From the repository root:
 
 ```bash
 sudo apt install cmake g++ qt6-base-dev qt6-declarative-dev \
+  qml6-module-qtqml qml6-module-qtqml-models \
+  qml6-module-qtqml-workerscript \
   qml6-module-qtquick qml6-module-qtquick-controls \
-  qml6-module-qtquick-layouts qt6-qpa-plugins
+  qml6-module-qtquick-layouts qml6-module-qtquick-shapes \
+  qml6-module-qtquick-templates qml6-module-qtquick-window \
+  qt6-qpa-plugins
 ./scripts/build-native
 ```
 

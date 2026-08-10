@@ -22,12 +22,14 @@ base codename through `/etc/os-release`.
 ## Publishing
 
 `.github/workflows/publish-apt.yml` runs manually or for a version tag such as
-`v0.1.10`. A tag must match the workspace version in `Cargo.toml`. The workflow:
+`v0.1.11`. A tag must match the workspace version in `Cargo.toml`. The workflow:
 
 1. builds a suite-specific `.deb` for each supported system;
-2. generates and signs `Packages`, `Release`, `Release.gpg`, and `InRelease`;
-3. uploads tagged packages to a GitHub Release; and
-4. deploys the complete APT repository to GitHub Pages.
+2. installs each `.deb` in a clean target-system container and launches the
+   native QML application offscreen;
+3. generates and signs `Packages`, `Release`, `Release.gpg`, and `InRelease`;
+4. uploads tagged packages to a GitHub Release; and
+5. deploys the complete APT repository to GitHub Pages.
 
 The repository must have GitHub Pages configured to use GitHub Actions and an
 `APT_SIGNING_KEY_B64` Actions secret containing the base64-encoded OpenPGP
