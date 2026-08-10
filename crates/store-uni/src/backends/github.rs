@@ -130,20 +130,29 @@ async fn install_deb(
     )
     .await;
     let path = dest.to_string_lossy().to_string();
-    let mut child = privileged("apt-get", &["install", "-y", &path])
+    let mut command = privileged("/usr/bin/apt-get", &["install", "-y", &path]);
+    command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
-    let status = tokio::select! {
-        status = child.wait() => status?,
-        _ = token.cancelled() => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            anyhow::bail!("cancelled");
-        }
+        .kill_on_drop(true);
+    let output = tokio::select! {
+        output = command.output() => output?,
+        _ = token.cancelled() => anyhow::bail!("cancelled"),
     };
-    if !status.success() {
-        anyhow::bail!("apt-get exited with {status}");
+    if !output.status.success() {
+        // pkexec reserves 127 for a dismissed/failed authentication request.
+        // apt itself maps package/script failures to 100, so this distinction
+        // gives the user something actionable instead of a mysterious code.
+        if output.status.code() == Some(127) {
+            anyhow::bail!(
+                "administrator authorization was cancelled, or no polkit authentication agent is available"
+            );
+        }
+        let detail = command_diagnostic(&output.stdout, &output.stderr);
+        if detail.is_empty() {
+            anyhow::bail!("apt-get exited with {}", output.status);
+        }
+        anyhow::bail!("apt-get exited with {}: {detail}", output.status);
     }
     registry::add(app_name, "dpkg", repo).await?;
     emit(
@@ -154,6 +163,20 @@ async fn install_deb(
     )
     .await;
     Ok(())
+}
+
+fn command_diagnostic(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut lines = String::from_utf8_lossy(stderr)
+        .lines()
+        .chain(String::from_utf8_lossy(stdout).lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if lines.len() > 4 {
+        lines.drain(..lines.len() - 4);
+    }
+    lines.join(" | ")
 }
 
 /// Pick the highest-scoring asset URL/name, rejecting clearly wrong artifacts.
@@ -246,5 +269,13 @@ mod tests {
         let (url, name) = pick_best_asset(&release).unwrap();
         assert_eq!(url, "u2");
         assert!(name.ends_with(".AppImage"));
+    }
+
+    #[test]
+    fn command_diagnostic_keeps_the_useful_tail() {
+        let stdout = b"line one\nline two\nline three\n";
+        let stderr = b"error one\nerror two\n";
+        let detail = command_diagnostic(stdout, stderr);
+        assert_eq!(detail, "error two | line one | line two | line three");
     }
 }

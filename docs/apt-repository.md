@@ -22,7 +22,7 @@ base codename through `/etc/os-release`.
 ## Publishing
 
 `.github/workflows/publish-apt.yml` runs manually or for a version tag such as
-`v0.1.9`. A tag must match the workspace version in `Cargo.toml`. The workflow:
+`v0.1.10`. A tag must match the workspace version in `Cargo.toml`. The workflow:
 
 1. builds a suite-specific `.deb` for each supported system;
 2. generates and signs `Packages`, `Release`, `Release.gpg`, and `InRelease`;

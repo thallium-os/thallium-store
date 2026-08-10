@@ -17,6 +17,9 @@ Item {
     property bool requestRunning: false
     property string activeMethod: ""
     property string status: "Starting backend"
+    property string operationToastText: ""
+    property bool operationToastError: false
+    property bool operationToastVisible: false
     property string activeView: "discover"
     // Updates start capped at two rows on the Apps page; the header toggles it.
     property bool updatesExpanded: false
@@ -453,6 +456,24 @@ Item {
         return operation.message || "Working"
     }
 
+    function terminalOperationState(state) {
+        return state === "succeeded" || state === "failed" || state === "cancelled"
+    }
+
+    function showOperationToast(operation) {
+        if (!operation)
+            return
+        operationToastError = operation.state === "failed" || operation.state === "cancelled"
+        if (operation.state === "succeeded") {
+            const verb = operation.action === "remove" ? "removed" : operation.action === "update" ? "updated" : "installed"
+            operationToastText = (operation.app_name || "Application") + " " + verb + " successfully"
+        } else {
+            operationToastText = operation.message || ((operation.app_name || "Operation") + " " + operation.state)
+        }
+        operationToastVisible = true
+        operationToastTimer.restart()
+    }
+
     function sourceLabel(source) {
         if (source === "system" || source === "apt" || source === "dpkg")
             return "System"
@@ -711,11 +732,21 @@ Item {
                 break
             }
         }
+        const becameTerminal = existingIndex >= 0
+                && !root.terminalOperationState(nextOperations[existingIndex].state)
+                && root.terminalOperationState(params.state)
         if (existingIndex >= 0)
             nextOperations[existingIndex] = params
         else
             nextOperations.unshift(params)
         root.operations = nextOperations
+
+        if (becameTerminal) {
+            root.status = params.message || params.state
+            root.showOperationToast(params)
+            root.searchCache = ({})
+            root.request("installed.list", {})
+        }
     }
 
     Connections {
@@ -767,6 +798,13 @@ Item {
         repeat: true
         running: root.isBusy()
         onTriggered: root.activityFrame = root.activityFrame + 1
+    }
+
+    Timer {
+        id: operationToastTimer
+        interval: 7000
+        repeat: false
+        onTriggered: root.operationToastVisible = false
     }
 
     // Re-fetch Discover once the daemon's Flathub index has warmed (~7s), so
@@ -2497,16 +2535,18 @@ Item {
                                 // Preview and composition share a row: a wide gallery beside a compact
                                 // language breakdown, rather than two full-width bands stacked.
                                 RowLayout {
+                                    id: detailMediaRow
+                                    readonly property bool hasScreenshots: root.selectedApp && root.selectedApp.screenshots && root.selectedApp.screenshots.length > 0
+                                    readonly property bool hasLanguages: root.selectedApp && root.selectedApp.languages && root.selectedApp.languages.length > 0
                                     Layout.fillWidth: true
                                     spacing: 14
-                                    visible: (root.selectedApp && root.selectedApp.screenshots && root.selectedApp.screenshots.length > 0)
-                                             || (root.selectedApp && root.selectedApp.languages && root.selectedApp.languages.length > 0)
+                                    visible: hasScreenshots || hasLanguages
 
                                     ColumnLayout {
                                         Layout.fillWidth: true
                                         Layout.minimumWidth: 0
                                         spacing: 10
-                                        visible: root.selectedApp && root.selectedApp.screenshots && root.selectedApp.screenshots.length > 0
+                                        visible: detailMediaRow.hasScreenshots
 
                                         HudRailHeader { title: "Preview" }
 
@@ -2562,19 +2602,15 @@ Item {
                                         }
                                     }
 
-                                    // Absorbs the slack when there are no screenshots, so the
-                                    // composition panel stays a right-hand panel instead of
-                                    // stretching across the page with a ring stranded in it.
-                                    Item {
-                                        Layout.fillWidth: true
-                                        visible: !(root.selectedApp && root.selectedApp.screenshots && root.selectedApp.screenshots.length > 0)
-                                    }
-
                                     ColumnLayout {
-                                        Layout.preferredWidth: Math.round(330 * root.uiScale())
-                                        Layout.maximumWidth: Math.round(330 * root.uiScale())
+                                        // Beside a gallery this stays a compact companion card.
+                                        // On its own it owns the row instead of floating at the
+                                        // far right above a page-sized empty hole.
+                                        Layout.fillWidth: !detailMediaRow.hasScreenshots
+                                        Layout.preferredWidth: detailMediaRow.hasScreenshots ? Math.round(330 * root.uiScale()) : 0
+                                        Layout.maximumWidth: detailMediaRow.hasScreenshots ? Math.round(330 * root.uiScale()) : Number.POSITIVE_INFINITY
                                         spacing: 10
-                                        visible: root.selectedApp && root.selectedApp.languages && root.selectedApp.languages.length > 0
+                                        visible: detailMediaRow.hasLanguages
 
                                         HudRailHeader { title: "Composition"; sub: "languages" }
 
@@ -3494,6 +3530,57 @@ Item {
 
                 }
 
+            }
+
+            // Operation result toast. Finished rows leave the live Activity
+            // list, so this is the explicit hand-off that tells the user what
+            // happened instead of making a successful install look inert.
+            Rectangle {
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.rightMargin: 28
+                anchors.bottomMargin: 28
+                width: Math.min(520, parent.width - 56)
+                implicitHeight: toastRow.implicitHeight + 28
+                color: root.cPanel
+                border.color: root.operationToastError ? root.cRed : root.cGreen
+                visible: root.operationToastVisible
+                opacity: visible ? 1 : 0
+                z: 980
+
+                Behavior on opacity { NumberAnimation { duration: root.tFast } }
+
+                RowLayout {
+                    id: toastRow
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: 16
+                    anchors.rightMargin: 12
+                    spacing: 12
+
+                    Rectangle {
+                        Layout.preferredWidth: 8
+                        Layout.preferredHeight: 8
+                        color: root.operationToastError ? root.cRed : root.cGreen
+                    }
+                    Label {
+                        text: root.operationToastText
+                        color: root.cFg
+                        font.family: root.fontHuman
+                        font.pixelSize: 13
+                        font.bold: true
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    ActionButton {
+                        label: "Dismiss"
+                        fill: root.cDim
+                        textColor: root.cMuted
+                        Layout.preferredWidth: 92
+                        onClicked: root.operationToastVisible = false
+                    }
+                }
             }
 
             // Screenshot viewer. Gallery thumbnails are cropped to a fixed
