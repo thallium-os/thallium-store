@@ -71,7 +71,7 @@ jobs:
           mv "$package" "dist/thallium-store_${version}_${{ matrix.suite }}_amd64.deb"
 
       - name: Upload suite package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.suite }}
           path: dist/*.deb
@@ -90,7 +90,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download suite packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-packages
 
@@ -127,10 +127,10 @@ jobs:
             | xargs -0 gh release upload "$GITHUB_REF_NAME" --clobber
 
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload APT repository for Pages
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: apt-repository
 
@@ -147,4 +147,4 @@ jobs:
     steps:
       - name: Deploy GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
