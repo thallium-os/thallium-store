@@ -107,20 +107,48 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update
-          apt-get install -y ./package/*.deb
+          apt-get install -y ./package/*.deb xvfb x11-utils
 
-      - name: Launch native QML application offscreen
+      - name: Launch native QML application on a virtual display
         shell: bash
         run: |
+          # A real X server, not the offscreen platform: an application whose
+          # window is never mapped survives offscreen and shows the user
+          # nothing, so the window has to be observed to count as a launch.
           set +e
-          QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software timeout 8s \
+          Xvfb :99 -screen 0 1600x1000x24 >xvfb.log 2>&1 &
+          xvfb=$!
+          export DISPLAY=:99
+          for _ in $(seq 1 20); do
+            xdpyinfo >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          QT_QUICK_BACKEND=software timeout 20s \
             /usr/libexec/thallium-store/thallium-store-native \
-            >native-smoke.log 2>&1
+            >native-smoke.log 2>&1 &
+          launcher=$!
+
+          mapped=1
+          for _ in $(seq 1 15); do
+            sleep 1
+            if xwininfo -root -tree 2>/dev/null | grep -q "Thallium Store"; then
+              mapped=0
+              break
+            fi
+          done
+
+          wait "$launcher"
           status=$?
+          kill "$xvfb" 2>/dev/null
           set -e
           cat native-smoke.log
           if [ "$status" -ne 124 ]; then
             echo "native application exited during its startup smoke test (status $status)" >&2
+            exit 1
+          fi
+          if [ "$mapped" -ne 0 ]; then
+            echo "native application never mapped its window" >&2
             exit 1
           fi
 

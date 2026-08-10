@@ -2,8 +2,19 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Item {
+// The root object has to be the window itself. A Window declared inside an
+// Item is transient on that item's window, so QQmlApplicationEngine never
+// makes it visible and the application runs with nothing on screen.
+ApplicationWindow {
     id: root
+
+    width: 1280
+    height: 820
+    minimumWidth: 900
+    minimumHeight: 620
+    visible: true
+    title: "Thallium Store"
+    color: root.cBase
 
     property string query: ""
     property var results: []
@@ -1316,15 +1327,11 @@ Item {
         }
     }
 
-    ApplicationWindow {
+    // Fills the window's content area, so `window.width` still means the width
+    // the layout may use.
+    Item {
         id: window
-        width: 1280
-        height: 820
-        minimumWidth: 900
-        minimumHeight: 620
-        visible: true
-        title: "Thallium Store"
-        color: root.cBase
+        anchors.fill: parent
 
         Rectangle {
             anchors.fill: parent
