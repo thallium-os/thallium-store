@@ -1,0 +1,150 @@
+name: Publish native APT repository
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: apt-repository
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.suite }} package
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: bookworm
+            image: debian:12-slim
+          - suite: trixie
+            image: debian:13-slim
+          - suite: noble
+            image: ubuntu:24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential cmake pkg-config dpkg-dev \
+            qt6-base-dev qt6-declarative-dev \
+            qml6-module-qtquick qml6-module-qtquick-controls \
+            qml6-module-qtquick-layouts qt6-qpa-plugins
+
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Verify release tag
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          test "$GITHUB_REF_NAME" = "v$version" || {
+            echo "tag $GITHUB_REF_NAME does not match Cargo version v$version" >&2
+            exit 1
+          }
+
+      - name: Build native Debian package
+        shell: bash
+        run: |
+          source "$HOME/.cargo/env"
+          ./scripts/build-deb
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          package="$(find dist -maxdepth 1 -type f -name 'thallium-store_*.deb' -print -quit)"
+          test -n "$package"
+          mv "$package" "dist/thallium-store_${version}_${{ matrix.suite }}_amd64.deb"
+
+      - name: Upload suite package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.suite }}
+          path: dist/*.deb
+          if-no-files-found: error
+
+  repository:
+    name: Sign repository
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Download suite packages
+        uses: actions/download-artifact@v4
+        with:
+          path: release-packages
+
+      - name: Install repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends apt-utils gnupg
+
+      - name: Import archive signing key
+        env:
+          APT_SIGNING_KEY_B64: ${{ secrets.APT_SIGNING_KEY_B64 }}
+        run: |
+          test -n "$APT_SIGNING_KEY_B64" || {
+            echo "APT_SIGNING_KEY_B64 repository secret is not configured" >&2
+            exit 1
+          }
+          install -d -m 0700 "$RUNNER_TEMP/gnupg"
+          printf '%s' "$APT_SIGNING_KEY_B64" \
+            | base64 --decode \
+            | GNUPGHOME="$RUNNER_TEMP/gnupg" gpg --batch --import
+          echo "GNUPGHOME=$RUNNER_TEMP/gnupg" >> "$GITHUB_ENV"
+
+      - name: Build signed APT repository
+        run: ./scripts/build-apt-repository "$PWD/apt-repository" "$PWD/release-packages"
+
+      - name: Create or update GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --generate-notes --title "Thallium Store $GITHUB_REF_NAME"
+          find release-packages -type f -name '*.deb' -print0 \
+            | xargs -0 gh release upload "$GITHUB_REF_NAME" --clobber
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload APT repository for Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: apt-repository
+
+  deploy:
+    name: Deploy APT repository
+    needs: repository
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

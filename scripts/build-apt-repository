@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+archive_root="${1:-$PWD/target/apt-repository}"
+package_root="${2:-$PWD/release-packages}"
+public_key="$PWD/packaging/thallium-store-archive-keyring.asc"
+expected_fingerprint="460325018227E003CBE3D92796EA62D80B90F19E"
+
+for command_name in apt-ftparchive dpkg-deb gpg gzip; do
+  command -v "$command_name" >/dev/null 2>&1 \
+    || { echo "$command_name is required" >&2; exit 1; }
+done
+[ -d "$package_root" ] || { echo "package directory not found: $package_root" >&2; exit 1; }
+
+signing_fingerprint="${THALLIUM_APT_SIGNING_FINGERPRINT:-$expected_fingerprint}"
+secret_fingerprint="$(gpg --batch --with-colons --list-secret-keys "$signing_fingerprint" \
+  | awk -F: '$1 == "fpr" { print $10; exit }')"
+[ "$secret_fingerprint" = "$expected_fingerprint" ] \
+  || { echo "the imported APT signing key does not match the committed archive key" >&2; exit 1; }
+
+rm -rf "$archive_root"
+mkdir -p "$archive_root"
+
+published_suites=0
+for suite_dir in "$package_root"/*; do
+  [ -d "$suite_dir" ] || continue
+  suite="${suite_dir##*/}"
+  case "$suite" in
+    bookworm|trixie|noble) ;;
+    *) echo "ignoring unsupported artifact directory: $suite" >&2; continue ;;
+  esac
+
+  packages=("$suite_dir"/*.deb)
+  [ -e "${packages[0]}" ] || { echo "no Debian package found for $suite" >&2; exit 1; }
+
+  pool_relative="pool/$suite/main/t/thallium-store"
+  pool_directory="$archive_root/$pool_relative"
+  binary_directory="$archive_root/dists/$suite/main/binary-amd64"
+  mkdir -p "$pool_directory" "$binary_directory"
+
+  for package_path in "${packages[@]}"; do
+    package_name="$(dpkg-deb --field "$package_path" Package)"
+    package_architecture="$(dpkg-deb --field "$package_path" Architecture)"
+    [ "$package_name" = "thallium-store" ] \
+      || { echo "unexpected package '$package_name' in $package_path" >&2; exit 1; }
+    [ "$package_architecture" = "amd64" ] \
+      || { echo "unexpected architecture '$package_architecture' in $package_path" >&2; exit 1; }
+    install -m 0644 "$package_path" "$pool_directory/${package_path##*/}"
+  done
+
+  (
+    cd "$archive_root"
+    apt-ftparchive packages "$pool_relative" > "dists/$suite/main/binary-amd64/Packages"
+    gzip -9n < "dists/$suite/main/binary-amd64/Packages" \
+      > "dists/$suite/main/binary-amd64/Packages.gz"
+    apt-ftparchive \
+      -o APT::FTPArchive::Release::Origin='Thallium Store' \
+      -o APT::FTPArchive::Release::Label='Thallium Store' \
+      -o APT::FTPArchive::Release::Suite="$suite" \
+      -o APT::FTPArchive::Release::Codename="$suite" \
+      -o APT::FTPArchive::Release::Architectures='amd64' \
+      -o APT::FTPArchive::Release::Components='main' \
+      -o APT::FTPArchive::Release::Description='Native Qt store for Debian-based systems' \
+      release "dists/$suite" > "dists/$suite/Release"
+    gpg --batch --yes --local-user "$signing_fingerprint" --armor --detach-sign \
+      --output "dists/$suite/Release.gpg" "dists/$suite/Release"
+    gpg --batch --yes --local-user "$signing_fingerprint" --clearsign \
+      --output "dists/$suite/InRelease" "dists/$suite/Release"
+  )
+  published_suites=$((published_suites + 1))
+done
+
+[ "$published_suites" -gt 0 ] || { echo "no supported suites were published" >&2; exit 1; }
+
+gpg --batch --yes --dearmor \
+  --output "$archive_root/thallium-store-archive-keyring.pgp" "$public_key"
+install -m 0755 scripts/install-repository "$archive_root/install.sh"
+install -m 0644 packaging/repository-index.html "$archive_root/index.html"
+: > "$archive_root/.nojekyll"
+
+echo "$archive_root"

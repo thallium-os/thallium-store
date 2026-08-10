@@ -81,7 +81,8 @@ Section: admin
 Priority: optional
 Architecture: $arch
 Maintainer: Thallium OS <maintainers@thallium.local>
-Depends: $qt_deps, qml6-module-qtquick, qml6-module-qtquick-controls, qml6-module-qtquick-layouts, qt6-qpa-plugins, bash, curl, flatpak, apt, dpkg, pkexec, xdg-utils
+Depends: $qt_deps, qml6-module-qtquick, qml6-module-qtquick-controls, qml6-module-qtquick-layouts, qt6-qpa-plugins, bash, curl, apt, dpkg, xdg-utils
+Recommends: flatpak, pkexec
 Description: Native Qt application store for Debian-based systems
  Thallium Store searches system packages, Flathub, and curated GitHub
  applications in a native Qt interface, then delegates package changes to UNI.

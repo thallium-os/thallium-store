@@ -27,6 +27,21 @@ sudo apt install cmake g++ qt6-base-dev qt6-declarative-dev \
 
 ## Installation
 
+On Debian 12, Debian 13, Ubuntu 24.04, and compatible Ubuntu derivatives, add
+the signed Thallium Store repository and install the native application with
+one command:
+
+```bash
+curl -fsSL https://dronzer-tb.github.io/thallium-store/install.sh | sudo sh
+```
+
+The source remains installed, so new releases arrive through the system's
+normal `apt update` and upgrade process. See
+[`docs/apt-repository.md`](docs/apt-repository.md) for supported systems and
+repository security details.
+
+### Build locally
+
 Build a Debian package and install it:
 
 ```bash
