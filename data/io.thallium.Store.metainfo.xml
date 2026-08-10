@@ -2,11 +2,11 @@
 <component type="desktop-application">
   <id>io.thallium.Store</id>
   <name>Thallium Store</name>
-  <summary>Install applications on Thallium OS</summary>
+  <summary>Install applications on Debian-based systems</summary>
   <metadata_license>FSFAP</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <description>
-    <p>Thallium Store is a graphical application store for Thallium OS. It searches system packages, Flathub, and curated GitHub releases, then delegates package changes to UNI.</p>
+    <p>Thallium Store is a graphical application store for Debian-based systems. It searches system packages, Flathub, and curated GitHub releases, then delegates package changes to UNI. Its local browser interface works across desktop environments without Quickshell or Hyprland.</p>
   </description>
   <launchable type="desktop-id">io.thallium.Store.desktop</launchable>
   <icon type="stock">io.thallium.Store</icon>
@@ -15,6 +15,7 @@
     <category>PackageManager</category>
   </categories>
   <provides>
+    <binary>thallium-store</binary>
     <binary>thallium-store-backend</binary>
   </provides>
   <releases>
@@ -25,4 +26,3 @@
     </release>
   </releases>
 </component>
-

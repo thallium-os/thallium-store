@@ -27,7 +27,6 @@ mkdir -p \
   "$pkg_dir/DEBIAN" \
   "$pkg_dir/usr/bin" \
   "$pkg_dir/usr/lib/thallium-store/uni" \
-  "$pkg_dir/usr/share/thallium-store/ui" \
   "$pkg_dir/usr/share/thallium-store/data" \
   "$pkg_dir/usr/share/applications" \
   "$pkg_dir/usr/share/metainfo" \
@@ -37,11 +36,6 @@ mkdir -p \
 install -m 0755 target/release/thallium-store-backend "$pkg_dir/usr/bin/thallium-store-backend"
 install -m 0755 scripts/thallium-store "$pkg_dir/usr/bin/thallium-store"
 install -m 0755 vendor/uni/uni "$pkg_dir/usr/lib/thallium-store/uni/uni"
-# The whole ui/ tree, not just shell.qml -- same reason as scripts/install-local:
-# the moment the QML is split into components/ or pages/, shipping only the root
-# document produces a package whose UI fails to import and silently blanks.
-cp -a ui/. "$pkg_dir/usr/share/thallium-store/ui/"
-find "$pkg_dir/usr/share/thallium-store/ui" -type f -exec chmod 0644 {} +
 install -m 0644 data/icons/io.thallium.Store.svg \
   "$pkg_dir/usr/share/icons/hicolor/scalable/apps/io.thallium.Store.svg"
 install -m 0644 data/github-apps.json "$pkg_dir/usr/share/thallium-store/data/github-apps.json"
@@ -59,10 +53,10 @@ Section: admin
 Priority: optional
 Architecture: $arch
 Maintainer: Thallium OS <maintainers@thallium.local>
-Depends: quickshell, bash, curl, flatpak, apt, dpkg, pkexec
-Description: Graphical application store for Thallium OS
+Depends: bash, curl, flatpak, apt, dpkg, pkexec, xdg-utils
+Description: Graphical application store for Debian-based systems
  Thallium Store searches system packages, Flathub, and curated GitHub
- applications, then delegates package changes to a JSON-capable UNI backend.
+ applications in a local browser UI, then delegates package changes to UNI.
 EOF
 
 cat > "$pkg_dir/DEBIAN/postinst" <<'EOF'

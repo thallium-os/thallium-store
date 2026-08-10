@@ -1,7 +1,7 @@
 use anyhow::Result;
+use chrono::Utc;
 use rusqlite::{params, Connection};
 use std::path::Path;
-use chrono::Utc;
 use store_core::{Operation, OperationLog, OperationState};
 
 pub struct StoreDb {

@@ -22,15 +22,6 @@ install -m 0755 target/debug/thallium-store-backend "$bin_home/thallium-store-ba
 install -m 0755 scripts/thallium-store "$bin_home/thallium-store"
 install -m 0755 vendor/uni/uni "$app_home/uni/uni"
 
-# The whole ui/ tree, not just shell.qml. The UI stopped being one file
-# (components/, pages/, services/, assets/) and installing only the root
-# document left the installed app running whatever monolith was last copied
-# there -- months of UI work sat in the repo while `thallium-store` kept
-# launching the old one. Cleared first so a QML file deleted upstream does
-# not linger and get imported by a stale qmldir.
-rm -rf "$app_home/ui"
-install -d "$app_home/ui"
-cp -a ui/. "$app_home/ui/"
 install -m 0644 data/github-apps.json "$app_home/data/github-apps.json"
 install -m 0644 data/appimages.json "$app_home/data/appimages.json"
 install -m 0644 data/canonical-aliases.json "$app_home/data/canonical-aliases.json"

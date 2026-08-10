@@ -8,16 +8,7 @@ fi
 
 data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
-ui_path="$data_home/thallium-store/ui/shell.qml"
 uni_path="$data_home/thallium-store/uni/uni"
-
-if [ ! -f "$ui_path" ]; then
-  if [ -f "/usr/share/thallium-store/ui/shell.qml" ]; then
-    ui_path="/usr/share/thallium-store/ui/shell.qml"
-  else
-    ui_path="$repo_dir/ui/shell.qml"
-  fi
-fi
 
 if [ ! -x "$uni_path" ]; then
   if [ -x "/usr/lib/thallium-store/uni/uni" ]; then
@@ -36,4 +27,4 @@ if [ -x "$uni_path" ]; then
 fi
 export THALLIUM_STORE_FAKE_UNI="${THALLIUM_STORE_FAKE_UNI:-0}"
 
-exec quickshell --path "$ui_path"
+exec thallium-store-backend --web

@@ -7,7 +7,7 @@ use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use store_catalog::CatalogManager;
 use store_core::{
     AppVariant, CanonicalApp, EnqueueOperation, Operation, OperationLog, OperationState,
@@ -15,9 +15,9 @@ use store_core::{
 };
 use store_db::StoreDb;
 use store_uni::{StagePermits, UniAdapter};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::process::Command;
 use tokio::sync::{broadcast, Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -41,7 +41,7 @@ struct AppState {
     running_ops: Arc<Mutex<HashMap<String, CancellationToken>>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RpcRequest {
     id: Option<Value>,
     method: String,
@@ -146,10 +146,63 @@ async fn main() -> Result<()> {
         return client_request(&socket_path, method, params).await;
     }
 
+    if args.get(1).map(String::as_str) == Some("--web") {
+        return serve_web().await;
+    }
+
     serve(socket_path).await
 }
 
+async fn build_state() -> Result<AppState> {
+    // Simulation is opt-in. It used to be the default, so a backend started
+    // without the wrapper script -- by hand, by a launcher, by anything that
+    // did not export the variable -- silently faked every install.
+    let fake_uni =
+        std::env::var("THALLIUM_STORE_FAKE_UNI").unwrap_or_else(|_| "0".to_string()) != "0";
+    let db_path = data_home().join("thallium-store/store.db");
+    let (progress_tx, _) = broadcast::channel(256);
+    let db = StoreDb::open(&db_path)?;
+    match db.reap_orphaned_operations() {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("cancelled {n} operation(s) left running by a previous backend"),
+        Err(err) => tracing::warn!("could not reap orphaned operations: {err}"),
+    }
+    let state = AppState {
+        catalog: CatalogManager::new(),
+        db: Arc::new(Mutex::new(db)),
+        uni: UniAdapter::new(fake_uni),
+        fake_uni,
+        recent_apps: Arc::new(Mutex::new(HashMap::new())),
+        active: Arc::new(Semaphore::new(4)),
+        permits: StagePermits {
+            network: Arc::new(Semaphore::new(4)),
+            system_mutation: Arc::new(Semaphore::new(1)),
+            flatpak_mutation: Arc::new(Semaphore::new(1)),
+            github_mutation: Arc::new(Semaphore::new(2)),
+        },
+        progress_tx,
+        running_ops: Arc::new(Mutex::new(HashMap::new())),
+    };
+
+    let warm_catalog = state.catalog.clone();
+    tokio::spawn(async move { warm_catalog.warm().await });
+    Ok(state)
+}
+
 async fn serve(socket_path: PathBuf) -> Result<()> {
+    let Some(listener) = claim_socket(&socket_path).await? else {
+        tracing::info!(
+            "backend already available on {}; exiting helper instance",
+            socket_path.display()
+        );
+        return Ok(());
+    };
+    let state = build_state().await?;
+    install_socket_cleanup_signal(socket_path.clone());
+    serve_unix(listener, state, None).await
+}
+
+async fn claim_socket(socket_path: &Path) -> Result<Option<UnixListener>> {
     if let Some(parent) = socket_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
@@ -157,13 +210,7 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
 
     if socket_path.exists() {
         match UnixStream::connect(&socket_path).await {
-            Ok(_) => {
-                tracing::info!(
-                    "backend already available on {}; exiting helper instance",
-                    socket_path.display()
-                );
-                return Ok(());
-            }
+            Ok(_) => return Ok(None),
             Err(err)
                 if matches!(
                     err.kind(),
@@ -178,74 +225,41 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
         }
     }
 
-    // Simulation is opt-in. It used to be the default, so a backend started
-    // without the wrapper script -- by hand, by a launcher, by anything that
-    // did not export the variable -- silently faked every install: progress
-    // bars that move, an operation that "downloads" without touching the
-    // network, and nothing on disk at the end of it.
-    let fake_uni = std::env::var("THALLIUM_STORE_FAKE_UNI").unwrap_or_else(|_| "0".to_string()) != "0";
-    let db_path = data_home().join("thallium-store/store.db");
-    let (progress_tx, _) = broadcast::channel(256);
-    let db = StoreDb::open(&db_path)?;
-    // Anything still mid-flight belongs to a process that is already gone.
-    match db.reap_orphaned_operations() {
-        Ok(0) => {}
-        Ok(n) => tracing::info!("cancelled {n} operation(s) left running by a previous backend"),
-        Err(err) => tracing::warn!("could not reap orphaned operations: {err}"),
-    }
-    let state = AppState {
-        catalog: CatalogManager::new(),
-        db: Arc::new(Mutex::new(db)),
-        uni: UniAdapter::new(fake_uni),
-        fake_uni,
-        recent_apps: Arc::new(Mutex::new(HashMap::new())),
-        active: Arc::new(Semaphore::new(4)),
-        // network bounds the parallel download stage across all sources;
-        // *_mutation bounds each source's install stage (system MUST stay 1).
-        permits: StagePermits {
-            network: Arc::new(Semaphore::new(4)),
-            system_mutation: Arc::new(Semaphore::new(1)),
-            flatpak_mutation: Arc::new(Semaphore::new(1)),
-            github_mutation: Arc::new(Semaphore::new(2)),
-        },
-        progress_tx,
-        running_ops: Arc::new(Mutex::new(HashMap::new())),
-    };
-
-    // Warm the catalog index in the background so searches are served from
-    // memory; live providers cover the brief window before it's ready.
-    let warm_catalog = state.catalog.clone();
-    tokio::spawn(async move { warm_catalog.warm().await });
-
-    let listener = UnixListener::bind(&socket_path)?;
-    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+    let listener = UnixListener::bind(socket_path)?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
     tracing::info!("listening on {}", socket_path.display());
+    Ok(Some(listener))
+}
 
-    // Take the socket file with us on the way out. The UI owns this process and
-    // kills it when its window closes, which otherwise leaves a socket nobody
-    // is listening on -- and the next launch spends its startup connecting to
-    // that corpse and printing "connection refused" over the splash screen.
-    {
-        let socket_path = socket_path.clone();
-        tokio::spawn(async move {
-            let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+fn install_socket_cleanup_signal(socket_path: PathBuf) {
+    tokio::spawn(async move {
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
                 Ok(sig) => sig,
                 Err(err) => {
                     tracing::warn!("cannot watch for SIGTERM: {err}");
                     return;
                 }
             };
-            tokio::select! {
-                _ = term.recv() => {}
-                _ = tokio::signal::ctrl_c() => {}
-            }
-            let _ = std::fs::remove_file(&socket_path);
-            std::process::exit(0);
-        });
-    }
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+        let _ = std::fs::remove_file(&socket_path);
+        std::process::exit(0);
+    });
+}
 
+async fn serve_unix(
+    listener: UnixListener,
+    state: AppState,
+    last_activity: Option<Arc<Mutex<Instant>>>,
+) -> Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
+        if let Some(last_activity) = &last_activity {
+            *last_activity.lock().await = Instant::now();
+        }
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(err) = handle_connection(stream, state).await {
@@ -253,6 +267,388 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
             }
         });
     }
+}
+
+const WEB_INDEX: &str = include_str!("../../../web/index.html");
+const WEB_STYLES: &str = include_str!("../../../web/style.css");
+const WEB_APP: &str = include_str!("../../../web/app.js");
+const MAX_HTTP_REQUEST: usize = 1024 * 1024;
+
+#[derive(Clone)]
+enum WebBackend {
+    Direct(AppState),
+    Socket(PathBuf),
+}
+
+/// Run the store as a local, browser-hosted application. This is deliberately
+/// part of the Rust backend rather than a second service: package operations,
+/// catalog caching, and trust decisions still go through the exact same RPC
+/// handlers as the Quickshell client.
+async fn serve_web() -> Result<()> {
+    let backend_socket = socket_path();
+    let last_activity = Arc::new(Mutex::new(Instant::now()));
+    let (backend, owns_socket) = match claim_socket(&backend_socket).await? {
+        Some(listener) => {
+            let state = build_state().await?;
+            let unix_state = state.clone();
+            let unix_activity = last_activity.clone();
+            tokio::spawn(async move {
+                if let Err(err) = serve_unix(listener, unix_state, Some(unix_activity)).await {
+                    tracing::warn!("web frontend socket failed: {err:#}");
+                }
+            });
+            install_socket_cleanup_signal(backend_socket.clone());
+            (WebBackend::Direct(state), true)
+        }
+        None => {
+            tracing::info!("using existing backend on {}", backend_socket.display());
+            (WebBackend::Socket(backend_socket.clone()), false)
+        }
+    };
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let address = listener.local_addr()?;
+    let token = Arc::new(Uuid::now_v7().to_string());
+    let idle_seconds = std::env::var("THALLIUM_STORE_WEB_IDLE_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(15 * 60)
+        .max(30);
+    let url = format!("http://{address}/");
+
+    println!("Thallium Store is available at {url}");
+    open_browser(&url).await;
+
+    let mut idle_check = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let backend = backend.clone();
+                let token = token.clone();
+                let last_activity = last_activity.clone();
+                tokio::spawn(async move {
+                    *last_activity.lock().await = Instant::now();
+                    if let Err(err) = handle_http_connection(stream, backend, &token).await {
+                        tracing::debug!("web client failed: {err:#}");
+                    }
+                });
+            }
+            _ = idle_check.tick() => {
+                if last_activity.lock().await.elapsed() >= Duration::from_secs(idle_seconds) {
+                    tracing::info!("web frontend idle for {idle_seconds}s; exiting");
+                    if owns_socket {
+                        let _ = tokio::fs::remove_file(&backend_socket).await;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+async fn open_browser(url: &str) {
+    if std::env::var_os("THALLIUM_STORE_NO_OPEN").is_some() {
+        return;
+    }
+
+    for (program, args) in [("xdg-open", vec![url]), ("gio", vec!["open", url])] {
+        match Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => return,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => {
+                tracing::warn!("could not open browser with {program}: {err}");
+                return;
+            }
+        }
+    }
+    tracing::warn!("no browser opener found; visit {url}");
+}
+
+async fn handle_http_connection(
+    mut stream: TcpStream,
+    backend: WebBackend,
+    token: &str,
+) -> Result<()> {
+    let mut request = Vec::with_capacity(8192);
+    let mut chunk = [0_u8; 8192];
+    let header_end;
+
+    loop {
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(());
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if request.len() > MAX_HTTP_REQUEST {
+            return write_http_response(
+                &mut stream,
+                413,
+                "text/plain; charset=utf-8",
+                b"request too large",
+            )
+            .await;
+        }
+        if let Some(position) = find_header_end(&request) {
+            header_end = position;
+            break;
+        }
+    }
+
+    let header_text = std::str::from_utf8(&request[..header_end])?;
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines.next().context("missing HTTP request line")?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts
+        .next()
+        .context("missing HTTP method")?
+        .to_string();
+    let path = request_parts
+        .next()
+        .context("missing HTTP path")?
+        .to_string();
+    let mut content_length = 0_usize;
+    let mut supplied_token = None::<String>;
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().context("invalid Content-Length")?;
+            } else if name.eq_ignore_ascii_case("x-thallium-token") {
+                supplied_token = Some(value.trim().to_string());
+            }
+        }
+    }
+    if content_length > MAX_HTTP_REQUEST {
+        return write_http_response(
+            &mut stream,
+            413,
+            "text/plain; charset=utf-8",
+            b"request too large",
+        )
+        .await;
+    }
+
+    let body_start = header_end + 4;
+    while request.len() < body_start + content_length {
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if request.len() > MAX_HTTP_REQUEST {
+            return write_http_response(
+                &mut stream,
+                413,
+                "text/plain; charset=utf-8",
+                b"request too large",
+            )
+            .await;
+        }
+    }
+
+    let route = path.split('?').next().unwrap_or(path.as_str());
+    match (method.as_str(), route) {
+        ("GET", "/") => {
+            let index = WEB_INDEX.replace("__THALLIUM_SESSION_TOKEN__", token);
+            write_http_response(
+                &mut stream,
+                200,
+                "text/html; charset=utf-8",
+                index.as_bytes(),
+            )
+            .await
+        }
+        ("GET", "/style.css") => {
+            write_http_response(
+                &mut stream,
+                200,
+                "text/css; charset=utf-8",
+                WEB_STYLES.as_bytes(),
+            )
+            .await
+        }
+        ("GET", "/app.js") => {
+            write_http_response(
+                &mut stream,
+                200,
+                "text/javascript; charset=utf-8",
+                WEB_APP.as_bytes(),
+            )
+            .await
+        }
+        ("GET", "/favicon.ico") => write_http_response(&mut stream, 204, "image/x-icon", &[]).await,
+        ("GET", asset) if asset.starts_with("/cached-icon/") => {
+            let filename = asset.trim_start_matches("/cached-icon/");
+            if filename.is_empty()
+                || !filename
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+            {
+                return write_http_response(
+                    &mut stream,
+                    404,
+                    "text/plain; charset=utf-8",
+                    b"not found",
+                )
+                .await;
+            }
+            let path = store_catalog::icon_cache_dir().join(filename);
+            match tokio::fs::read(&path).await {
+                Ok(bytes) => {
+                    let content_type = match path.extension().and_then(|ext| ext.to_str()) {
+                        Some("svg") => "image/svg+xml",
+                        Some("jpg" | "jpeg") => "image/jpeg",
+                        Some("webp") => "image/webp",
+                        _ => "image/png",
+                    };
+                    write_http_response(&mut stream, 200, content_type, &bytes).await
+                }
+                Err(_) => {
+                    write_http_response(&mut stream, 404, "text/plain; charset=utf-8", b"not found")
+                        .await
+                }
+            }
+        }
+        ("POST", "/api") if supplied_token.as_deref() == Some(token) => {
+            if request.len() < body_start + content_length {
+                return write_http_response(
+                    &mut stream,
+                    400,
+                    "application/json",
+                    br#"{"error":{"message":"incomplete request body"}}"#,
+                )
+                .await;
+            }
+            let rpc_request: RpcRequest =
+                serde_json::from_slice(&request[body_start..body_start + content_length])?;
+            let id = rpc_request.id.clone();
+            let result = match backend {
+                WebBackend::Direct(state) => handle_request(rpc_request, state).await,
+                WebBackend::Socket(path) => proxy_request(&path, &rpc_request).await,
+            };
+            let response = match result {
+                Ok(mut result) => {
+                    rewrite_web_asset_urls(&mut result);
+                    RpcResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: Some(result),
+                        error: None,
+                    }
+                }
+                Err(err) => RpcResponse {
+                    jsonrpc: "2.0",
+                    id,
+                    result: None,
+                    error: Some(RpcError {
+                        code: -32000,
+                        message: err.to_string(),
+                    }),
+                },
+            };
+            let body = serde_json::to_vec(&response)?;
+            write_http_response(&mut stream, 200, "application/json", &body).await
+        }
+        ("POST", "/api") => {
+            write_http_response(
+                &mut stream,
+                403,
+                "application/json",
+                br#"{"error":{"message":"invalid session token"}}"#,
+            )
+            .await
+        }
+        _ => write_http_response(&mut stream, 404, "text/plain; charset=utf-8", b"not found").await,
+    }
+}
+
+async fn proxy_request(socket_path: &Path, request: &RpcRequest) -> Result<Value> {
+    let mut stream = connect_with_retry(socket_path).await?;
+    let request_value = json!({
+        "jsonrpc": "2.0",
+        "id": request.id,
+        "method": request.method,
+        "params": request.params,
+    });
+    stream
+        .write_all(serde_json::to_string(&request_value)?.as_bytes())
+        .await?;
+    stream.write_all(b"\n").await?;
+
+    let mut lines = BufReader::new(stream).lines();
+    while let Some(line) = lines.next_line().await? {
+        let response: Value = serde_json::from_str(&line)?;
+        if response.get("id") != request.id.as_ref() {
+            continue;
+        }
+        if let Some(error) = response.get("error") {
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("backend request failed");
+            anyhow::bail!(message.to_string());
+        }
+        return Ok(response.get("result").cloned().unwrap_or(Value::Null));
+    }
+    anyhow::bail!("backend closed connection without a response")
+}
+
+fn find_header_end(request: &[u8]) -> Option<usize> {
+    request.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn rewrite_web_asset_urls(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            let cache_prefix = format!("file://{}/", store_catalog::icon_cache_dir().display());
+            if let Some(filename) = text.strip_prefix(&cache_prefix) {
+                if !filename.contains('/') {
+                    *text = format!("/cached-icon/{filename}");
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rewrite_web_asset_urls(item);
+            }
+        }
+        Value::Object(entries) => {
+            for item in entries.values_mut() {
+                rewrite_web_asset_urls(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> Result<()> {
+    let reason = match status {
+        200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        413 => "Payload Too Large",
+        _ => "Error",
+    };
+    let headers = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'self'; img-src 'self' data: https: http:; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(headers.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.shutdown().await?;
+    Ok(())
 }
 
 async fn handle_connection(stream: UnixStream, state: AppState) -> Result<()> {
@@ -1026,6 +1422,27 @@ async fn fetch_github_latest(name: &str, repo_id: &str) -> Option<UpdateItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_http_header_boundary() {
+        assert_eq!(
+            find_header_end(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+            Some(31)
+        );
+        assert_eq!(find_header_end(b"incomplete\r\n"), None);
+    }
+
+    #[test]
+    fn cached_icon_paths_become_loopback_routes() {
+        let cache = store_catalog::icon_cache_dir();
+        let mut value = json!({
+            "icon": format!("file://{}/abc123.png", cache.display()),
+            "homepage": "https://example.com"
+        });
+        rewrite_web_asset_urls(&mut value);
+        assert_eq!(value["icon"], "/cached-icon/abc123.png");
+        assert_eq!(value["homepage"], "https://example.com");
+    }
 
     #[test]
     fn parse_apt_line_extracts_current_and_available_versions() {

@@ -1,6 +1,6 @@
 # Thallium Store
 
-> The app store for Thallium 81 — one place to find and install software from apt, Flathub, GitHub releases and AppImages, ranked by trust and installed through UNI.
+> A desktop-independent store for Debian-based systems — one place to find and install software from apt, Flathub, GitHub releases and AppImages, ranked by trust and installed through UNI.
 
 ## What it does
 
@@ -20,7 +20,7 @@ cd thallium-store
 ./scripts/dev-run
 ```
 
-`dev-run` builds the workspace and launches the Quickshell UI against a freshly built backend, using real UNI. First launch shows a short setup walkthrough.
+`dev-run` builds the workspace, starts the local web frontend, and opens it in your default browser against a freshly built backend using real UNI. Set `THALLIUM_STORE_NO_OPEN=1` to print the local URL without opening a browser.
 
 ## Installation
 
@@ -39,17 +39,20 @@ Or install into your user prefix without packaging:
 
 ## Usage
 
-The store is a Quickshell shell; launch it with the bundled wrapper (added to `PATH` by the package):
+Launch the store with the bundled wrapper (added to `PATH` by the package):
 
 ```bash
 thallium-store
 ```
 
+The wrapper starts an HTTP server bound to a random **loopback-only** port and opens the store in the default browser. The server is not exposed to the network, accepts mutations only from its per-launch session token, and exits after 15 minutes without browser activity. It works on GNOME, KDE Plasma, Xfce, Cinnamon, Sway, Hyprland, and other X11 or Wayland sessions; Quickshell is not installed or required.
+
 - **Home** — curated picks and collections.
-- **Search** — click the search icon in the ribbon; every source is queried as you type, press Enter for full results.
-- **Apps** — installed software and live operation activity (cancel a running job from here).
+- **Search** — use the header search box; every configured source is queried together.
+- **Apps** — software currently installed through UNI or Flatpak, with removal controls.
 - **Updates** — available updates from UNI.
-- **Settings** — cache storage controls, replay the first-run walkthrough, store info.
+- **Activity** — live and previous package operations, including cancellation controls.
+- **Settings** — backend health, compatibility information, and icon-cache controls.
 
 ## Configuration
 
@@ -58,15 +61,16 @@ Set via environment variables (the wrappers in `scripts/` set sensible defaults)
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `THALLIUM_STORE_FAKE_UNI` | `0` | `1` runs a safe simulator — progress and state without real package mutations. |
-| `THALLIUM_STORE_BACKEND` | `thallium-store-backend` on `PATH` | Path to the backend binary. |
 | `THALLIUM_STORE_UNI` | bundled `vendor/uni/uni` | Path to the UNI binary. |
 | `UNI_PRIVILEGE_BACKEND` | `pkexec` | Privilege escalation for apt/system flatpak mutations (`pkexec` or `sudo`). |
+| `THALLIUM_STORE_NO_OPEN` | unset | Set to any value to print the local URL without opening a browser. |
+| `THALLIUM_STORE_WEB_IDLE_SECONDS` | `900` | Shut down the local server after this many seconds without requests (minimum 30). |
 
 State lives under `~/.local/share/thallium-store/` (SQLite DB, icon cache) and `~/.config/thallium-store/settings.json`.
 
 ## Architecture
 
-A Rust backend and a QML frontend talk newline-delimited JSON-RPC over a per-user Unix socket. The backend is a Cargo workspace:
+A Rust backend embeds and serves a dependency-free HTML/CSS/JavaScript frontend over loopback HTTP. Browser requests call the same JSON-RPC handlers used by the Unix-socket CLI. The backend is a Cargo workspace:
 
 | Crate | Responsibility |
 | --- | --- |
@@ -76,7 +80,7 @@ A Rust backend and a QML frontend talk newline-delimited JSON-RPC over a per-use
 | `store-db` | SQLite operation history. |
 | `store-core` | Shared models and the trust-ranking logic. |
 
-The UI is a single Quickshell/QML shell (`ui/shell.qml`) in the Thallium 81 design language (Everforest palette, chamfered HUD surfaces). Curated catalog data lives in `data/`.
+The active frontend lives in `web/` and is embedded into the backend binary at build time, so the Debian package has no web-server or GUI-toolkit runtime dependency. The previous Quickshell client remains under `ui/` as a design and migration reference. Curated catalog data lives in `data/`.
 
 ## Contributing
 

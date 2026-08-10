@@ -11,7 +11,6 @@ fi
 cargo build
 
 export PATH="$PWD/target/debug:$PATH"
-export THALLIUM_STORE_BACKEND="${THALLIUM_STORE_BACKEND:-$PWD/target/debug/thallium-store-backend}"
 export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 export UNI_PRIVILEGE_BACKEND="${UNI_PRIVILEGE_BACKEND:-pkexec}"
@@ -20,4 +19,4 @@ if [ -x "$PWD/vendor/uni/uni" ]; then
 fi
 export THALLIUM_STORE_FAKE_UNI="${THALLIUM_STORE_FAKE_UNI:-0}"
 
-exec quickshell --path ui/shell.qml
+exec "$PWD/target/debug/thallium-store-backend" --web

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="thallium-session" content="__THALLIUM_SESSION_TOKEN__">
+  <title>Thallium Store</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <button class="brand" data-view="home" aria-label="Thallium Store home">
+        <span class="brand-mark">T</span>
+        <span><strong>Thallium</strong><small>STORE</small></span>
+      </button>
+
+      <nav aria-label="Store sections">
+        <button class="nav-button active" data-view="home">Home</button>
+        <button class="nav-button" data-view="installed">Apps</button>
+        <button class="nav-button" data-view="updates">Updates</button>
+        <button class="nav-button" data-view="activity">Activity <span id="activity-badge" class="badge hidden"></span></button>
+        <button class="nav-button" data-view="settings">Settings</button>
+      </nav>
+
+      <form id="search-form" class="search-box" role="search">
+        <label class="sr-only" for="search-input">Search applications</label>
+        <input id="search-input" type="search" autocomplete="off" placeholder="Search apps">
+        <button type="submit">Search</button>
+      </form>
+    </header>
+
+    <div id="simulation-warning" class="warning hidden">
+      Simulation mode is enabled. Package operations will not change the system.
+    </div>
+
+    <main id="content" tabindex="-1">
+      <section class="loading-state">
+        <span class="spinner"></span>
+        <p>Starting the store…</p>
+      </section>
+    </main>
+
+    <footer>
+      <span id="status">Connecting to the backend…</span>
+      <span>Local browser edition · no Quickshell required</span>
+    </footer>
+  </div>
+
+  <dialog id="details-dialog" aria-labelledby="details-title">
+    <button id="details-close" class="dialog-close" aria-label="Close">×</button>
+    <div id="details-content"></div>
+  </dialog>
+
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog" class="confirm-panel">
+      <span class="eyebrow">PACKAGE OPERATION</span>
+      <h2 id="confirm-title">Confirm operation</h2>
+      <p id="confirm-description"></p>
+      <code id="confirm-command"></code>
+      <div class="dialog-actions">
+        <button value="cancel" class="button secondary">Cancel</button>
+        <button id="confirm-accept" value="default" class="button primary">Continue</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+</body>
+</html>

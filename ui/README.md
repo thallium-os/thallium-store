@@ -1,9 +1,9 @@
-# Thallium Store UI
+# Legacy Quickshell UI
 
-Run from the repository root after building the backend:
+This client is retained as a design and migration reference on the
+`compat/no-quickshell` branch. The supported frontend is the embedded local web
+application under `web/`, launched with:
 
 ```bash
-PATH="$PWD/target/debug:$PATH" THALLIUM_STORE_FAKE_UNI=1 quickshell --path ui/shell.qml
+./scripts/dev-run
 ```
-
-The UI starts `thallium-store-backend` from `PATH`.
