@@ -220,21 +220,34 @@ fn score_asset(name: &str) -> i32 {
         }
     }
 
-    for (needle, delta) in [
+    // Matched on the suffix, not anywhere in the name: sidecars are named after
+    // the artifact they describe, so `App-linux-x86_64.AppImage.zsync` contains
+    // `.appimage` and used to score as high as the AppImage it points at.
+    for (suffix, delta) in [
         (".deb", 40),
         (".appimage", 30),
         (".tar.gz", 10),
         (".tar.xz", 10),
         (".zip", 5),
-        ("linux", 20),
         (".rpm", -100),
         (".sha256", -500),
         (".sha512", -500),
         (".asc", -500),
-        ("source", -100),
-        ("debug", -100),
+        (".sig", -500),
+        (".zsync", -500),
+        (".blockmap", -500),
         (".exe", -300),
         (".dmg", -300),
+    ] {
+        if name.ends_with(suffix) {
+            score += delta;
+        }
+    }
+
+    for (needle, delta) in [
+        ("linux", 20),
+        ("source", -100),
+        ("debug", -100),
         ("windows", -300),
         ("darwin", -300),
         ("macos", -300),
@@ -255,6 +268,29 @@ mod tests {
         assert!(score_asset("app-linux-x86_64.AppImage") > score_asset("app-windows.exe"));
         assert!(score_asset("app.sha256") < -100);
         assert!(score_asset("app.deb") > 0);
+    }
+
+    #[test]
+    fn scores_reject_sidecars_named_after_their_artifact() {
+        assert!(score_asset("PolyMC-Linux-x86_64-7.1.AppImage.zsync") < -100);
+        assert!(score_asset("app-linux-x86_64.AppImage.sha256") < -100);
+        assert!(
+            score_asset("PolyMC-Linux-x86_64-7.1.AppImage")
+                > score_asset("PolyMC-Linux-x86_64-7.1.AppImage.zsync")
+        );
+    }
+
+    #[test]
+    fn picks_the_appimage_over_its_zsync() {
+        let release = serde_json::json!({
+            "assets": [
+                {"name": "PolyMC-Linux-x86_64-7.1.AppImage", "browser_download_url": "u1"},
+                {"name": "PolyMC-Linux-x86_64-7.1.AppImage.zsync", "browser_download_url": "u2"}
+            ]
+        });
+        let (url, name) = pick_best_asset(&release).unwrap();
+        assert_eq!(url, "u1");
+        assert!(name.ends_with(".AppImage"));
     }
 
     #[test]
