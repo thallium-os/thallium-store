@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Asserts that successive pinned commits produce versions dpkg sorts in the
+# order they were committed. This is the property Thallium_81's delivery path
+# depends on: if two pins ever produced versions that sort the wrong way, apt
+# would refuse the newer build exactly as it refused the unbumped 0.5.25 one.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+version_script="$PWD/scripts/deb-version"
+
+fail=0
+check() {
+  local left="$1" op="$2" right="$3" what="$4"
+  if dpkg --compare-versions "$left" "$op" "$right"; then
+    echo "ok    $what: $left $op $right"
+  else
+    echo "FAIL  $what: $left $op $right"
+    fail=1
+  fi
+}
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+git init -q "$work"
+git -C "$work" config user.email test@invalid
+git -C "$work" config user.name test
+printf 'version = "0.1.10"\n' > "$work/Cargo.toml"
+mkdir -p "$work/scripts"
+cp "$version_script" "$work/scripts/deb-version"
+
+commit_at() {
+  git -C "$work" add -A
+  GIT_AUTHOR_DATE="$1" GIT_COMMITTER_DATE="$1" git -C "$work" commit -q -m "$2"
+  ( cd "$work" && ./scripts/deb-version )
+}
+
+echo "# three successive pins, committed in order"
+first="$(commit_at '2026-08-01T10:00:00Z' one)"
+echo 'x' > "$work/file"; second="$(commit_at '2026-08-10T10:00:00Z' two)"
+echo 'y' >> "$work/file"; third="$(commit_at '2026-09-01T09:00:00Z' three)"
+check "$first" lt "$second" "an earlier pin sorts below a later one"
+check "$second" lt "$third" "and across a month boundary"
+check "$first" lt "$third" "transitively"
+
+echo "# two commits in the same minute still order"
+echo 'z' >> "$work/file"; a="$(commit_at '2026-09-02T09:00:01Z' four)"
+echo 'w' >> "$work/file"; b="$(commit_at '2026-09-02T09:00:02Z' five)"
+check "$a" lt "$b" "one second apart"
+
+echo "# a stamped build outranks the bare version it came from"
+check "0.1.10" lt "$first" "stamp beats bare base"
+
+echo "# a Cargo.toml bump still dominates the stamp"
+printf 'version = "0.1.11"\n' > "$work/Cargo.toml"
+bumped="$(commit_at '2026-08-02T10:00:00Z' bump)"
+check "$third" lt "$bumped" "0.1.11 from an older commit still outranks 0.1.10 from a newer one"
+
+echo "# the published 0.1.9 is below everything here"
+check "0.1.9" lt "0.1.10" "the version 0.5.25 failed to move"
+
+exit "$fail"

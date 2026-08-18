@@ -8,10 +8,12 @@ if [ -f "$HOME/.cargo/env" ]; then
   source "$HOME/.cargo/env"
 fi
 
-# Single source of truth: the workspace version in Cargo.toml.
-version="${THALLIUM_STORE_VERSION:-$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)}"
+# Single source of truth: scripts/deb-version, which is the Cargo.toml version
+# plus a stamp identifying the commit it was built from. Read that script for
+# why the commit belongs in the version.
+version="${THALLIUM_STORE_VERSION:-$(scripts/deb-version)}"
 if [ -z "$version" ]; then
-  echo "could not read version from Cargo.toml" >&2
+  echo "could not compute the package version" >&2
   exit 1
 fi
 arch="$(dpkg --print-architecture)"
