@@ -123,9 +123,14 @@ pub async fn refresh(timeout: Duration) -> AptRefresh {
             )
         }
         Err(_) => {
+            // Measured: an unanswered polkit prompt looks exactly like this --
+            // pkexec sits waiting, no session is ever opened, and the timeout
+            // is the only thing that ends it. Saying "could not reach the
+            // archive" here would be a confident wrong answer about someone
+            // who simply walked away, so the message names both possibilities.
             return AptRefresh::new(
                 AptRefreshOutcome::Failed,
-                Some("timed out waiting for apt-get update".into()),
+                Some("apt-get update did not finish in time — the password prompt may not have been answered".into()),
             )
         }
     };

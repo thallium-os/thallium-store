@@ -208,9 +208,13 @@ ShellRoot {
     function updatesStaleNote() {
         if (!root.updatesStale())
             return ""
+        // Do not name a cause the backend did not report. "failed" covers an
+        // unreachable archive and an unanswered password prompt alike, and
+        // telling someone their network is down when they walked away from a
+        // dialog is its own kind of confidently wrong.
         const why = root.updatesAptRefresh === "declined"
             ? "Not refreshed — the password prompt was dismissed."
-            : "Could not reach the archive." + (root.updatesAptError ? " " + root.updatesAptError : "")
+            : "Not refreshed." + (root.updatesAptError ? " " + root.updatesAptError : "")
         return why + " Showing the last known list, " + root.updatesCheckedLabel() + "."
     }
 
