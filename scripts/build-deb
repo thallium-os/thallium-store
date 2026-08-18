@@ -28,7 +28,6 @@ rm -rf "$pkg_dir"
 mkdir -p \
   "$pkg_dir/DEBIAN" \
   "$pkg_dir/usr/bin" \
-  "$pkg_dir/usr/lib/thallium-store/uni" \
   "$pkg_dir/usr/share/thallium-store/ui" \
   "$pkg_dir/usr/share/thallium-store/data" \
   "$pkg_dir/usr/share/applications" \
@@ -38,7 +37,6 @@ mkdir -p \
 
 install -m 0755 target/release/thallium-store-backend "$pkg_dir/usr/bin/thallium-store-backend"
 install -m 0755 scripts/thallium-store "$pkg_dir/usr/bin/thallium-store"
-install -m 0755 vendor/uni/uni "$pkg_dir/usr/lib/thallium-store/uni/uni"
 # The whole ui/ tree, not just shell.qml -- same reason as scripts/install-local:
 # the moment the QML is split into components/ or pages/, shipping only the root
 # document produces a package whose UI fails to import and silently blanks.

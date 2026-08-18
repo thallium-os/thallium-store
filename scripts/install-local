@@ -17,10 +17,9 @@ desktop_home="$data_home/applications"
 
 icon_home="$data_home/icons/hicolor/scalable/apps"
 
-install -d "$bin_home" "$app_home/data" "$app_home/uni" "$desktop_home" "$icon_home"
+install -d "$bin_home" "$app_home/data" "$desktop_home" "$icon_home"
 install -m 0755 target/debug/thallium-store-backend "$bin_home/thallium-store-backend"
 install -m 0755 scripts/thallium-store "$bin_home/thallium-store"
-install -m 0755 vendor/uni/uni "$app_home/uni/uni"
 
 # The whole ui/ tree, not just shell.qml. The UI stopped being one file
 # (components/, pages/, services/, assets/) and installing only the root

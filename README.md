@@ -59,7 +59,6 @@ Set via environment variables (the wrappers in `scripts/` set sensible defaults)
 | --- | --- | --- |
 | `THALLIUM_STORE_FAKE_UNI` | `0` | `1` runs a safe simulator — progress and state without real package mutations. |
 | `THALLIUM_STORE_BACKEND` | `thallium-store-backend` on `PATH` | Path to the backend binary. |
-| `THALLIUM_STORE_UNI` | bundled `vendor/uni/uni` | Path to the UNI binary. |
 | `UNI_PRIVILEGE_BACKEND` | `pkexec` | Privilege escalation for apt/system flatpak mutations (`pkexec` or `sudo`). |
 
 State lives under `~/.local/share/thallium-store/` (SQLite DB, icon cache) and `~/.config/thallium-store/settings.json`.
@@ -86,7 +85,9 @@ cargo test           # run tests
 ./scripts/check      # fmt + clippy + tests
 ```
 
-UNI is vendored under `vendor/uni/`. Heavy builds and CI run in GitHub Actions.
+Installs run natively: the backend drives apt, flatpak and GitHub releases
+itself. UNI is no longer vendored or invoked — see `dronzer-tb/uni` for the
+standalone tool. Heavy builds and CI run in GitHub Actions.
 
 ## License
 

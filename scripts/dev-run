@@ -15,9 +15,6 @@ export THALLIUM_STORE_BACKEND="${THALLIUM_STORE_BACKEND:-$PWD/target/debug/thall
 export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 export UNI_PRIVILEGE_BACKEND="${UNI_PRIVILEGE_BACKEND:-pkexec}"
-if [ -x "$PWD/vendor/uni/uni" ]; then
-  export THALLIUM_STORE_UNI="${THALLIUM_STORE_UNI:-$PWD/vendor/uni/uni}"
-fi
 export THALLIUM_STORE_FAKE_UNI="${THALLIUM_STORE_FAKE_UNI:-0}"
 
 exec quickshell --path ui/shell.qml
