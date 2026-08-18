@@ -14,7 +14,7 @@
 //! polkit prompt raised on window open trains people to dismiss the prompt.
 
 use std::process::Stdio;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::privilege;
 
@@ -69,6 +69,19 @@ impl AptRefresh {
     pub fn skipped() -> Self {
         Self::new(AptRefreshOutcome::Skipped, None)
     }
+
+    /// A refresh that succeeded just now.
+    fn checked_now() -> Self {
+        Self {
+            outcome: AptRefreshOutcome::Ok,
+            error: None,
+            checked_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|since| since.as_secs())
+                .or_else(checked_at),
+        }
+    }
 }
 
 /// Run `apt-get update` under polkit, returning what happened.
@@ -84,9 +97,19 @@ pub async fn refresh(timeout: Duration) -> AptRefresh {
         );
     }
 
+    // --error-on=any because a bare `apt-get update` exits 0 when it could not
+    // reach the archive at all -- it prints W: and carries on with the old
+    // lists. Measured on trixie: unresolvable host, exit 0. Without this the
+    // refresh reports success, the UI drops the stale marker, and an offline
+    // machine is told its update list is current. That is the exact confident
+    // wrong answer this module exists to prevent.
+    //
     // Retries=1: the default three, each with its own connect timeout, can
     // outlast the caller's timeout on a machine that is simply offline.
-    let mut cmd = privilege::privileged("apt-get", &["update", "-o", "Acquire::Retries=1"]);
+    let mut cmd = privilege::privileged(
+        "apt-get",
+        &["update", "--error-on=any", "-o", "Acquire::Retries=1"],
+    );
     cmd.stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -108,7 +131,11 @@ pub async fn refresh(timeout: Duration) -> AptRefresh {
     };
 
     if output.status.success() {
-        return AptRefresh::new(AptRefreshOutcome::Ok, None);
+        // Stamp the success rather than reading the lists' mtime back: when
+        // the archive has not changed, apt rewrites nothing and the mtime
+        // stays where it was, so a refresh that did happen would report an
+        // age of hours. "When did we last look" is the question the UI asks.
+        return AptRefresh::checked_now();
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -138,14 +165,23 @@ fn classify(code: Option<i32>, stderr: &str) -> AptRefreshOutcome {
     AptRefreshOutcome::Failed
 }
 
-/// Last non-empty line, clipped. apt's failures are wordy and the interesting
-/// part is at the end; the whole thing does not belong in a JSON-RPC reply.
+/// One line of explanation, clipped. apt's failures are wordy and the whole
+/// thing does not belong in a JSON-RPC reply.
+///
+/// The first `E:` beats the last line: apt ends a failed update with the
+/// generic "Some index files failed to download", while the line above it
+/// names the host that could not be reached. The generic one is the fallback.
 fn last_line(stderr: &str) -> String {
-    let line = stderr
+    let lines: Vec<&str> = stderr
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .next_back()
+        .collect();
+    let line = lines
+        .iter()
+        .find(|line| line.starts_with("E:"))
+        .or_else(|| lines.last())
+        .copied()
         .unwrap_or("apt-get update failed");
     if line.len() > 200 {
         format!("{}…", &line[..200])
@@ -207,6 +243,16 @@ mod tests {
         let stderr = "E: Failed to fetch https://dronzer-tb.github.io/Thallium_81/dists/stable/InRelease  Could not connect";
         assert_eq!(classify(Some(100), stderr), AptRefreshOutcome::Failed);
         assert!(last_line(stderr).starts_with("E: Failed to fetch"));
+    }
+
+    #[test]
+    fn the_host_that_failed_beats_aptss_generic_last_line() {
+        // Verbatim shape of a real offline `apt-get update --error-on=any`.
+        let stderr = concat!(
+            "E: Failed to fetch https://dronzer-tb.github.io/Thallium_81/dists/stable/InRelease  Could not resolve host\n",
+            "E: Some index files failed to download. They have been ignored, or old ones used instead.\n"
+        );
+        assert!(last_line(stderr).contains("Could not resolve host"));
     }
 
     #[test]
