@@ -16,6 +16,13 @@ ShellRoot {
     property var operations: []
     property var installedItems: []
     property var updateItems: []
+    // How the last updates.list answered, not just what it answered with.
+    // "skipped" is the automatic poll; a person pressing Refresh gets one of
+    // the others. Without this the page cannot tell "nothing to update" from
+    // "could not look", and it used to render both as an empty screen.
+    property string updatesAptRefresh: "skipped"
+    property string updatesAptError: ""
+    property double updatesCheckedAt: 0
     property var requestQueue: []
     property bool requestRunning: false
     property string activeMethod: ""
@@ -176,6 +183,35 @@ ShellRoot {
                 return operations[i].app_name + " · " + state
         }
         return "Idle"
+    }
+
+    // True when apt's list is known not to have been refreshed just now.
+    // "skipped" is not stale: it is the ordinary poll, and the timestamp line
+    // is noise on a page nobody asked to refresh.
+    function updatesStale() {
+        return root.updatesAptRefresh === "declined" || root.updatesAptRefresh === "failed"
+    }
+
+    // Age of apt's package lists in words. Deliberately coarse -- the point is
+    // "this is old", not the minute it happened.
+    function updatesCheckedLabel() {
+        if (!root.updatesCheckedAt)
+            return "never checked"
+        const secs = Math.max(0, Math.floor(Date.now() / 1000 - root.updatesCheckedAt))
+        if (secs < 120) return "checked just now"
+        if (secs < 7200) return "checked " + Math.floor(secs / 60) + " min ago"
+        if (secs < 172800) return "checked " + Math.floor(secs / 3600) + " h ago"
+        return "checked " + Math.floor(secs / 86400) + " days ago"
+    }
+
+    // One line explaining why the list below may not be the whole truth.
+    function updatesStaleNote() {
+        if (!root.updatesStale())
+            return ""
+        const why = root.updatesAptRefresh === "declined"
+            ? "Not refreshed — the password prompt was dismissed."
+            : "Could not reach the archive." + (root.updatesAptError ? " " + root.updatesAptError : "")
+        return why + " Showing the last known list, " + root.updatesCheckedLabel() + "."
     }
 
     function activityGlyph() {
@@ -702,8 +738,16 @@ ShellRoot {
                         pushLog("installed « " + root.installedItems.length + " apps")
                     } else if (result.items !== undefined && root.activeMethod === "updates.list") {
                         root.updateItems = result.items
-                        root.status = root.updateItems.length + " update" + (root.updateItems.length === 1 ? "" : "s")
-                        pushLog("updates « " + root.updateItems.length)
+                        root.updatesAptRefresh = result.aptRefresh || "skipped"
+                        root.updatesAptError = result.aptError || ""
+                        root.updatesCheckedAt = result.aptCheckedAt || 0
+                        // A refresh that did not happen must not be reported as
+                        // "0 updates" -- that is the confident empty answer this
+                        // exists to stop. Say what is actually known instead.
+                        root.status = root.updatesStale()
+                            ? "Update list may be stale · " + root.updatesCheckedLabel()
+                            : root.updateItems.length + " update" + (root.updateItems.length === 1 ? "" : "s")
+                        pushLog("updates « " + root.updateItems.length + " (" + root.updatesAptRefresh + ")")
                     } else if (result.id !== undefined && result.variants !== undefined && root.activeMethod === "catalog.appDetails") {
                         root.selectedApp = result
                         root.status = "Details loaded"
@@ -2934,6 +2978,14 @@ ShellRoot {
                                     onClicked: {
                                         root.request("installed.list", {})
                                         root.request("operations.list", {})
+                                        // The only place that asks apt to go and
+                                        // look: a person pressed a button, so a
+                                        // polkit prompt is expected here and
+                                        // nowhere else. Periodic apt refresh is
+                                        // off on these machines, so without this
+                                        // the update list can sit frozen for the
+                                        // life of the install.
+                                        root.request("updates.list", { "refresh": true })
                                     }
                                 }
                             }
@@ -3067,7 +3119,10 @@ ShellRoot {
                                 // being wrong by exactly enough to slice the next row of cards
                                 // in half.
                                 spacing: 8
-                                visible: root.updateItems.length > 0
+                                // Also shown when the list could not be
+                                // refreshed: hiding the section then is what
+                                // makes an unchecked machine look up to date.
+                                visible: root.updateItems.length > 0 || root.updatesStale()
 
                                 RowLayout {
                                     Layout.fillWidth: true
@@ -3076,7 +3131,9 @@ ShellRoot {
                                     HudRailHeader {
                                         Layout.fillWidth: true
                                         title: "Updates"
-                                        sub: root.updateItems.length + " available"
+                                        sub: root.updatesStale()
+                                             ? root.updatesCheckedLabel()
+                                             : root.updateItems.length + " available"
                                     }
 
                                     // Two rows is a deliberate cap so the section does not
@@ -3101,6 +3158,22 @@ ShellRoot {
                                             onClicked: root.updatesExpanded = !root.updatesExpanded
                                         }
                                     }
+                                }
+
+                                // Says out loud that the list below is the old
+                                // one. An empty updates section with no
+                                // explanation is indistinguishable from an
+                                // up-to-date machine, and that is precisely the
+                                // machine that later fails to verify the archive
+                                // because it never saw the keyring.
+                                Label {
+                                    visible: root.updatesStale()
+                                    text: root.updatesStaleNote()
+                                    color: root.cWarn
+                                    font.family: root.fontHuman
+                                    font.pixelSize: 13
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
                                 }
 
                             ScrollView {

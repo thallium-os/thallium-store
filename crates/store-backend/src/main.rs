@@ -14,6 +14,7 @@ use store_core::{
     SearchParams, SourceKind, TrustLevel,
 };
 use store_db::StoreDb;
+use store_uni::apt_cache::{self, AptRefresh};
 use store_uni::{StagePermits, UniAdapter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
@@ -433,7 +434,17 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
             }
         }
         "installed.list" => Ok(json!({ "items": installed_list().await })),
-        "updates.list" => Ok(json!({ "items": updates_list().await })),
+        "updates.list" => {
+            // Refresh only when the caller says a person asked for it: the
+            // refresh needs root, and a polkit prompt on every automatic poll
+            // is a prompt people learn to dismiss.
+            let refresh = request
+                .params
+                .get("refresh")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Ok(serde_json::to_value(updates_list(refresh).await)?)
+        }
         "operations.list" => {
             let operations = state.db.lock().await.list_operations()?;
             Ok(json!({ "items": operations }))
@@ -829,11 +840,36 @@ fn dedupe_installed(items: Vec<InstalledItem>) -> Vec<InstalledItem> {
 
 const UPDATES_TIMEOUT: Duration = Duration::from_secs(8);
 const GITHUB_UPDATE_CONCURRENCY: usize = 4;
+/// Generous next to `UPDATES_TIMEOUT`, because most of it is a human reading a
+/// polkit prompt, not apt working.
+const APT_REFRESH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// `updates.list`'s reply. `items` stays where it was so older UIs keep
+/// working; the apt fields let a newer one distinguish "nothing to update"
+/// from "could not look".
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdatesReport {
+    items: Vec<UpdateItem>,
+    /// One of `skipped` / `ok` / `declined` / `failed`.
+    apt_refresh: &'static str,
+    apt_error: Option<String>,
+    /// Unix seconds; when apt's lists were last written.
+    apt_checked_at: Option<u64>,
+}
 
 /// Discover available updates from apt, flatpak, and GitHub-tracked
 /// installs concurrently, mirroring `CatalogManager::search`'s per-provider
 /// timeout fan-out so one slow/misbehaving source can't stall the others.
-async fn updates_list() -> Vec<UpdateItem> {
+async fn updates_list(refresh: bool) -> UpdatesReport {
+    // Sequenced, not joined: reading apt's cache before refreshing it would
+    // answer from exactly the stale data the refresh exists to replace.
+    let apt_refresh: AptRefresh = if refresh {
+        apt_cache::refresh(APT_REFRESH_TIMEOUT).await
+    } else {
+        AptRefresh::skipped()
+    };
+
     let (apt, flatpak, github) = tokio::join!(
         async {
             tokio::time::timeout(UPDATES_TIMEOUT, read_apt_updates())
@@ -857,7 +893,13 @@ async fn updates_list() -> Vec<UpdateItem> {
     items.extend(flatpak);
     items.extend(github);
     items.sort_by_key(|item| item.name.to_lowercase());
-    items
+
+    UpdatesReport {
+        items,
+        apt_refresh: apt_refresh.outcome.as_str(),
+        apt_error: apt_refresh.error,
+        apt_checked_at: apt_refresh.checked_at,
+    }
 }
 
 /// Read-only `apt list --upgradable` — no dpkg lock, no root, no mutation.
