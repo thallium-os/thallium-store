@@ -29,7 +29,13 @@ ShellRoot {
     property string status: "Starting backend"
     property string activeView: "discover"
     property bool fakeUniMode: true
-    property string uniHealth: ""
+    // system.health's native shape: {status, fakeUni, mode, apt, flatpak,
+    // privilege, version}. The `uni` field it used to carry went with the bash
+    // shim, which is why the status bar had been reading "ready - undefined".
+    property string healthMode: ""
+    property bool healthApt: false
+    property bool healthFlatpak: false
+    property bool healthPrivilege: false
     property string storeVersion: ""
     // Screenshot opened over the page; empty means the viewer is closed.
     property string viewerSource: ""
@@ -154,6 +160,18 @@ ShellRoot {
         const app = root.appFromOperation(operation)
         if (app)
             root.selectApp(app)
+    }
+
+    // What the install backends can actually do right now, rather than the name
+    // of a shim that no longer exists.
+    function backendReadiness() {
+        if (root.fakeUniMode)
+            return "Simulated (fake mode) — no package will be installed"
+        const parts = []
+        parts.push("apt " + (root.healthApt ? "ready" : "missing"))
+        parts.push("flatpak " + (root.healthFlatpak ? "ready" : "missing"))
+        parts.push(root.healthPrivilege ? "can escalate" : "no privilege escalator")
+        return parts.join(" · ")
     }
 
     function failedOperations() {
@@ -969,9 +987,12 @@ ShellRoot {
                         root.cacheInfo = result
                     } else if (result.status !== undefined) {
                         root.fakeUniMode = result.fakeUni === true
-                        root.uniHealth = result.uni || ""
+                        root.healthMode = result.mode || ""
+                        root.healthApt = result.apt === true
+                        root.healthFlatpak = result.flatpak === true
+                        root.healthPrivilege = result.privilege === true
                         root.storeVersion = result.version || ""
-                        root.status = result.status + " - " + result.uni
+                        root.status = result.status + (root.healthMode ? " · " + root.healthMode : "")
                     }
                 } catch (err) {
                     root.status = "Invalid backend response"
@@ -3362,7 +3383,7 @@ ShellRoot {
                                             // It was a literal here and had been reading 0.1.0 for
                                             // five releases; "MVP" outlived the MVP.
                                             StatRow { name: "Version"; value: root.storeVersion || "—" }
-                                            StatRow { name: "Backend"; value: "UNI " + (root.fakeUniMode ? "simulated (fake mode)" : (root.uniHealth || "connected")) }
+                                            StatRow { name: "Backend"; value: root.backendReadiness() }
                                             StatRow { name: "Sources"; value: "APT · Flathub · GitHub · AppImage" }
                                         }
                                     }
