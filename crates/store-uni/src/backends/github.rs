@@ -84,9 +84,19 @@ async fn install(
         anyhow::anyhow!("no suitable Linux asset in latest {owner}/{repo} release")
     })?;
 
-    let cache = appimage::cache_dir();
-    tokio::fs::create_dir_all(&cache).await?;
-    let dest = cache.join(&name);
+    // An `.AppImage` asset IS the installed program, so it lands straight in
+    // the appimage directory under the canonical name. Only throwaway assets
+    // (a `.deb` that apt-get consumes) stay in the cache, which is a directory
+    // any cleaner is entitled to empty.
+    let lower = name.to_ascii_lowercase();
+    let dest = if lower.ends_with(".appimage") {
+        appimage::appimage_dir().join(format!("{}.AppImage", appimage::sanitize(app_name)))
+    } else {
+        appimage::cache_dir().join(&name)
+    };
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
 
     let done = Arc::new(AtomicU64::new(0));
     let total = Arc::new(AtomicU64::new(0));
@@ -103,7 +113,6 @@ async fn install(
     // applies. A `.deb` shells out to apt-get, which touches the dpkg lock
     // just like the System backend, so it must serialize on `system_mutation`
     // (never `github_mutation`) to stay strictly serial system-wide.
-    let lower = name.to_ascii_lowercase();
     if lower.ends_with(".appimage") {
         let _mutation_permit = permits.github_mutation.clone().acquire_owned().await.ok();
         appimage::finalize(app_name, &dest, tx).await
@@ -181,8 +190,33 @@ fn arch_patterns() -> &'static [&'static str] {
     }
 }
 
+/// Sidecar files that sit next to a real artifact and can never be installed:
+/// checksums, signatures, update metadata. Matched on suffix so
+/// `foo.AppImage.zsync` is rejected outright instead of inheriting the
+/// `.appimage` bonus and tying with the artifact it describes.
+const SIDECAR_SUFFIXES: &[&str] = &[
+    ".zsync",
+    ".blockmap",
+    ".sig",
+    ".asc",
+    ".pem",
+    ".md5",
+    ".sha1",
+    ".sha256",
+    ".sha512",
+    ".sum",
+    ".torrent",
+    ".yml",
+    ".yaml",
+    ".txt",
+];
+
 fn score_asset(name: &str) -> i32 {
     let name = name.to_ascii_lowercase();
+    if SIDECAR_SUFFIXES.iter().any(|suf| name.ends_with(suf)) {
+        return -500;
+    }
+
     let mut score = 0i32;
 
     let ours = arch_patterns();
@@ -197,21 +231,27 @@ fn score_asset(name: &str) -> i32 {
         }
     }
 
-    for (needle, delta) in [
+    // Extensions are matched on suffix: only the real trailing extension
+    // decides the artifact type.
+    for (suffix, delta) in [
         (".deb", 40),
         (".appimage", 30),
         (".tar.gz", 10),
         (".tar.xz", 10),
         (".zip", 5),
-        ("linux", 20),
         (".rpm", -100),
-        (".sha256", -500),
-        (".sha512", -500),
-        (".asc", -500),
-        ("source", -100),
-        ("debug", -100),
         (".exe", -300),
         (".dmg", -300),
+    ] {
+        if name.ends_with(suffix) {
+            score += delta;
+        }
+    }
+
+    for (needle, delta) in [
+        ("linux", 20),
+        ("source", -100),
+        ("debug", -100),
         ("windows", -300),
         ("darwin", -300),
         ("macos", -300),
@@ -246,5 +286,24 @@ mod tests {
         let (url, name) = pick_best_asset(&release).unwrap();
         assert_eq!(url, "u2");
         assert!(name.ends_with(".AppImage"));
+    }
+
+    #[test]
+    fn rejects_zsync_sidecar_next_to_appimage() {
+        // PolyMC ships `X.AppImage` and `X.AppImage.zsync`; the sidecar used to
+        // tie on score and win the last-max tie-break, downloading 119KB of
+        // update metadata and then failing as an unsupported asset type.
+        assert!(score_asset("PolyMC-Linux-amd64-7.1.AppImage.zsync") < -100);
+        let release = serde_json::json!({
+            "assets": [
+                {"name": "PolyMC-7.1.tar.gz", "browser_download_url": "u1"},
+                {"name": "PolyMC-Linux-amd64-7.1.AppImage", "browser_download_url": "u2"},
+                {"name": "PolyMC-Linux-amd64-7.1.AppImage.zsync", "browser_download_url": "u3"},
+                {"name": "PolyMC-Windows-Setup-amd64-7.1.exe", "browser_download_url": "u4"}
+            ]
+        });
+        let (url, name) = pick_best_asset(&release).unwrap();
+        assert_eq!(url, "u2");
+        assert_eq!(name, "PolyMC-Linux-amd64-7.1.AppImage");
     }
 }

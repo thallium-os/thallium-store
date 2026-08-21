@@ -184,7 +184,7 @@ fn spawn_progress_ticker(
     })
 }
 
-fn sanitize(name: &str) -> String {
+pub(super) fn sanitize(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {
@@ -205,7 +205,7 @@ fn data_home() -> PathBuf {
         })
 }
 
-fn appimage_dir() -> PathBuf {
+pub(super) fn appimage_dir() -> PathBuf {
     data_home().join("uni/appimages")
 }
 

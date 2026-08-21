@@ -114,17 +114,40 @@ ShellRoot {
         return n
     }
 
-    // Operations still in flight. Terminal ones are deliberately not shown:
-    // once an install has finished, its row is a log entry, and the Apps page
-    // is not a log -- the installed grid below already reflects the outcome.
+    // Operations still in flight, plus failures. A succeeded or cancelled row
+    // is a log entry and the Apps page is not a log -- the installed grid below
+    // already reflects those outcomes. A failure is reflected nowhere: dropping
+    // it here is why a broken install used to vanish with no message at all.
+    // The row carries the reason and the Retry button, so it stays until acted on.
     function runningOperations() {
         const live = []
         for (let i = 0; i < operations.length; i++) {
             const s = operations[i].state
-            if (s !== "succeeded" && s !== "failed" && s !== "cancelled")
+            if (s !== "succeeded" && s !== "cancelled")
                 live.push(operations[i])
         }
         return live
+    }
+
+    function failedOpsCount() {
+        let n = 0
+        for (let i = 0; i < operations.length; i++) {
+            if (operations[i].state === "failed")
+                n++
+        }
+        return n
+    }
+
+    // Header line for the Activity rail: never claim "0 running" while a red
+    // failure row is sitting underneath it.
+    function activityRailSub() {
+        const running = activeOpsCount()
+        const failed = failedOpsCount()
+        if (failed > 0 && running > 0)
+            return running + " running · " + failed + " failed"
+        if (failed > 0)
+            return failed + (failed === 1 ? " failed" : " failed")
+        return running + " running"
     }
 
     // XDG icon for something already on the machine. Flatpak and apt both name
@@ -3004,7 +3027,7 @@ ShellRoot {
 
                                 HudRailHeader {
                                     title: "Activity"
-                                    sub: root.activeOpsCount() + " running"
+                                    sub: root.activityRailSub()
                                 }
 
                                 Repeater {
@@ -3044,7 +3067,12 @@ ShellRoot {
                                             }
 
                                             Label {
-                                                text: opRow.op.action + " · " + root.sourceLabel(root.operationSource(opRow.op.source)) + " · " + opRow.op.state
+                                                // A failed row's one line of text is the only place the
+                                                // backend's reason is ever shown, so it wins over the
+                                                // action/source/state breadcrumb.
+                                                text: opRow.op.state === "failed"
+                                                    ? root.operationProblem(opRow.op)
+                                                    : opRow.op.action + " · " + root.sourceLabel(root.operationSource(opRow.op.source)) + " · " + opRow.op.state
                                                 color: opRow.op.state === "failed" ? root.cRed : root.cMuted
                                                 font.family: root.fontMono
                                                 font.pixelSize: 10
