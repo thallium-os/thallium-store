@@ -16,6 +16,9 @@ if [ -z "$version" ]; then
   echo "could not compute the package version" >&2
   exit 1
 fi
+# The binary reports its own version over system.health. Export the string
+# being stamped into the control file so the two cannot disagree.
+export THALLIUM_STORE_VERSION="$version"
 arch="$(dpkg --print-architecture)"
 pkg="thallium-store"
 build_root="$PWD/target/deb-root"
