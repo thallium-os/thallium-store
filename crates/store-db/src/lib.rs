@@ -102,6 +102,52 @@ impl StoreDb {
         Ok(reaped)
     }
 
+    /// Delete one operation and the logs belonging to it.
+    ///
+    /// Only terminal operations can go: deleting the row for something still
+    /// running would orphan the child process behind it, leaving work in flight
+    /// that nothing on screen accounts for. Returns false when the id is
+    /// unknown or the operation is still live.
+    pub fn delete_operation(&self, id: &str) -> Result<bool> {
+        let terminal = match self.get_operation(id)? {
+            Some(op) => matches!(
+                op.state,
+                OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
+            ),
+            None => return Ok(false),
+        };
+        if !terminal {
+            return Ok(false);
+        }
+        self.conn
+            .execute("DELETE FROM operation_logs WHERE operation_id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM operations WHERE id = ?1", [id])?;
+        Ok(true)
+    }
+
+    /// Delete every operation sitting in one of `states`, and its logs.
+    ///
+    /// Non-terminal states are ignored rather than rejected, so a caller asking
+    /// to clear "everything finished" cannot accidentally take a running
+    /// install with it. Returns how many rows went.
+    pub fn delete_operations_in_states(&self, states: &[OperationState]) -> Result<usize> {
+        let mut removed = 0;
+        for op in self.list_operations()? {
+            let terminal = matches!(
+                op.state,
+                OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
+            );
+            if !terminal || !states.contains(&op.state) {
+                continue;
+            }
+            if self.delete_operation(&op.id)? {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     pub fn get_operation(&self, id: &str) -> Result<Option<Operation>> {
         let mut stmt = self
             .conn
@@ -163,6 +209,7 @@ mod tests {
             variant_id: "flatpak:app".to_string(),
             source: SourceKind::Flathub,
             action: OperationAction::Install,
+            package_id: Some("demo".to_string()),
             state: OperationState::Pending,
             percent: 0,
             message: "queued".to_string(),
@@ -172,6 +219,55 @@ mod tests {
 
         db.upsert_operation(&op).unwrap();
         assert_eq!(db.list_operations().unwrap().len(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn dismiss_takes_finished_rows_and_leaves_running_ones() {
+        let path = std::env::temp_dir().join(format!(
+            "thallium-store-dismiss-{}-{:?}.db",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let db = StoreDb::open(&path).unwrap();
+        let now = Utc::now();
+        let make = |id: &str, state: OperationState| Operation {
+            id: id.to_string(),
+            app_id: "app".to_string(),
+            app_name: "App".to_string(),
+            variant_id: "flatpak:app".to_string(),
+            source: SourceKind::Flathub,
+            action: OperationAction::Install,
+            package_id: Some("demo".to_string()),
+            state,
+            percent: 0,
+            message: String::new(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        db.upsert_operation(&make("live", OperationState::Downloading))
+            .unwrap();
+        db.upsert_operation(&make("bad", OperationState::Failed))
+            .unwrap();
+        db.upsert_operation(&make("good", OperationState::Succeeded))
+            .unwrap();
+
+        // A running operation still has a child process behind it.
+        assert!(!db.delete_operation("live").unwrap());
+        assert!(!db.delete_operation("nonexistent").unwrap());
+        assert!(db.delete_operation("good").unwrap());
+
+        // "Clear all errors" takes the failures and nothing else.
+        assert_eq!(
+            db.delete_operations_in_states(&[OperationState::Failed])
+                .unwrap(),
+            1
+        );
+        let left = db.list_operations().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, "live");
         let _ = std::fs::remove_file(path);
     }
 }

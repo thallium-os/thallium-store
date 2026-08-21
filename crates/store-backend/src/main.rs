@@ -468,7 +468,15 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
             match token {
                 Some(token) => {
                     token.cancel();
-                    if let Some(mut operation) = state.db.lock().await.get_operation(id)? {
+                    // The lookup is bound to its own statement on purpose. In
+                    // edition 2021 a temporary in an `if let` scrutinee lives
+                    // until the end of the whole `if let`, so locking the db
+                    // again inside the body waited on a guard the same task was
+                    // still holding: pressing Cancel deadlocked the db mutex and
+                    // every later operations.list, enqueue and dismiss hung
+                    // behind it for the life of the process.
+                    let existing = state.db.lock().await.get_operation(id)?;
+                    if let Some(mut operation) = existing {
                         operation.state = OperationState::Cancelled;
                         operation.message = "Cancellation requested".to_string();
                         operation.updated_at = Utc::now();
@@ -483,7 +491,69 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
                 })),
             }
         }
-        "operations.retry" => Err(anyhow::anyhow!("retry is not implemented in the MVP slice")),
+        // Re-run a finished operation from its own stored record. The old row
+        // is deleted rather than left behind: a retry that piles a second row
+        // on top of the first turns Activity into a list of every attempt ever
+        // made, which is exactly what it looked like before this existed.
+        "operations.retry" => {
+            let id = request
+                .params
+                .get("operationId")
+                .and_then(Value::as_str)
+                .context("missing operationId")?;
+            let previous = state
+                .db
+                .lock()
+                .await
+                .get_operation(id)?
+                .context("unknown operation")?;
+            let terminal = matches!(
+                previous.state,
+                OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
+            );
+            if !terminal {
+                anyhow::bail!("operation is still running");
+            }
+            let package_id = previous
+                .package_id
+                .clone()
+                .context("operation predates package_id and cannot be retried")?;
+            let params = json!({
+                "app_id": previous.app_id,
+                "variant_id": previous.variant_id,
+                "action": previous.action,
+                "app_name": previous.app_name,
+                "package_id": package_id,
+                "source": previous.source,
+            });
+            let queued = enqueue_operation(params, state.clone()).await?;
+            state.db.lock().await.delete_operation(id)?;
+            Ok(queued)
+        }
+        // Remove one finished row from Activity. A failure is the only record
+        // of itself, so it has to be dismissed deliberately -- but it does have
+        // to be dismissible, or the rail accretes every attempt forever.
+        "operations.dismiss" => {
+            let id = request
+                .params
+                .get("operationId")
+                .and_then(Value::as_str)
+                .context("missing operationId")?;
+            let dismissed = state.db.lock().await.delete_operation(id)?;
+            Ok(json!({ "dismissed": dismissed }))
+        }
+        // Bulk version of the same. `states` defaults to failures alone,
+        // because "clear all errors" is the thing people actually want and
+        // sweeping succeeded rows away with it is not.
+        "operations.clear" => {
+            let states = match request.params.get("states") {
+                Some(value) => serde_json::from_value::<Vec<OperationState>>(value.clone())
+                    .context("states must be operation state names")?,
+                None => vec![OperationState::Failed],
+            };
+            let removed = state.db.lock().await.delete_operations_in_states(&states)?;
+            Ok(json!({ "removed": removed }))
+        }
         "apps.launch" => Err(anyhow::anyhow!(
             "launch requires trusted desktop entry discovery; not enabled in fake MVP mode"
         )),
@@ -559,6 +629,7 @@ async fn enqueue_operation(params: Value, state: AppState) -> Result<Value> {
         variant_id: variant.id.clone(),
         source: variant.source,
         action: request.action,
+        package_id: Some(variant.package_id.clone()),
         state: OperationState::Pending,
         percent: 0,
         message: "Queued".to_string(),
@@ -603,6 +674,7 @@ async fn run_operation(
     // across ops/sources overlap while installs stay serial per source
     // (system_mutation permit=1, never relaxed). We just hand the whole
     // permit set + cancellation token down.
+    let cancelled = token.clone();
     let mut rx = state.uni.run(
         operation.action,
         operation.app_name.clone(),
@@ -615,6 +687,20 @@ async fn run_operation(
     while let Some(event) = rx.recv().await {
         match event {
             Ok(progress) => {
+                // A backend notices cancellation only at its next chunk
+                // boundary, and its progress ticker keeps firing until then.
+                // Those events used to overwrite the Cancelled row that
+                // operations.cancel had just written, so the row flipped back
+                // to "downloading" for as long as the transfer took to give up.
+                let terminal = matches!(
+                    progress.state,
+                    OperationState::Succeeded
+                        | OperationState::Failed
+                        | OperationState::Cancelled
+                );
+                if cancelled.is_cancelled() && !terminal {
+                    continue;
+                }
                 operation.state = progress.state;
                 operation.percent = progress.percent;
                 operation.message = progress.message;
@@ -637,6 +723,29 @@ async fn run_operation(
             },
             message: operation.message.clone(),
         });
+        let _ = state.progress_tx.send(operation.clone());
+    }
+
+    // A backend that exits without a terminal event would leave a row nothing
+    // can ever dismiss or retry, because both refuse anything still running.
+    // Nothing is driving it any more once we are here, so say so.
+    let settled = matches!(
+        operation.state,
+        OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
+    );
+    if !settled {
+        operation.state = if cancelled.is_cancelled() {
+            OperationState::Cancelled
+        } else {
+            OperationState::Failed
+        };
+        operation.message = if cancelled.is_cancelled() {
+            format!("Cancelled {}", operation.app_name)
+        } else {
+            format!("{} ended without reporting a result", operation.app_name)
+        };
+        operation.updated_at = Utc::now();
+        let _ = state.db.lock().await.upsert_operation(&operation);
         let _ = state.progress_tx.send(operation.clone());
     }
 

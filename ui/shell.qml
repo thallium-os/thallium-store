@@ -28,8 +28,6 @@ ShellRoot {
     property string activeMethod: ""
     property string status: "Starting backend"
     property string activeView: "discover"
-    // Updates start capped at two rows on the Apps page; the header toggles it.
-    property bool updatesExpanded: false
     property bool fakeUniMode: true
     property string uniHealth: ""
     property string storeVersion: ""
@@ -48,6 +46,16 @@ ShellRoot {
     property var cacheInfo: ({ iconBytes: 0, iconCount: 0 })
     property bool setupOpen: false
     property int setupStep: 0
+    // The Apps view is two pages behind one tab: what is on this machine, and
+    // what is out of date. They were stacked on one screen, where the updates
+    // section had to be capped at two rows so it did not bury the app grid --
+    // which meant neither list was ever fully visible.
+    property string appsTab: "apps"
+    // Bulk selection is an explicit mode, not an always-on row of checkboxes.
+    // While it is on, cards select instead of navigating: a mis-aimed click
+    // during a mass uninstall must never be a click that also changed pages.
+    property bool selectMode: false
+    property var selection: ({})
 
     function pushLog(msg) {
         const stamp = Qt.formatDateTime(new Date(), "HH:mm:ss")
@@ -136,6 +144,147 @@ ShellRoot {
                 n++
         }
         return n
+    }
+
+    // Every row that names an app opens that app's page -- including the rows
+    // in Activity, which name one and used to be the only place in the store
+    // where clicking an app's name did nothing. appFromOperation already builds
+    // the stub the details page needs.
+    function openOperationApp(operation) {
+        const app = root.appFromOperation(operation)
+        if (app)
+            root.selectApp(app)
+    }
+
+    function failedOperations() {
+        const failed = []
+        for (let i = 0; i < operations.length; i++) {
+            if (operations[i].state === "failed")
+                failed.push(operations[i])
+        }
+        return failed
+    }
+
+    // Drop one finished row. The backend refuses ids that are still running,
+    // so this cannot orphan work that is still in flight.
+    function dismissOperation(operation) {
+        if (!operation || !operation.id)
+            return
+        request("operations.dismiss", { operationId: operation.id })
+    }
+
+    function clearFailedOperations() {
+        request("operations.clear", { states: ["failed"] })
+    }
+
+    // ---- bulk selection -------------------------------------------------
+    // Keyed by the same id the grids are modelled on, so a selection survives
+    // the list being refreshed underneath it.
+
+    function itemKey(item) {
+        if (!item)
+            return ""
+        return String(item.id || item.name || "")
+    }
+
+    function isSelected(item) {
+        return root.selection[root.itemKey(item)] === true
+    }
+
+    function toggleSelection(item) {
+        const key = root.itemKey(item)
+        if (!key)
+            return
+        const next = {}
+        for (const existing in root.selection)
+            next[existing] = root.selection[existing]
+        if (next[key])
+            delete next[key]
+        else
+            next[key] = true
+        root.selection = next
+    }
+
+    function selectionCount() {
+        let n = 0
+        for (const key in root.selection)
+            n++
+        return n
+    }
+
+    function setSelectMode(on) {
+        root.selectMode = on
+        if (!on)
+            root.selection = ({})
+    }
+
+    function currentPageItems() {
+        return root.appsTab === "updates" ? root.updateItems : root.installedItems
+    }
+
+    function selectAllCurrentPage() {
+        const items = root.currentPageItems()
+        const next = {}
+        for (let i = 0; i < items.length; i++) {
+            const key = root.itemKey(items[i])
+            if (key)
+                next[key] = true
+        }
+        root.selection = next
+    }
+
+    function selectedOnCurrentPage() {
+        const items = root.currentPageItems()
+        const picked = []
+        for (let i = 0; i < items.length; i++) {
+            if (root.isSelected(items[i]))
+                picked.push(items[i])
+        }
+        return picked
+    }
+
+    function showAppsTab(tab) {
+        root.appsTab = tab
+        root.setSelectMode(false)
+        if (tab === "updates")
+            root.request("updates.list", {})
+        else
+            root.request("installed.list", {})
+    }
+
+    // ---- bulk actions ---------------------------------------------------
+
+    function enqueueUpdateInstalled(item) {
+        if (!item)
+            return
+        request("operations.enqueue", {
+            app_id: item.id || item.name,
+            variant_id: item.variant_id || item.id || item.name,
+            action: "update",
+            app_name: item.name,
+            package_id: packageIdFromInstalled(item),
+            source: operationSource(item.source)
+        })
+    }
+
+    function updateAll() {
+        for (let i = 0; i < root.updateItems.length; i++)
+            root.enqueueUpdateInstalled(root.updateItems[i])
+        root.setSelectMode(false)
+    }
+
+    function updateSelected() {
+        const picked = root.selectedOnCurrentPage()
+        for (let i = 0; i < picked.length; i++)
+            root.enqueueUpdateInstalled(picked[i])
+        root.setSelectMode(false)
+    }
+
+    function uninstallSelected() {
+        const picked = root.selectedOnCurrentPage()
+        for (let i = 0; i < picked.length; i++)
+            root.enqueueUninstallInstalled(picked[i])
+        root.setSelectMode(false)
     }
 
     // Header line for the Activity rail: never claim "0 running" while a red
@@ -476,17 +625,27 @@ ShellRoot {
         }
     }
 
+    // Retry replaces the failed row rather than stacking a second one on top
+    // of it. `operations.retry` does both halves at once from the operation's
+    // own record; rows written before the backend recorded a package_id have
+    // nothing to retry from, so those are re-enqueued from what the UI knows
+    // and dismissed by hand.
     function retryOperation(operation) {
         if (!operation)
             return
-        request("operations.enqueue", {
-            app_id: operation.app_id,
-            variant_id: operation.variant_id,
-            action: operation.action,
-            app_name: operation.app_name,
-            package_id: packageIdFromOperation(operation),
-            source: operationSource(operation.source)
-        })
+        if (operation.package_id) {
+            request("operations.retry", { operationId: operation.id })
+        } else {
+            request("operations.enqueue", {
+                app_id: operation.app_id,
+                variant_id: operation.variant_id,
+                action: operation.action,
+                app_name: operation.app_name,
+                package_id: packageIdFromOperation(operation),
+                source: operationSource(operation.source)
+            })
+            dismissOperation(operation)
+        }
         activeView = "installed"
     }
 
@@ -786,7 +945,18 @@ ShellRoot {
                         // search results so the next search reflects reality.
                         root.searchCache = ({})
                         root.request("operations.list", {})
-                    } else if (result.accepted !== undefined && result.operation !== undefined) {
+                    } else if (result.dismissed !== undefined) {
+                        root.status = result.dismissed ? "Dismissed" : "Operation is still running"
+                        root.request("operations.list", {})
+                    } else if (result.removed !== undefined) {
+                        root.status = result.removed + " cleared"
+                        pushLog("cleared " + result.removed + " finished operation" + (result.removed === 1 ? "" : "s"))
+                        root.request("operations.list", {})
+                    } else if (result.accepted !== undefined) {
+                        // Cancel answers with {accepted} and nothing else. This
+                        // used to also require an `operation` key it never
+                        // sends, so pressing Cancel refreshed nothing and the
+                        // row sat there until the next poll.
                         root.status = result.message || "Operation updated"
                         root.request("operations.list", {})
                     } else if (result.settings !== undefined) {
@@ -1295,6 +1465,249 @@ ShellRoot {
             horizontalAlignment: Text.AlignHCenter
             Layout.fillWidth: true
             elide: Text.ElideRight
+        }
+    }
+
+    // Download/install progress. The stock ProgressBar is a flat white sliver
+    // that says nothing while a 34MB AppImage comes down. This is the HUD
+    // version: a segmented track, a fill that eases to each new percent, and a
+    // sweep that keeps travelling even when the byte counter stalls -- so a
+    // slow mirror still reads as alive rather than as a hang. When the backend
+    // cannot say how far along it is, the whole block paces instead.
+    component ProgressRail: Item {
+        id: rail
+        property real percent: 0
+        property bool indeterminate: false
+        property color accent: root.cGreen
+        // 0..1, driven continuously; both the sweep and the pacing block read
+        // it, so neither needs an animation whose endpoints depend on a width
+        // that changes underneath it.
+        property real phase: 0
+
+        implicitHeight: 20
+        implicitWidth: 160
+
+        NumberAnimation on phase {
+            running: rail.visible
+            loops: Animation.Infinite
+            from: 0
+            to: 1
+            duration: 1400
+        }
+
+        Rectangle {
+            id: railTrack
+            anchors.fill: parent
+            color: root.cDim
+            border.color: root.cLine
+            clip: true
+
+            Rectangle {
+                id: railFill
+                visible: !rail.indeterminate
+                x: 1
+                y: 1
+                height: parent.height - 2
+                width: Math.max(0, (railTrack.width - 2)
+                       * Math.min(1, Math.max(0, rail.percent / 100)))
+                Behavior on width { NumberAnimation { duration: root.tMed; easing.type: Easing.OutCubic } }
+                clip: true
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.0; color: Qt.darker(rail.accent, 1.8) }
+                    GradientStop { position: 1.0; color: rail.accent }
+                }
+
+                Rectangle {
+                    width: 44
+                    height: parent.height
+                    x: -44 + rail.phase * (railFill.width + 88)
+                    opacity: 0.5
+                    gradient: Gradient {
+                        orientation: Gradient.Horizontal
+                        GradientStop { position: 0.0; color: "transparent" }
+                        GradientStop { position: 0.5; color: Qt.lighter(rail.accent, 1.7) }
+                        GradientStop { position: 1.0; color: "transparent" }
+                    }
+                }
+            }
+
+            // Nothing to fill: pace a block across the track instead of
+            // freezing at zero, which is indistinguishable from a dead job.
+            Rectangle {
+                visible: rail.indeterminate
+                y: 1
+                height: parent.height - 2
+                width: Math.max(24, railTrack.width * 0.3)
+                x: (railTrack.width + width) * rail.phase - width
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.0; color: "transparent" }
+                    GradientStop { position: 0.5; color: rail.accent }
+                    GradientStop { position: 1.0; color: "transparent" }
+                }
+            }
+
+            // Segment dividers, painted over everything: the retro-HUD read.
+            Row {
+                anchors.fill: parent
+                Repeater {
+                    model: 16
+                    Item {
+                        width: railTrack.width / 16
+                        height: railTrack.height
+                        Rectangle {
+                            anchors.right: parent.right
+                            width: 1
+                            height: parent.height
+                            color: root.cBase
+                            opacity: 0.55
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Square ghost button for a single glyph -- dismissing one row, closing one
+    // thing. Deliberately not an ActionButton: those carry a word and a weight
+    // this must not have.
+    // Sub-page selector inside the Apps view. Deliberately not another TopTab:
+    // these switch a page within a tab, and reading as the same control as the
+    // ribbon above would say they switch the tab.
+    component PageTab: Item {
+        id: pageTab
+        property string label: ""
+        property string tab: ""
+        property int count: 0
+        property color accent: root.cGreen
+        readonly property bool current: root.appsTab === pageTab.tab
+
+        implicitWidth: pageTabRow.implicitWidth + 30
+        implicitHeight: 38
+
+        Rectangle {
+            anchors.fill: parent
+            color: pageTab.current ? root.cDim : (pageTabHover.hovered ? root.cPanel : "transparent")
+            border.color: pageTab.current ? root.cLine : "transparent"
+            Behavior on color { ColorAnimation { duration: root.tFast } }
+        }
+
+        HoverHandler { id: pageTabHover }
+
+        Row {
+            id: pageTabRow
+            anchors.centerIn: parent
+            spacing: 8
+            Label {
+                text: pageTab.label
+                color: pageTab.current ? root.cFg : root.cMuted
+                font.family: root.fontMono
+                font.pixelSize: 11
+                font.bold: pageTab.current
+                font.letterSpacing: 2
+                anchors.verticalCenter: parent.verticalCenter
+            }
+            Rectangle {
+                visible: pageTab.count > 0
+                width: pageTabCount.implicitWidth + 10
+                height: 16
+                color: pageTab.current ? pageTab.accent : root.cDead
+                anchors.verticalCenter: parent.verticalCenter
+                Label {
+                    id: pageTabCount
+                    anchors.centerIn: parent
+                    text: pageTab.count
+                    color: pageTab.current ? root.cBase : root.cMuted
+                    font.family: root.fontMono
+                    font.pixelSize: 10
+                    font.bold: true
+                }
+            }
+        }
+
+        Rectangle {
+            anchors.bottom: parent.bottom
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: pageTab.current ? parent.width : 0
+            height: 2
+            color: pageTab.accent
+            Behavior on width { NumberAnimation { duration: root.tMed; easing.type: Easing.OutCubic } }
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.showAppsTab(pageTab.tab)
+        }
+    }
+
+    // Mono text-button for secondary controls in a header rail.
+    component RailAction: Label {
+        id: railAction
+        property color accent: root.cGreen
+        signal clicked()
+        color: railActionHover.hovered ? railAction.accent : root.cMuted
+        font.family: root.fontMono
+        font.pixelSize: 10
+        font.letterSpacing: 2
+        verticalAlignment: Text.AlignVCenter
+        HoverHandler { id: railActionHover }
+        MouseArea {
+            anchors.fill: parent
+            anchors.margins: -8
+            cursorShape: Qt.PointingHandCursor
+            onClicked: railAction.clicked()
+        }
+    }
+
+    component GlyphButton: Rectangle {
+        id: glyph
+        property string symbol: "\u00d7"
+        property color hoverFill: root.cRed
+        signal clicked()
+
+        implicitWidth: 28
+        implicitHeight: 28
+        color: glyphHover.hovered ? glyph.hoverFill : root.cDim
+        border.color: glyphHover.hovered ? glyph.hoverFill : root.cLine
+        Behavior on color { ColorAnimation { duration: root.tFast } }
+
+        HoverHandler { id: glyphHover }
+
+        Label {
+            anchors.centerIn: parent
+            text: glyph.symbol
+            color: glyphHover.hovered ? "white" : root.cMuted
+            font.family: root.fontMono
+            font.pixelSize: 14
+            font.bold: true
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: glyph.clicked()
+        }
+    }
+
+    // Selection tick shown on cards while select mode is on.
+    component SelectBox: Rectangle {
+        property bool checked: false
+        implicitWidth: 20
+        implicitHeight: 20
+        color: checked ? root.cGreen : "transparent"
+        border.color: checked ? root.cGreen : root.cLine
+        border.width: 2
+        Behavior on color { ColorAnimation { duration: root.tFast } }
+        Label {
+            anchors.centerIn: parent
+            visible: parent.checked
+            text: "\u2713"
+            color: root.cBase
+            font.family: root.fontMono
+            font.pixelSize: 13
+            font.bold: true
         }
     }
 
@@ -2981,7 +3394,7 @@ ShellRoot {
                                     Layout.fillWidth: true
                                     spacing: 3
                                     Label {
-                                        text: "Apps"
+                                        text: root.appsTab === "updates" ? "Updates" : "Apps"
                                         color: root.cFg
                                         font.family: root.fontBrand
                                         font.pixelSize: Math.round(32 * root.uiScale())
@@ -2989,8 +3402,12 @@ ShellRoot {
                                         Layout.fillWidth: true
                                     }
                                     Label {
-                                        text: root.installedItems.length + " apps on this system"
-                                              + (root.activeOpsCount() > 0 ? " · " + root.activeOpsCount() + " operation" + (root.activeOpsCount() === 1 ? "" : "s") + " running" : "") + "."
+                                        text: root.appsTab === "updates"
+                                              ? (root.updatesStale()
+                                                 ? "Last known list, " + root.updatesCheckedLabel() + "."
+                                                 : root.updateItems.length + " update" + (root.updateItems.length === 1 ? "" : "s") + " available.")
+                                              : root.installedItems.length + " apps on this system"
+                                                + (root.activeOpsCount() > 0 ? " · " + root.activeOpsCount() + " operation" + (root.activeOpsCount() === 1 ? "" : "s") + " running" : "") + "."
                                         color: root.cMuted
                                         font.family: root.fontHuman
                                         font.pixelSize: 15
@@ -3017,6 +3434,105 @@ ShellRoot {
                                 }
                             }
 
+                            // Apps and Updates are separate pages. Stacked on one screen the
+                            // updates list had to be capped at two rows to avoid burying the
+                            // app grid, so neither list was ever shown in full.
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 4
+
+                                PageTab {
+                                    label: "APPS"
+                                    tab: "apps"
+                                    count: root.installedItems.length
+                                }
+                                PageTab {
+                                    label: "UPDATES"
+                                    tab: "updates"
+                                    count: root.updateItems.length
+                                    accent: root.updateItems.length > 0 ? root.cWarn : root.cGreen
+                                }
+
+                                Item { Layout.fillWidth: true }
+
+                                Label {
+                                    visible: root.selectMode
+                                    text: root.selectionCount() + " SELECTED"
+                                    color: root.cGreen
+                                    font.family: root.fontMono
+                                    font.pixelSize: 10
+                                    font.letterSpacing: 2
+                                    Layout.alignment: Qt.AlignVCenter
+                                }
+
+                                RailAction {
+                                    visible: root.selectMode
+                                    text: "SELECT ALL"
+                                    Layout.alignment: Qt.AlignVCenter
+                                    onClicked: root.selectAllCurrentPage()
+                                }
+
+                                RailAction {
+                                    visible: root.selectMode
+                                    text: "NONE"
+                                    Layout.alignment: Qt.AlignVCenter
+                                    onClicked: root.selection = ({})
+                                }
+
+                                RailAction {
+                                    visible: !root.selectMode && root.currentPageItems().length > 0
+                                    text: "SELECT"
+                                    Layout.alignment: Qt.AlignVCenter
+                                    onClicked: root.setSelectMode(true)
+                                }
+
+                                // Mass uninstall. Kept red and kept counting:
+                                // the number of apps about to be removed is the
+                                // whole of what makes this button safe to press.
+                                ActionButton {
+                                    visible: root.selectMode && root.appsTab === "apps"
+                                    label: "Uninstall " + root.selectionCount()
+                                    fill: root.cRed
+                                    textColor: "white"
+                                    active: root.selectionCount() > 0
+                                    height: 32
+                                    Layout.preferredWidth: 132
+                                    Layout.alignment: Qt.AlignVCenter
+                                    onClicked: root.uninstallSelected()
+                                }
+
+                                ActionButton {
+                                    visible: root.selectMode && root.appsTab === "updates"
+                                    label: "Update " + root.selectionCount()
+                                    fill: root.cGreen
+                                    textColor: root.cBase
+                                    active: root.selectionCount() > 0
+                                    height: 32
+                                    Layout.preferredWidth: 122
+                                    Layout.alignment: Qt.AlignVCenter
+                                    onClicked: root.updateSelected()
+                                }
+
+                                ActionButton {
+                                    visible: !root.selectMode && root.appsTab === "updates" && root.updateItems.length > 0
+                                    label: "Update all"
+                                    fill: root.cGreen
+                                    textColor: root.cBase
+                                    height: 32
+                                    Layout.preferredWidth: 122
+                                    Layout.alignment: Qt.AlignVCenter
+                                    onClicked: root.updateAll()
+                                }
+
+                                RailAction {
+                                    visible: root.selectMode
+                                    text: "CANCEL"
+                                    accent: root.cRed
+                                    Layout.alignment: Qt.AlignVCenter
+                                    onClicked: root.setSelectMode(false)
+                                }
+                            }
+
                             // Activity — only what is happening right now. Finished operations
                             // used to stay listed here, so the page led with a log of things the
                             // user had already watched finish, pushing the actual apps below it.
@@ -3025,9 +3541,35 @@ ShellRoot {
                                 spacing: 8
                                 visible: root.runningOperations().length > 0
 
-                                HudRailHeader {
-                                    title: "Activity"
-                                    sub: root.activityRailSub()
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+
+                                    HudRailHeader {
+                                        Layout.fillWidth: true
+                                        title: "Activity"
+                                        sub: root.activityRailSub()
+                                    }
+
+                                    // One press to empty the rail. Failures are
+                                    // the only rows that persist, so this is
+                                    // the only thing there is to clear.
+                                    Label {
+                                        visible: root.failedOpsCount() > 0
+                                        text: "CLEAR ALL ERRORS"
+                                        color: clearErrorsHover.hovered ? root.cRed : root.cMuted
+                                        font.family: root.fontMono
+                                        font.pixelSize: 10
+                                        font.letterSpacing: 2
+                                        Layout.alignment: Qt.AlignVCenter
+                                        HoverHandler { id: clearErrorsHover }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            anchors.margins: -8
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.clearFailedOperations()
+                                        }
+                                    }
                                 }
 
                                 Repeater {
@@ -3040,9 +3582,20 @@ ShellRoot {
 
                                         Layout.fillWidth: true
                                         height: 54
-                                        color: root.cPanel
-                                        border.color: root.cLine
+                                        color: opRowHover.hovered ? root.cDim : root.cPanel
+                                        border.color: opRow.op.state === "failed" ? "#5f3a3c" : root.cLine
                                         radius: 0
+                                        Behavior on color { ColorAnimation { duration: root.tFast } }
+
+                                        HoverHandler { id: opRowHover }
+
+                                        // Declared before the controls so the
+                                        // buttons above it keep their own clicks.
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.openOperationApp(opRow.op)
+                                        }
 
                                         RowLayout {
                                             anchors.fill: parent
@@ -3081,12 +3634,29 @@ ShellRoot {
                                                 Layout.fillWidth: true
                                             }
 
-                                            ProgressBar {
+                                            ProgressRail {
                                                 visible: !opRow.terminal
-                                                from: 0
-                                                to: 100
-                                                value: opRow.op.percent
+                                                percent: opRow.op.percent
+                                                // Pending and resolving have no
+                                                // measurable progress yet; a bar
+                                                // pinned at 0 reads as stuck.
+                                                indeterminate: opRow.op.percent <= 0
+                                                    || opRow.op.state === "pending"
+                                                    || opRow.op.state === "resolving"
                                                 Layout.preferredWidth: 160
+                                                Layout.alignment: Qt.AlignVCenter
+                                            }
+
+                                            Label {
+                                                visible: !opRow.terminal
+                                                text: opRow.op.percent > 0 ? opRow.op.percent + "%" : "··"
+                                                color: root.cGreen
+                                                font.family: root.fontMono
+                                                font.pixelSize: 11
+                                                font.bold: true
+                                                horizontalAlignment: Text.AlignRight
+                                                Layout.preferredWidth: 38
+                                                Layout.alignment: Qt.AlignVCenter
                                             }
 
                                             ActionButton {
@@ -3103,6 +3673,18 @@ ShellRoot {
                                                         root.cancelOperation(opRow.op)
                                                 }
                                             }
+
+                                            // Dismiss this one row. Only offered
+                                            // once the operation is finished --
+                                            // there is nothing to dismiss about
+                                            // an install that is still running,
+                                            // and Cancel already owns that.
+                                            GlyphButton {
+                                                visible: opRow.terminal
+                                                symbol: "\u00d7"
+                                                Layout.alignment: Qt.AlignVCenter
+                                                onClicked: root.dismissOperation(opRow.op)
+                                            }
                                         }
                                     }
                                 }
@@ -3114,7 +3696,7 @@ ShellRoot {
                                 color: root.cPanel
                                 border.color: root.cLine
                                 radius: 0
-                                visible: root.installedItems.length === 0
+                                visible: root.appsTab === "apps" && root.installedItems.length === 0
                                 ColumnLayout {
                                     anchors.centerIn: parent
                                     width: Math.min(parent.width - 48, 560)
@@ -3151,46 +3733,8 @@ ShellRoot {
                                 // being wrong by exactly enough to slice the next row of cards
                                 // in half.
                                 spacing: 8
-                                // Also shown when the list could not be
-                                // refreshed: hiding the section then is what
-                                // makes an unchecked machine look up to date.
-                                visible: root.updateItems.length > 0 || root.updatesStale()
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 10
-
-                                    HudRailHeader {
-                                        Layout.fillWidth: true
-                                        title: "Updates"
-                                        sub: root.updatesStale()
-                                             ? root.updatesCheckedLabel()
-                                             : root.updateItems.length + " available"
-                                    }
-
-                                    // Two rows is a deliberate cap so the section does not
-                                    // bury the installed apps, but "7 available" above four
-                                    // visible cards, with nothing to say the rest exist, is
-                                    // just wrong. This says how many are hidden and shows them.
-                                    Label {
-                                        visible: root.updateItems.length > updatesGrid.columns * 2
-                                        text: root.updatesExpanded
-                                              ? "SHOW LESS"
-                                              : "SHOW ALL " + root.updateItems.length
-                                        color: updatesToggle.hovered ? root.cFg : root.cGreen
-                                        font.family: root.fontMono
-                                        font.pixelSize: 10
-                                        font.letterSpacing: 2
-                                        Layout.alignment: Qt.AlignVCenter
-                                        HoverHandler { id: updatesToggle }
-                                        MouseArea {
-                                            anchors.fill: parent
-                                            anchors.margins: -8
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: root.updatesExpanded = !root.updatesExpanded
-                                        }
-                                    }
-                                }
+                                Layout.fillHeight: true
+                                visible: root.appsTab === "updates"
 
                                 // Says out loud that the list below is the old
                                 // one. An empty updates section with no
@@ -3210,14 +3754,7 @@ ShellRoot {
 
                             ScrollView {
                                 Layout.fillWidth: true
-                                // Exactly two rows of cards, scrolled for the rest. Never a
-                                // partial row -- a card cut through the middle reads as a
-                                // rendering fault, not as "there is more below".
-                                Layout.preferredHeight: Math.round(142 * root.uiScale())
-                                    * (root.updatesExpanded
-                                       ? Math.ceil(root.updateItems.length / updatesGrid.columns)
-                                       : Math.min(2, Math.ceil(root.updateItems.length / updatesGrid.columns)))
-                                Behavior on Layout.preferredHeight { NumberAnimation { duration: root.tMed; easing.type: Easing.OutCubic } }
+                                Layout.fillHeight: true
                                 clip: true
                                 visible: root.updateItems.length > 0
 
@@ -3239,7 +3776,10 @@ ShellRoot {
                                         x: 7
                                         y: 4
                                         color: root.cPanel
-                                        border.color: updateHover.hovered ? "#5f7048" : root.cLine
+                                        border.color: root.selectMode && root.isSelected(updateCard.item)
+                                                      ? root.cGreen
+                                                      : (updateHover.hovered ? "#5f7048" : root.cLine)
+                                        border.width: root.selectMode && root.isSelected(updateCard.item) ? 2 : 1
                                         radius: 0
                                         opacity: 0
                                         transform: Translate { id: updateSlide; y: 8 }
@@ -3284,11 +3824,28 @@ ShellRoot {
                                             }
                                         }
 
+                                        // While selecting, the card picks itself instead of
+                                        // navigating: a mis-aimed click in the middle of a bulk
+                                        // action must not also change the page out from under it.
                                         MouseArea {
                                             anchors.fill: parent
                                             cursorShape: Qt.PointingHandCursor
                                             acceptedButtons: Qt.LeftButton
-                                            onClicked: root.selectApp(root.appFromInstalled(updateCard.item))
+                                            onClicked: {
+                                                if (root.selectMode)
+                                                    root.toggleSelection(updateCard.item)
+                                                else
+                                                    root.selectApp(root.appFromInstalled(updateCard.item))
+                                            }
+                                        }
+
+                                        SelectBox {
+                                            visible: root.selectMode
+                                            checked: root.isSelected(updateCard.item)
+                                            anchors.top: parent.top
+                                            anchors.left: parent.left
+                                            anchors.margins: 8
+                                            z: 5
                                         }
 
                                         RowLayout {
@@ -3363,30 +3920,70 @@ ShellRoot {
                                                     fill: root.cBlue
                                                     textColor: "white"
                                                     Layout.fillWidth: true
-                                                    onClicked: {
-                                                        root.request("operations.enqueue", {
-                                                            app_id: updateCard.item.id || updateCard.item.name,
-                                                            variant_id: updateCard.item.variant_id || updateCard.item.id || updateCard.item.name,
-                                                            action: "update",
-                                                            app_name: updateCard.item.name,
-                                                            package_id: root.packageIdFromInstalled(updateCard.item),
-                                                            source: root.operationSource(updateCard.item.source)
-                                                        })
-                                                        root.activeView = "installed"
-                                                    }
+                                                    onClicked: root.enqueueUpdateInstalled(updateCard.item)
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
+
+                            // Nothing to update. Says which of the two it is --
+                            // an up-to-date machine and a machine that could not
+                            // be checked look identical otherwise, and the
+                            // second one is the one that matters.
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                color: root.cPanel
+                                border.color: root.cLine
+                                radius: 0
+                                visible: root.updateItems.length === 0
+                                ColumnLayout {
+                                    anchors.centerIn: parent
+                                    width: Math.min(parent.width - 48, 560)
+                                    spacing: 8
+                                    Label {
+                                        text: root.updatesStale()
+                                              ? "Update list could not be refreshed."
+                                              : "Everything is up to date."
+                                        color: root.cFg
+                                        font.family: root.fontHuman
+                                        font.pixelSize: 18
+                                        horizontalAlignment: Text.AlignHCenter
+                                        wrapMode: Text.WordWrap
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        text: root.updatesStale()
+                                              ? root.updatesStaleNote()
+                                              : "Checked against apt, Flathub and GitHub releases · " + root.updatesCheckedLabel() + "."
+                                        color: root.cMuted
+                                        font.family: root.fontHuman
+                                        font.pixelSize: 14
+                                        horizontalAlignment: Text.AlignHCenter
+                                        wrapMode: Text.WordWrap
+                                        Layout.fillWidth: true
+                                    }
+                                    ActionButton {
+                                        label: "Check for updates"
+                                        fill: root.cDim
+                                        textColor: root.cGreen
+                                        height: 34
+                                        Layout.alignment: Qt.AlignHCenter
+                                        Layout.preferredWidth: 180
+                                        onClicked: root.request("updates.list", { "refresh": true })
+                                    }
+                                }
+                            }
+
                             }
 
                             ScrollView {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
-                                visible: root.installedItems.length > 0
+                                visible: root.appsTab === "apps" && root.installedItems.length > 0
 
                                 GridView {
                                     id: installedGrid
@@ -3409,7 +4006,10 @@ ShellRoot {
                                         x: 7
                                         y: 4
                                         color: root.cPanel
-                                        border.color: installedHover.hovered ? "#5f7048" : root.cLine
+                                        border.color: root.selectMode && root.isSelected(installedCard.item)
+                                                      ? root.cGreen
+                                                      : (installedHover.hovered ? "#5f7048" : root.cLine)
+                                        border.width: root.selectMode && root.isSelected(installedCard.item) ? 2 : 1
                                         radius: 0
                                         opacity: 0
                                         transform: Translate { id: installedSlide; y: 8 }
@@ -3454,11 +4054,28 @@ ShellRoot {
                                             }
                                         }
 
+                                        // While selecting, the card picks itself instead of
+                                        // navigating: a mis-aimed click in the middle of a bulk
+                                        // action must not also change the page out from under it.
                                         MouseArea {
                                             anchors.fill: parent
                                             cursorShape: Qt.PointingHandCursor
                                             acceptedButtons: Qt.LeftButton
-                                            onClicked: root.selectApp(root.appFromInstalled(installedCard.item))
+                                            onClicked: {
+                                                if (root.selectMode)
+                                                    root.toggleSelection(installedCard.item)
+                                                else
+                                                    root.selectApp(root.appFromInstalled(installedCard.item))
+                                            }
+                                        }
+
+                                        SelectBox {
+                                            visible: root.selectMode
+                                            checked: root.isSelected(installedCard.item)
+                                            anchors.top: parent.top
+                                            anchors.left: parent.left
+                                            anchors.margins: 8
+                                            z: 5
                                         }
 
                                         RowLayout {
