@@ -47,6 +47,11 @@ ShellRoot {
     property var storeLog: []
     property bool installOpen: false
     property var installApp: null
+    // A local .AppImage opened from the file manager: the inspection result
+    // and the consent sheet built from it. The file is only copied into place
+    // after Install is pressed; the sheet itself runs nothing.
+    property var localImage: null
+    property bool localOpen: false
     property string installVariantId: ""
     property var storeSettings: ({})
     property var cacheInfo: ({ iconBytes: 0, iconCount: 0 })
@@ -742,6 +747,36 @@ ShellRoot {
         root.installOpen = true
     }
 
+    function openAppImage(path) {
+        if (!path)
+            return
+        pushLog("inspect » " + path)
+        status = "Inspecting " + path.split("/").pop()
+        request("appimage.inspect", { path: path })
+    }
+
+    function confirmLocalInstall() {
+        const img = root.localImage
+        if (!img)
+            return
+        request("operations.enqueue", {
+            app_id: "appimage-local:" + (img.sha256 || img.file_name),
+            variant_id: "appimage-local",
+            action: "install",
+            app_name: img.name,
+            package_id: img.path,
+            source: "appimage"
+        })
+        root.localOpen = false
+        root.localImage = null
+        activeView = "installed"
+    }
+
+    function originHost(url) {
+        const m = (url || "").match(/^[a-z]+:\/\/([^\/]+)/i)
+        return m ? m[1] : ""
+    }
+
     function confirmInstall() {
         if (!root.installApp)
             return
@@ -963,6 +998,11 @@ ShellRoot {
                         // search results so the next search reflects reality.
                         root.searchCache = ({})
                         root.request("operations.list", {})
+                    } else if (result.appimage !== undefined) {
+                        root.localImage = result.appimage
+                        root.localOpen = true
+                        root.status = "Ready to install " + result.appimage.name
+                        pushLog("inspected « " + result.appimage.file_name)
                     } else if (result.dismissed !== undefined) {
                         root.status = result.dismissed ? "Dismissed" : "Operation is still running"
                         root.request("operations.list", {})
@@ -1074,6 +1114,24 @@ ShellRoot {
 
     Component.onCompleted: {
         initialLoadDelay.start()
+        // Handed over by the `thallium-store <file>` wrapper on a fresh start.
+        const opened = Quickshell.env("THALLIUM_STORE_OPEN_FILE")
+        if (opened)
+            openFileDelay.start()
+    }
+
+    Timer {
+        id: openFileDelay
+        interval: 900
+        repeat: false
+        onTriggered: root.openAppImage(Quickshell.env("THALLIUM_STORE_OPEN_FILE"))
+    }
+
+    // The wrapper reaches a store that is already running through this instead
+    // of starting a second one.
+    IpcHandler {
+        target: "store"
+        function openFile(path: string): void { root.openAppImage(path) }
     }
 
     // Top-bar navigation tab: mono uppercase label, green underline when
@@ -4554,6 +4612,236 @@ ShellRoot {
                         font.pixelSize: 10
                         font.letterSpacing: 2
                         Layout.alignment: Qt.AlignHCenter
+                    }
+                }
+            }
+
+            // Local AppImage consent sheet -- what the file is, what it can
+            // do, and the one button that copies it into place.
+            Rectangle {
+                id: localOverlay
+                anchors.fill: parent
+                visible: root.localOpen && root.localImage !== null
+                color: "#cc07090a"
+                z: 910
+
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: root.localOpen = false
+                }
+
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 500
+                    height: Math.min(parent.height - 40, localCol.implicitHeight + 32)
+                    color: root.cPanel
+                    border.color: root.cLine
+                    radius: 0
+
+                    MouseArea { anchors.fill: parent }
+
+                    ColumnLayout {
+                        id: localCol
+                        anchors.fill: parent
+                        anchors.margins: 16
+                        spacing: 14
+                        readonly property var img: root.localImage || ({})
+                        readonly property bool signed: img.signed === true
+                        readonly property string host: root.originHost(img.origin_url)
+                        readonly property string verdict: img.format !== "type2" ? "UNREADABLE"
+                            : (signed ? "SIGNED · NO SANDBOX" : "UNVERIFIED · NO SANDBOX")
+                        readonly property color verdictColor: img.format !== "type2" ? root.cRed
+                            : (signed ? root.cWarn : root.cRed)
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Rectangle { width: root.tickW; height: 15; radius: 0; color: root.cGreen; Layout.alignment: Qt.AlignVCenter }
+                            Label {
+                                text: "INSTALL APPIMAGE"
+                                color: root.cFg
+                                font.family: root.fontBrand
+                                font.pixelSize: 14
+                                font.bold: true
+                                font.letterSpacing: 1
+                            }
+                            Item { Layout.fillWidth: true }
+                            Label {
+                                text: localCol.verdict
+                                color: localCol.verdictColor
+                                font.family: root.fontMono
+                                font.pixelSize: 10
+                                font.letterSpacing: 1
+                            }
+                        }
+
+                        // Identity: icon, name, version, file.
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 14
+                            Rectangle {
+                                Layout.preferredWidth: 64
+                                Layout.preferredHeight: 64
+                                color: root.cDim
+                                border.color: root.cLine
+                                Image {
+                                    anchors.fill: parent
+                                    anchors.margins: 6
+                                    source: localCol.img.icon ? "file://" + localCol.img.icon : ""
+                                    fillMode: Image.PreserveAspectFit
+                                    smooth: true
+                                    visible: status === Image.Ready
+                                }
+                                Label {
+                                    anchors.centerIn: parent
+                                    visible: !localCol.img.icon
+                                    text: (localCol.img.name || "?").substring(0, 1).toUpperCase()
+                                    color: root.cGreen
+                                    font.family: root.fontBrand
+                                    font.pixelSize: 26
+                                    font.bold: true
+                                }
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 3
+                                Label {
+                                    text: localCol.img.name || ""
+                                    color: root.cFg
+                                    font.family: root.fontHuman
+                                    font.pixelSize: 18
+                                    font.bold: true
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+                                Label {
+                                    text: (localCol.img.version ? "v" + localCol.img.version : "version unknown")
+                                          + "  ·  " + root.formatBytes(localCol.img.size)
+                                          + (localCol.img.architecture ? "  ·  " + localCol.img.architecture : "")
+                                    color: root.cMuted
+                                    font.family: root.fontMono
+                                    font.pixelSize: 11
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+                                Label {
+                                    text: localCol.img.file_name || ""
+                                    color: root.cLine
+                                    font.family: root.fontMono
+                                    font.pixelSize: 10
+                                    elide: Text.ElideMiddle
+                                    Layout.fillWidth: true
+                                }
+                            }
+                        }
+
+                        Label {
+                            visible: !!localCol.img.summary && localCol.img.summary !== localCol.img.name
+                            text: localCol.img.summary || ""
+                            color: root.cFg
+                            font.family: root.fontHuman
+                            font.pixelSize: 12
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+
+                        // What it can do -- the APK permission list, for a
+                        // format that has exactly one permission: everything.
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Label {
+                                text: "WHAT THIS APP CAN DO"
+                                color: root.cMuted
+                                font.family: root.fontMono
+                                font.pixelSize: 10
+                                font.letterSpacing: 1
+                            }
+                            Repeater {
+                                model: {
+                                    const img = localCol.img
+                                    const rows = []
+                                    if (img.format !== "type2") {
+                                        rows.push({ tone: "bad", text: "Not a readable AppImage — " + ((img.warnings || [])[0] || "unknown format") })
+                                        return rows
+                                    }
+                                    rows.push({ tone: "bad", text: "Full access to your files, devices and network — AppImages run unsandboxed as you" })
+                                    rows.push(localCol.signed
+                                        ? { tone: "warn", text: "Carries a publisher signature (presence only; the key is not checked)" }
+                                        : { tone: "bad", text: "No publisher signature — nothing proves who built it" })
+                                    rows.push(localCol.host
+                                        ? { tone: "ok", text: "Downloaded from " + localCol.host }
+                                        : { tone: "warn", text: "Download source unknown" })
+                                    rows.push(img.update_info
+                                        ? { tone: "ok", text: "Ships an update channel: " + img.update_info.split("|")[0] }
+                                        : { tone: "warn", text: "No update channel — new versions must be downloaded by hand" })
+                                    if (img.already_installed)
+                                        rows.push({ tone: "warn", text: "An app with this name is already installed; it will be replaced" })
+                                    for (const w of (img.warnings || []))
+                                        rows.push({ tone: "warn", text: w })
+                                    return rows
+                                }
+                                delegate: RowLayout {
+                                    required property var modelData
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    Rectangle {
+                                        Layout.preferredWidth: 8
+                                        Layout.preferredHeight: 8
+                                        Layout.alignment: Qt.AlignTop
+                                        Layout.topMargin: 5
+                                        radius: 0
+                                        color: modelData.tone === "bad" ? root.cRed : (modelData.tone === "warn" ? root.cWarn : root.cGreen)
+                                    }
+                                    Label {
+                                        text: modelData.text
+                                        color: root.cFg
+                                        font.family: root.fontHuman
+                                        font.pixelSize: 12
+                                        wrapMode: Text.WordWrap
+                                        Layout.fillWidth: true
+                                    }
+                                }
+                            }
+                        }
+
+                        Label {
+                            text: "SHA-256  " + (localCol.img.sha256 || "").substring(0, 32) + "…"
+                            color: root.cLine
+                            font.family: root.fontMono
+                            font.pixelSize: 10
+                            Layout.fillWidth: true
+                        }
+
+                        Label {
+                            text: "Installs to your home folder only — no password needed. Only install AppImages from publishers you trust."
+                            color: root.cMuted
+                            font.family: root.fontHuman
+                            font.pixelSize: 11
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            Item { Layout.fillWidth: true }
+                            ActionButton {
+                                label: "Cancel"
+                                fill: root.cPanel
+                                textColor: root.cFg
+                                Layout.preferredWidth: 100
+                                onClicked: root.localOpen = false
+                            }
+                            ActionButton {
+                                label: localCol.img.already_installed ? "Reinstall" : "Install"
+                                fill: localCol.img.format === "type2" ? root.cGreen : root.cDead
+                                textColor: root.cBase
+                                active: localCol.img.format === "type2"
+                                Layout.preferredWidth: 128
+                                onClicked: if (localCol.img.format === "type2") root.confirmLocalInstall()
+                            }
+                        }
                     }
                 }
             }

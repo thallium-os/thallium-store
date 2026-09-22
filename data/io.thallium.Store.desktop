@@ -2,8 +2,9 @@
 Type=Application
 Name=Thallium Store
 Comment=Install applications on Thallium OS
-Exec=thallium-store
+Exec=thallium-store %f
 Icon=io.thallium.Store
 Terminal=false
 Categories=System;PackageManager;
 StartupNotify=true
+MimeType=application/vnd.appimage;application/x-iso9660-appimage;

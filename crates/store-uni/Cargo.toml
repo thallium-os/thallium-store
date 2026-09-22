@@ -13,3 +13,4 @@ reqwest.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+libc = "0.2"

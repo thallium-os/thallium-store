@@ -7,6 +7,7 @@
 Thallium Store merges four package sources into a single catalog. Search once and every source answers; each app shows every channel it ships on, with the safest option recommended. Installs, removals and updates are driven by the backend itself — it runs `apt-get` and `flatpak` directly, escalating through polkit. UNI was vendored once and is no longer invoked; see [`dronzer-tb/uni`](https://github.com/dronzer-tb/uni) for the standalone tool.
 
 - **Unified catalog** — apt, Flathub, GitHub releases and AppImage results merged and de-duplicated, each variant tagged with its trust level (sandboxed, system access, verified, unverified).
+- **AppImage installer** — the store is the desktop's handler for `.AppImage` files. Opening one shows what it is (name, version, icon, size, origin, signature) and what it can do before anything runs, then installs it into your home folder with a proper launcher entry — the APK-installer flow, for Linux.
 - **Editorial home** — curated collections and a featured carousel that paints real Flathub artwork behind each pick.
 - **Rich detail pages** — screenshots, description, every install source with the exact command it will run, source-language breakdown for open-source apps (via GitHub linguist), and metadata.
 - **Apps view** — everything installed on the system, plus live install/remove/update activity.

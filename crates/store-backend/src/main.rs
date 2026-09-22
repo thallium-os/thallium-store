@@ -435,6 +435,17 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
                 Ok(Value::Null)
             }
         }
+        // A local .AppImage opened from the file manager. Read-only: nothing
+        // is copied, executed or registered until operations.enqueue.
+        "appimage.inspect" => {
+            let path = request
+                .params
+                .get("path")
+                .and_then(Value::as_str)
+                .context("missing path")?;
+            let info = store_uni::inspect_appimage(Path::new(path)).await?;
+            Ok(json!({ "appimage": info }))
+        }
         "installed.list" => Ok(json!({ "items": installed_list().await })),
         "updates.list" => {
             // Refresh only when the caller says a person asked for it: the

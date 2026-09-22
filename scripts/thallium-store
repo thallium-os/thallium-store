@@ -18,10 +18,24 @@ if [ ! -f "$ui_path" ]; then
   fi
 fi
 
+# `thallium-store <file.AppImage>`: the file manager's open-with. A running
+# store is told over IPC so a second window does not appear; otherwise the
+# path rides in on the environment for the fresh instance to pick up.
+open_file=""
+if [ "${1:-}" != "" ] && [ -f "$1" ]; then
+  open_file="$(realpath -- "$1")"
+  if quickshell ipc -p "$ui_path" call store openFile "$open_file" >/dev/null 2>&1; then
+    exit 0
+  fi
+fi
+
 export PATH="$HOME/.local/bin:$repo_dir/target/debug:$PATH"
 export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 export UNI_PRIVILEGE_BACKEND="${UNI_PRIVILEGE_BACKEND:-pkexec}"
 export THALLIUM_STORE_FAKE_UNI="${THALLIUM_STORE_FAKE_UNI:-0}"
 
+if [ -n "$open_file" ]; then
+  export THALLIUM_STORE_OPEN_FILE="$open_file"
+fi
 exec quickshell --path "$ui_path"

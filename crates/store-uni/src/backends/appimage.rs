@@ -1,7 +1,8 @@
 //! AppImage backend.
 //!
-//! Installs a `.AppImage` from a direct URL (the catalog's appimage source):
-//! download, mark executable, drop a desktop entry, and record it in the
+//! Installs a `.AppImage` from a direct URL (the catalog's appimage source)
+//! or from a path already on disk (a download opened from the file manager):
+//! fetch or copy, mark executable, drop a desktop entry, and record it in the
 //! registry. Removal deletes the file, desktop entry and registry row.
 
 use super::download::download;
@@ -88,13 +89,27 @@ async fn install(
     let total = Arc::new(AtomicU64::new(0));
     let ticker = spawn_progress_ticker(tx.clone(), Arc::clone(&done), Arc::clone(&total), 0, 90);
 
-    // Download stage: bounded by the shared network permit only, so several
-    // appimage/github downloads can run concurrently.
-    let network_permit = network.clone().acquire_owned().await.ok();
-    let result = download(url, dest, &done, &total, token).await;
-    ticker.abort();
-    drop(network_permit);
-    result?;
+    // A local file is copied into place instead of fetched; the source stays
+    // where the user put it, so nothing outside the store's own directory
+    // is ever moved or deleted.
+    if url.starts_with('/') {
+        ticker.abort();
+        let source = Path::new(url);
+        anyhow::ensure!(
+            tokio::fs::canonicalize(source).await?
+                != tokio::fs::canonicalize(dest).await.unwrap_or_default(),
+            "source and destination are the same file"
+        );
+        tokio::fs::copy(source, dest).await?;
+    } else {
+        // Download stage: bounded by the shared network permit only, so several
+        // appimage/github downloads can run concurrently.
+        let network_permit = network.clone().acquire_owned().await.ok();
+        let result = download(url, dest, &done, &total, token).await;
+        ticker.abort();
+        drop(network_permit);
+        result?;
+    }
 
     // Install stage: fs + registry write, serialized per source.
     let _mutation_permit = mutation.clone().acquire_owned().await.ok();
@@ -140,14 +155,43 @@ async fn remove(app_name: &str) -> anyhow::Result<()> {
     }
     let desktop = desktop_dir().join(format!("{}.desktop", sanitize(app_name)));
     let _ = tokio::fs::remove_file(&desktop).await;
+    for ext in ["png", "svg"] {
+        let _ =
+            tokio::fs::remove_file(appimage_dir().join(format!("{}.{ext}", sanitize(app_name))))
+                .await;
+    }
     registry::remove(app_name).await
 }
 
 async fn write_desktop_entry(app_name: &str, exec: &Path) -> anyhow::Result<()> {
     let dir = desktop_dir();
     tokio::fs::create_dir_all(&dir).await?;
+    // The image's own icon and categories when they can be read; the generic
+    // entry otherwise. The icon is copied next to the AppImage so the launcher
+    // entry does not depend on the inspection cache surviving.
+    let mut icon = "application-x-executable".to_string();
+    let mut categories = "Utility;".to_string();
+    let mut comment = "Installed via Thallium Store".to_string();
+    if let Ok(info) = super::appimage_local::inspect(exec).await {
+        if let Some(src) = info.icon {
+            let ext = Path::new(&src)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("png");
+            let dst = appimage_dir().join(format!("{}.{ext}", sanitize(app_name)));
+            if tokio::fs::copy(&src, &dst).await.is_ok() {
+                icon = dst.to_string_lossy().into_owned();
+            }
+        }
+        if !info.categories.is_empty() {
+            categories = format!("{};", info.categories.join(";"));
+        }
+        if let Some(summary) = info.summary.filter(|s| !s.is_empty()) {
+            comment = summary;
+        }
+    }
     let body = format!(
-        "[Desktop Entry]\nName={app_name}\nExec={}\nIcon=application-x-executable\nType=Application\nCategories=Utility;\nComment=Installed via Thallium Store\n",
+        "[Desktop Entry]\nName={app_name}\nExec={}\nIcon={icon}\nType=Application\nCategories={categories}\nComment={comment}\n",
         exec.display()
     );
     tokio::fs::write(dir.join(format!("{}.desktop", sanitize(app_name))), body).await?;

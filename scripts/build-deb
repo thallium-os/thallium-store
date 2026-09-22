@@ -51,6 +51,10 @@ install -m 0644 data/github-apps.json "$pkg_dir/usr/share/thallium-store/data/gi
 install -m 0644 data/appimages.json "$pkg_dir/usr/share/thallium-store/data/appimages.json"
 install -m 0644 data/canonical-aliases.json "$pkg_dir/usr/share/thallium-store/data/canonical-aliases.json"
 install -m 0644 data/io.thallium.Store.desktop "$pkg_dir/usr/share/applications/io.thallium.Store.desktop"
+# Distribution-level default for .AppImage files, so a double-click in the
+# file manager lands in the store's consent sheet instead of an open-with
+# dialog. A user's own ~/.config/mimeapps.list still wins over this.
+install -m 0644 data/mimeapps.list "$pkg_dir/usr/share/applications/mimeapps.list"
 install -m 0644 data/io.thallium.Store.metainfo.xml "$pkg_dir/usr/share/metainfo/io.thallium.Store.metainfo.xml"
 install -m 0644 README.md "$pkg_dir/usr/share/doc/thallium-store/README.md"
 install -m 0644 docs/known-limitations.md "$pkg_dir/usr/share/doc/thallium-store/known-limitations.md"
@@ -62,7 +66,7 @@ Section: admin
 Priority: optional
 Architecture: $arch
 Maintainer: Thallium OS <maintainers@thallium.local>
-Depends: quickshell, bash, curl, flatpak, apt, dpkg, pkexec
+Depends: quickshell, bash, curl, flatpak, apt, dpkg, pkexec, squashfs-tools, coreutils
 Description: Graphical application store for Thallium OS
  Thallium Store searches system packages, Flathub, and curated GitHub
  applications, then delegates package changes to a JSON-capable UNI backend.
