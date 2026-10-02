@@ -8,30 +8,50 @@ if [ -f "$HOME/.cargo/env" ]; then
   source "$HOME/.cargo/env"
 fi
 
-# Single source of truth: scripts/deb-version, which is the Cargo.toml version
-# plus a stamp identifying the commit it was built from. Read that script for
-# why the commit belongs in the version.
-version="${THALLIUM_STORE_VERSION:-$(scripts/deb-version)}"
+# Single source of truth: the workspace version in Cargo.toml.
+version="${THALLIUM_STORE_VERSION:-$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)}"
 if [ -z "$version" ]; then
-  echo "could not compute the package version" >&2
+  echo "could not read version from Cargo.toml" >&2
   exit 1
 fi
-# The binary reports its own version over system.health. Export the string
-# being stamped into the control file so the two cannot disagree.
-export THALLIUM_STORE_VERSION="$version"
 arch="$(dpkg --print-architecture)"
 pkg="thallium-store"
 build_root="$PWD/target/deb-root"
 out_dir="$PWD/dist"
 pkg_dir="$build_root/${pkg}_${version}_${arch}"
+native_binary="$PWD/target/native-release/thallium-store-native"
 
-cargo build --release
+THALLIUM_NATIVE_BUILD_TYPE=Release ./scripts/build-native
+
+if ! command -v dpkg-shlibdeps >/dev/null 2>&1; then
+  echo "dpkg-shlibdeps is required; install the dpkg-dev package" >&2
+  exit 1
+fi
+
+# dpkg-shlibdeps needs Debian source metadata even when its result is emitted
+# to stdout. Keep that helper metadata separate from the package staging tree.
+rm -rf "$build_root/debian"
+mkdir -p "$build_root/debian"
+cat > "$build_root/debian/control" <<EOF
+Source: $pkg
+Section: admin
+Priority: optional
+Maintainer: Thallium OS <maintainers@thallium.local>
+Standards-Version: 4.7.0
+
+Package: $pkg
+Architecture: any
+Depends: \${shlibs:Depends}
+Description: Native Qt application store for Debian-based systems
+EOF
+qt_deps="$(cd "$build_root" && dpkg-shlibdeps -O "$native_binary" \
+  | sed -n 's/^shlibs:Depends=//p')"
 
 rm -rf "$pkg_dir"
 mkdir -p \
   "$pkg_dir/DEBIAN" \
   "$pkg_dir/usr/bin" \
-  "$pkg_dir/usr/share/thallium-store/ui" \
+  "$pkg_dir/usr/libexec/thallium-store" \
   "$pkg_dir/usr/share/thallium-store/data" \
   "$pkg_dir/usr/share/applications" \
   "$pkg_dir/usr/share/metainfo" \
@@ -40,21 +60,14 @@ mkdir -p \
 
 install -m 0755 target/release/thallium-store-backend "$pkg_dir/usr/bin/thallium-store-backend"
 install -m 0755 scripts/thallium-store "$pkg_dir/usr/bin/thallium-store"
-# The whole ui/ tree, not just shell.qml -- same reason as scripts/install-local:
-# the moment the QML is split into components/ or pages/, shipping only the root
-# document produces a package whose UI fails to import and silently blanks.
-cp -a ui/. "$pkg_dir/usr/share/thallium-store/ui/"
-find "$pkg_dir/usr/share/thallium-store/ui" -type f -exec chmod 0644 {} +
+install -m 0755 target/native-release/thallium-store-native \
+  "$pkg_dir/usr/libexec/thallium-store/thallium-store-native"
 install -m 0644 data/icons/io.thallium.Store.svg \
   "$pkg_dir/usr/share/icons/hicolor/scalable/apps/io.thallium.Store.svg"
 install -m 0644 data/github-apps.json "$pkg_dir/usr/share/thallium-store/data/github-apps.json"
 install -m 0644 data/appimages.json "$pkg_dir/usr/share/thallium-store/data/appimages.json"
 install -m 0644 data/canonical-aliases.json "$pkg_dir/usr/share/thallium-store/data/canonical-aliases.json"
 install -m 0644 data/io.thallium.Store.desktop "$pkg_dir/usr/share/applications/io.thallium.Store.desktop"
-# Distribution-level default for .AppImage files, so a double-click in the
-# file manager lands in the store's consent sheet instead of an open-with
-# dialog. A user's own ~/.config/mimeapps.list still wins over this.
-install -m 0644 data/mimeapps.list "$pkg_dir/usr/share/applications/mimeapps.list"
 install -m 0644 data/io.thallium.Store.metainfo.xml "$pkg_dir/usr/share/metainfo/io.thallium.Store.metainfo.xml"
 install -m 0644 README.md "$pkg_dir/usr/share/doc/thallium-store/README.md"
 install -m 0644 docs/known-limitations.md "$pkg_dir/usr/share/doc/thallium-store/known-limitations.md"
@@ -66,10 +79,11 @@ Section: admin
 Priority: optional
 Architecture: $arch
 Maintainer: Thallium OS <maintainers@thallium.local>
-Depends: quickshell, bash, curl, flatpak, apt, dpkg, pkexec, squashfs-tools, coreutils
-Description: Graphical application store for Thallium OS
+Depends: $qt_deps, qml6-module-qtqml, qml6-module-qtqml-models, qml6-module-qtqml-workerscript, qml6-module-qtquick, qml6-module-qtquick-controls, qml6-module-qtquick-layouts, qml6-module-qtquick-shapes, qml6-module-qtquick-templates, qml6-module-qtquick-window, qt6-qpa-plugins, qt6-wayland, bash, curl, apt, dpkg, xdg-utils
+Recommends: flatpak, pkexec
+Description: Native Qt application store for Debian-based systems
  Thallium Store searches system packages, Flathub, and curated GitHub
- applications, then delegates package changes to a JSON-capable UNI backend.
+ applications in a native Qt interface, then delegates package changes to UNI.
 EOF
 
 cat > "$pkg_dir/DEBIAN/postinst" <<'EOF'

@@ -72,13 +72,7 @@ async fn install(
     let client = reqwest::Client::builder()
         .user_agent("thallium-store")
         .build()?;
-    let mut request = client.get(format!(
-        "https://api.github.com/repos/{owner}/{repo}/releases/latest"
-    ));
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        request = request.bearer_auth(token);
-    }
-    let release: Value = request.send().await?.error_for_status()?.json().await?;
+    let release = fetch_release(&client, owner, repo).await?;
 
     let (url, name) = pick_best_asset(&release).ok_or_else(|| {
         anyhow::anyhow!("no suitable Linux asset in latest {owner}/{repo} release")
@@ -163,6 +157,51 @@ async fn install_deb(
     )
     .await;
     Ok(())
+}
+
+async fn github_get(client: &reqwest::Client, url: String) -> reqwest::Result<reqwest::Response> {
+    let mut request = client.get(url);
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        request = request.bearer_auth(token);
+    }
+    request.send().await
+}
+
+/// The newest release GitHub will admit to. A repository whose only release is
+/// marked as a prerelease has no `latest`, and GitHub answers that with a 404
+/// rather than an empty body, so fall back to the release list before giving up.
+async fn fetch_release(client: &reqwest::Client, owner: &str, repo: &str) -> anyhow::Result<Value> {
+    let latest = github_get(
+        client,
+        format!("https://api.github.com/repos/{owner}/{repo}/releases/latest"),
+    )
+    .await?;
+    if latest.status() != reqwest::StatusCode::NOT_FOUND {
+        return Ok(latest.error_for_status()?.json().await?);
+    }
+
+    let releases: Value = github_get(
+        client,
+        format!("https://api.github.com/repos/{owner}/{repo}/releases?per_page=10"),
+    )
+    .await?
+    .error_for_status()?
+    .json()
+    .await?;
+
+    releases
+        .as_array()
+        .and_then(|list| {
+            list.iter()
+                .find(|release| {
+                    !release
+                        .get("draft")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                })
+                .cloned()
+        })
+        .ok_or_else(|| anyhow::anyhow!("{owner}/{repo} has no published releases"))
 }
 
 /// Pick the highest-scoring asset URL/name, rejecting clearly wrong artifacts.

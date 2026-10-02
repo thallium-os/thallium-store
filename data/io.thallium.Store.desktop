@@ -1,10 +1,9 @@
 [Desktop Entry]
 Type=Application
 Name=Thallium Store
-Comment=Install applications on Thallium OS
-Exec=thallium-store %f
+Comment=Install applications on Debian-based systems
+Exec=thallium-store
 Icon=io.thallium.Store
 Terminal=false
 Categories=System;PackageManager;
 StartupNotify=true
-MimeType=application/vnd.appimage;application/x-iso9660-appimage;

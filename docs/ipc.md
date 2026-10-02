@@ -104,5 +104,26 @@ Long-lived clients receive notifications:
 {"jsonrpc":"2.0","method":"event.operationProgress","params":{"id":"01...","state":"downloading","percent":35}}
 ```
 
-The QML MVP polls `operations.list`; a future QML socket client should subscribe to the event stream directly.
+The browser frontend polls `operations.list`; long-lived Unix-socket clients can
+consume the progress notifications directly.
 
+## Native Qt transport
+
+The Qt client keeps one `QLocalSocket` connection open for the lifetime of the
+application. Its C++ bridge assigns request IDs, queues requests until the Rust
+backend is ready, matches responses to QML callbacks, and forwards
+`event.operationProgress` notifications. The client starts
+`thallium-store-backend` as a child when no daemon is available; a helper exits
+cleanly when another process already owns the per-user socket.
+
+## Browser transport
+
+`thallium-store-backend --web` embeds the desktop-independent frontend and
+serves it on a random `127.0.0.1` port. `POST /api` accepts the same JSON-RPC
+request objects documented above. A per-launch token, injected into the served
+HTML and required in the `X-Thallium-Token` header, prevents unrelated web pages
+from submitting package operations. The server sends no CORS opt-in headers.
+
+When another backend already owns the Unix socket, the browser server proxies
+requests to it. Otherwise it owns the Unix socket itself, so `--request` clients
+and the browser share one catalog, operation scheduler, and SQLite connection.

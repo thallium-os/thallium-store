@@ -17,5 +17,6 @@
   panels showing cached data until the quota resets.
 - The bundled curated catalog is deliberately small; it exists so the store is
   useful on first launch, before any index has warmed up.
-- The QML client talks to the backend through `--request` invocations and polls
-  for queue updates. Persistent socket streaming should replace this.
+- Browser clients poll operation state rather than subscribing to the backend's
+  Unix-socket progress stream. This adds a small delay (up to roughly two
+  seconds) when the recovery frontend is in use.

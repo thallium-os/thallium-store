@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Builds the portable store: one directory carrying the Qt runtime, the
+# native UI and the backend, so it runs on any glibc >= the build host's
+# without root and without the distro's Qt. Emits two artifacts from it:
+#   dist/thallium-store-<version>-x86_64.tar.gz   what install.sh unpacks
+#   dist/thallium-store-<version>-x86_64.AppImage for people who want one file
+#
+# The installer unpacks the tarball rather than running the AppImage because
+# an AppImage needs FUSE 2, which Arch and Fedora do not install by default.
+#
+# Needs: Qt 6 dev packages (incl. qt6-wayland), cmake, cargo, curl, file,
+# patchelf. Run on the oldest distro the bundle should support.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+out_dir="$PWD/dist"
+work="$PWD/target/appdir"
+appdir="$work/ThalliumStore.AppDir"
+tools="$work/tools"
+
+cargo build --release --locked -p thallium-store-backend
+THALLIUM_NATIVE_BUILD_TYPE=Release ./scripts/build-native
+
+mkdir -p "$tools" "$out_dir"
+fetch() {
+  [ -x "$tools/$1" ] && return
+  curl -fsSL --retry 3 -o "$tools/$1" "$2"
+  chmod +x "$tools/$1"
+}
+base=https://github.com/linuxdeploy
+fetch linuxdeploy "$base/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+fetch linuxdeploy-plugin-qt "$base/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
+fetch appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+# CI containers have no FUSE; the tools run fine extracted.
+export APPIMAGE_EXTRACT_AND_RUN=1
+
+rm -rf "$appdir"
+install -Dm0755 target/native-release/thallium-store-native "$appdir/usr/bin/thallium-store-native"
+install -Dm0755 target/release/thallium-store-backend "$appdir/usr/bin/thallium-store-backend"
+install -Dm0644 data/icons/io.thallium.Store.svg "$appdir/usr/share/icons/hicolor/scalable/apps/io.thallium.Store.svg"
+install -Dm0644 data/io.thallium.Store.metainfo.xml "$appdir/usr/share/metainfo/io.thallium.Store.appdata.xml"
+sed 's/^Exec=.*/Exec=thallium-store-native %U/' data/io.thallium.Store.desktop \
+  > "$work/io.thallium.Store.desktop"
+
+# The backend is found through PATH; the bundled Qt through the plugin's
+# qt.conf. Wayland is preferred when the session has it, X11 otherwise.
+cat > "$work/AppRun" <<'EOF'
+#!/bin/sh
+here="$(dirname "$(readlink -f "$0")")"
+export PATH="$here/usr/bin:$PATH"
+export THALLIUM_STORE_BACKEND="$here/usr/bin/thallium-store-backend"
+if [ -z "${QT_QPA_PLATFORM:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
+  export QT_QPA_PLATFORM="wayland;xcb"
+fi
+exec "$here/usr/bin/thallium-store-native" "$@"
+EOF
+chmod +x "$work/AppRun"
+
+export QML_SOURCES_PATHS="$PWD/ui"
+export EXTRA_PLATFORM_PLUGINS="libqwayland-egl.so;libqwayland-generic.so"
+export EXTRA_QT_MODULES="waylandclient"
+export EXTRA_QT_PLUGINS="wayland-decoration-client;wayland-graphics-integration-client;wayland-shell-integration;imageformats;iconengines"
+"$tools/linuxdeploy" --appdir "$appdir" \
+  --executable "$appdir/usr/bin/thallium-store-native" \
+  --desktop-file "$work/io.thallium.Store.desktop" \
+  --icon-file data/icons/io.thallium.Store.svg \
+  --custom-apprun "$work/AppRun" \
+  --plugin qt
+
+name="thallium-store-$version-x86_64"
+tar -C "$work" -czf "$out_dir/$name.tar.gz" --transform "s,^ThalliumStore.AppDir,thallium-store," ThalliumStore.AppDir
+ARCH=x86_64 "$tools/appimagetool" --no-appstream "$appdir" "$out_dir/$name.AppImage"
+
+echo "$out_dir/$name.tar.gz"
+echo "$out_dir/$name.AppImage"

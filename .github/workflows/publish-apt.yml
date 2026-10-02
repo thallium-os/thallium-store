@@ -1,0 +1,493 @@
+name: Publish native APT repository
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to store-qt.thallium81.dev (off = build and test only)"
+        type: boolean
+        default: true
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: apt-repository
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.suite }} package
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: bookworm
+            image: debian:12-slim
+          - suite: trixie
+            image: debian:13-slim
+          - suite: noble
+            image: ubuntu:24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential cmake pkg-config dpkg-dev \
+            qt6-base-dev qt6-declarative-dev \
+            qml6-module-qtquick qml6-module-qtquick-controls \
+            qml6-module-qtquick-layouts qt6-qpa-plugins
+
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Verify release tag
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          test "$GITHUB_REF_NAME" = "v$version" || {
+            echo "tag $GITHUB_REF_NAME does not match Cargo version v$version" >&2
+            exit 1
+          }
+
+      - name: Build native Debian package
+        shell: bash
+        run: |
+          source "$HOME/.cargo/env"
+          ./scripts/build-deb
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          package="$(find dist -maxdepth 1 -type f -name 'thallium-store_*.deb' -print -quit)"
+          test -n "$package"
+          mv "$package" "dist/thallium-store_${version}_${{ matrix.suite }}_amd64.deb"
+
+      - name: Upload suite package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.suite }}
+          path: dist/*.deb
+          if-no-files-found: error
+
+  smoke:
+    name: Test ${{ matrix.suite }} package
+    needs: build
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: bookworm
+            image: debian:12-slim
+          - suite: trixie
+            image: debian:13-slim
+          - suite: noble
+            image: ubuntu:24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Download suite package
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.suite }}
+          path: package
+
+      - name: Install package in a clean system
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y ./package/*.deb xvfb x11-utils
+
+      - name: Launch native QML application on a virtual display
+        shell: bash
+        run: |
+          # A real X server, not the offscreen platform: an application whose
+          # window is never mapped survives offscreen and shows the user
+          # nothing, so the window has to be observed to count as a launch.
+          set +e
+          Xvfb :99 -screen 0 1600x1000x24 >xvfb.log 2>&1 &
+          xvfb=$!
+          export DISPLAY=:99
+          for _ in $(seq 1 20); do
+            xdpyinfo >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          QT_QUICK_BACKEND=software timeout 20s \
+            /usr/libexec/thallium-store/thallium-store-native \
+            >native-smoke.log 2>&1 &
+          launcher=$!
+
+          mapped=1
+          for _ in $(seq 1 15); do
+            sleep 1
+            if xwininfo -root -tree 2>/dev/null | grep -q "Thallium Store"; then
+              mapped=0
+              break
+            fi
+          done
+
+          wait "$launcher"
+          status=$?
+          kill "$xvfb" 2>/dev/null
+          set -e
+          cat native-smoke.log
+          if [ "$status" -ne 124 ]; then
+            echo "native application exited during its startup smoke test (status $status)" >&2
+            exit 1
+          fi
+          if [ "$mapped" -ne 0 ]; then
+            echo "native application never mapped its window" >&2
+            exit 1
+          fi
+
+  # One self-contained bundle for every distro: the store plus its own Qt.
+  # Built on Debian 12 so the bundle's glibc floor is 2.36.
+  portable:
+    name: Build portable bundle
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:12
+    permissions:
+      contents: read
+    steps:
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential cmake pkg-config file patchelf \
+            qt6-base-dev qt6-declarative-dev qt6-wayland qt6-wayland-dev libqt6svg6 \
+            qml6-module-qtqml-workerscript qml6-module-qtquick qml6-module-qtquick-controls \
+            qml6-module-qtquick-layouts qml6-module-qtquick-shapes qml6-module-qtquick-templates \
+            qml6-module-qtquick-window qml6-module-qtqml-models qt6-qpa-plugins libgl-dev
+
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build bundle
+        shell: bash
+        run: |
+          source "$HOME/.cargo/env"
+          # linuxdeploy-plugin-qt finds Qt through qmake.
+          export QMAKE=/usr/lib/qt6/bin/qmake
+          ./scripts/build-appdir
+          cd dist
+          mv thallium-store-*-x86_64.tar.gz thallium-store-x86_64.tar.gz
+          mv thallium-store-*-x86_64.AppImage ThalliumStore-x86_64.AppImage
+          sha256sum thallium-store-x86_64.tar.gz > thallium-store-x86_64.tar.gz.sha256
+          sha256sum ThalliumStore-x86_64.AppImage > ThalliumStore-x86_64.AppImage.sha256
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: portable
+          path: dist/*x86_64*
+          if-no-files-found: error
+
+  # The point of the bundle is that it runs where nothing Qt is installed,
+  # so test it on Ubuntu and Arch with only the X/GL client libraries a
+  # desktop always has.
+  smoke-portable:
+    name: Test portable bundle on ${{ matrix.distro }}
+    needs: portable
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: ubuntu
+            image: ubuntu:24.04
+            setup: >-
+              apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y
+              xvfb x11-utils libgl1 libegl1 libfontconfig1 libxkbcommon-x11-0 libxcb-cursor0
+              libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0
+              libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libdbus-1-3
+              libopengl0 libharfbuzz0b libfreetype6 libglib2.0-0
+          - distro: arch
+            image: archlinux:latest
+            setup: >-
+              pacman -Syu --noconfirm xorg-server-xvfb xorg-xwininfo xorg-xdpyinfo
+              libglvnd fontconfig libxkbcommon-x11 xcb-util-cursor xcb-util-wm
+              xcb-util-image xcb-util-keysyms xcb-util-renderutil dbus
+              harfbuzz freetype2 glib2
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: portable
+          path: portable
+      - name: Install a bare X client stack
+        run: ${{ matrix.setup }}
+      - name: Launch the bundle with no system Qt
+        shell: bash
+        run: |
+          tar -C "$RUNNER_TEMP" -xzf portable/thallium-store-x86_64.tar.gz
+          # Every unresolved system library at once, not just the first.
+          for elf in "$RUNNER_TEMP"/thallium-store/usr/bin/thallium-store-native \
+                     "$RUNNER_TEMP"/thallium-store/usr/plugins/platforms/*.so; do
+            ldd "$elf"
+          done | awk '/not found/ {print "MISSING " $1}' | sort -u
+          set +e
+          Xvfb :99 -screen 0 1600x1000x24 >/dev/null 2>&1 &
+          export DISPLAY=:99
+          for _ in $(seq 1 20); do xdpyinfo >/dev/null 2>&1 && break; sleep 1; done
+          QT_QUICK_BACKEND=software timeout 20s "$RUNNER_TEMP/thallium-store/AppRun" >smoke.log 2>&1 &
+          app=$!
+          mapped=1
+          for _ in $(seq 1 15); do
+            sleep 1
+            xwininfo -root -tree 2>/dev/null | grep -q "Thallium Store" && { mapped=0; break; }
+          done
+          wait "$app"; status=$?
+          cat smoke.log
+          [ "$status" -eq 124 ] || { echo "bundle exited during startup (status $status)" >&2; exit 1; }
+          [ "$mapped" -eq 0 ] || { echo "bundle never mapped its window" >&2; exit 1; }
+
+  # Native Arch package from packaging/arch/PKGBUILD, signed and published as
+  # a pacman repository at /arch/x86_64.
+  arch:
+    name: Build Arch package
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+    permissions:
+      contents: read
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git cargo cmake \
+            qt6-base qt6-declarative qt6-wayland flatpak polkit curl
+          useradd -m builder
+
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Build package
+        run: |
+          set -eu
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          sed -i "s/^pkgver=.*/pkgver=$version/" packaging/arch/PKGBUILD
+          # makepkg uses a local file named like the source instead of
+          # downloading it, so this builds exactly this checkout.
+          git archive --prefix="thallium-store-$version/" \
+            -o "packaging/arch/thallium-store-$version.tar.gz" HEAD
+          chown -R builder packaging/arch
+          su builder -c "cd packaging/arch && makepkg --skipchecksums --noconfirm"
+
+      - name: Import signing key
+        env:
+          APT_SIGNING_KEY_B64: ${{ secrets.APT_SIGNING_KEY_B64 }}
+        run: |
+          test -n "$APT_SIGNING_KEY_B64"
+          install -d -m 0700 "$RUNNER_TEMP/gnupg"
+          printf '%s' "$APT_SIGNING_KEY_B64" | base64 --decode \
+            | GNUPGHOME="$RUNNER_TEMP/gnupg" gpg --batch --import
+          echo "GNUPGHOME=$RUNNER_TEMP/gnupg" >> "$GITHUB_ENV"
+
+      - name: Sign and index the pacman repository
+        run: |
+          set -eu
+          mkdir -p arch-repo/x86_64
+          cp packaging/arch/thallium-store-*-x86_64.pkg.tar.zst arch-repo/x86_64/
+          cd arch-repo/x86_64
+          for pkg in *.pkg.tar.zst; do
+            gpg --batch --yes --local-user 460325018227E003CBE3D92796EA62D80B90F19E \
+              --detach-sign "$pkg"
+          done
+          repo-add --sign --key 460325018227E003CBE3D92796EA62D80B90F19E \
+            thallium-store.db.tar.gz ./*.pkg.tar.zst
+          # repo-add leaves symlinks; R2 serves files, not links.
+          for link in thallium-store.db thallium-store.files thallium-store.db.sig thallium-store.files.sig; do
+            [ -L "$link" ] && cp --remove-destination "$(readlink -f "$link")" "$link"
+          done
+          ls -la
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: arch
+          path: arch-repo
+          if-no-files-found: error
+
+  smoke-arch:
+    name: Test Arch package
+    needs: arch
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+    steps:
+      # Checkout first: it cleans the workspace and would delete the artifact.
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: packaging/thallium-store-archive-keyring.asc
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: arch
+          path: arch-repo
+
+      # Trust the key the way install.sh --system does, so a package signed
+      # with anything else fails here instead of on a user's machine.
+      - name: Install the package in a clean system
+        run: |
+          pacman-key --init
+          pacman-key --add packaging/thallium-store-archive-keyring.asc
+          pacman-key --lsign-key 460325018227E003CBE3D92796EA62D80B90F19E
+          pacman -Syu --noconfirm xorg-server-xvfb xorg-xwininfo xorg-xdpyinfo
+          pacman -U --noconfirm arch-repo/x86_64/thallium-store-[0-9]*.pkg.tar.zst
+      - name: Install an AUR helper
+        run: |
+          set -eu
+          pacman -S --noconfirm --needed base-devel git
+          useradd -m builder
+          su builder -c "cd ~ && git clone --depth 1 https://aur.archlinux.org/paru-bin.git && cd paru-bin && makepkg --noconfirm"
+          pacman -U --noconfirm /home/builder/paru-bin/paru-bin-*.pkg.tar.zst
+
+      # Real pacman and the live AUR RPC, which the unit tests only fake.
+      - name: Search pacman and the AUR through the backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          # --request is a client; the backend has to be serving first.
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/run"
+          install -d -m 0700 "$XDG_RUNTIME_DIR"
+          thallium-store-backend >backend.log 2>&1 &
+          for _ in $(seq 1 30); do
+            thallium-store-backend --request system.health '{}' >/dev/null 2>&1 && break
+            sleep 1
+          done
+          health="$(thallium-store-backend --request system.health '{}')" || { cat backend.log; exit 1; }
+          echo "$health"
+          grep -q '"packageManager": *"pacman"' <<<"$health"
+          grep -q '"aurHelper": *"paru"' <<<"$health"
+          result="$(thallium-store-backend --request catalog.search \
+            '{"query":"htop","sources":["system","aur"],"limit":40,"protocol_version":1}')"
+          echo "$result" | head -c 3000; echo
+          grep -q '"id": *"system:htop"' <<<"$result" || { echo "pacman search found no htop" >&2; exit 1; }
+          grep -q '"source": *"aur"' <<<"$result" || { echo "AUR search returned nothing" >&2; exit 1; }
+
+      - name: Launch on a virtual display
+        shell: bash
+        run: |
+          set +e
+          Xvfb :99 -screen 0 1600x1000x24 >/dev/null 2>&1 &
+          export DISPLAY=:99
+          for _ in $(seq 1 20); do xdpyinfo >/dev/null 2>&1 && break; sleep 1; done
+          QT_QUICK_BACKEND=software timeout 20s thallium-store >smoke.log 2>&1 &
+          app=$!
+          mapped=1
+          for _ in $(seq 1 15); do
+            sleep 1
+            xwininfo -root -tree 2>/dev/null | grep -q "Thallium Store" && { mapped=0; break; }
+          done
+          wait "$app"; status=$?
+          cat smoke.log
+          [ "$status" -eq 124 ] || { echo "store exited during startup (status $status)" >&2; exit 1; }
+          [ "$mapped" -eq 0 ] || { echo "store never mapped its window" >&2; exit 1; }
+
+  repository:
+    name: Sign repository
+    needs: [smoke, smoke-portable, smoke-arch]
+    if: github.ref_type == 'tag' || inputs.publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Download suite packages
+        uses: actions/download-artifact@v8
+        with:
+          path: release-packages
+
+      - name: Install repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends apt-utils gnupg
+
+      - name: Import archive signing key
+        env:
+          APT_SIGNING_KEY_B64: ${{ secrets.APT_SIGNING_KEY_B64 }}
+        run: |
+          test -n "$APT_SIGNING_KEY_B64" || {
+            echo "APT_SIGNING_KEY_B64 repository secret is not configured" >&2
+            exit 1
+          }
+          install -d -m 0700 "$RUNNER_TEMP/gnupg"
+          printf '%s' "$APT_SIGNING_KEY_B64" \
+            | base64 --decode \
+            | GNUPGHOME="$RUNNER_TEMP/gnupg" gpg --batch --import
+          echo "GNUPGHOME=$RUNNER_TEMP/gnupg" >> "$GITHUB_ENV"
+
+      - name: Build signed APT repository
+        run: ./scripts/build-apt-repository "$PWD/apt-repository" "$PWD/release-packages"
+
+      # One tree for the bucket: the sync below deletes whatever is not in it.
+      - name: Add the portable bundle and the pacman repository
+        run: |
+          set -eu
+          mkdir -p apt-repository/portable apt-repository/arch
+          cp release-packages/portable/* apt-repository/portable/
+          cp -r release-packages/arch/x86_64 apt-repository/arch/
+
+      - name: Create or update GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --generate-notes --title "Thallium Store $GITHUB_REF_NAME"
+          find release-packages -type f -name '*.deb' -print0 \
+            | xargs -0 gh release upload "$GITHUB_REF_NAME" --clobber
+
+      # Pool first, indexes second, prune last: a client mid-update never
+      # sees an index naming a .deb that is not there yet. The token is
+      # scoped to objects in this one bucket, so rclone must not create it.
+      - name: Publish to R2
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends rclone
+          rclone copy apt-repository/pool r2:thallium-store-qt/pool
+          # Indexes, the pacman db, checksums and the page must never come
+          # from an edge cache; packages and by-hash copies are immutable.
+          rclone copy apt-repository r2:thallium-store-qt \
+            --include "dists/*/*" --include "dists/*/main/binary-amd64/Packages*" \
+            --include "arch/x86_64/thallium-store.*" --include "portable/*" \
+            --include "*.html" --include "install.sh" \
+            --header-upload "Cache-Control: no-cache"
+          rclone copy apt-repository r2:thallium-store-qt
+          rclone sync apt-repository r2:thallium-store-qt
+

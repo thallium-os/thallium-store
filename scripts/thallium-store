@@ -8,24 +8,13 @@ fi
 
 data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
 repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
-ui_path="$data_home/thallium-store/ui/shell.qml"
+uni_path="$data_home/thallium-store/uni/uni"
 
-if [ ! -f "$ui_path" ]; then
-  if [ -f "/usr/share/thallium-store/ui/shell.qml" ]; then
-    ui_path="/usr/share/thallium-store/ui/shell.qml"
-  else
-    ui_path="$repo_dir/ui/shell.qml"
-  fi
-fi
-
-# `thallium-store <file.AppImage>`: the file manager's open-with. A running
-# store is told over IPC so a second window does not appear; otherwise the
-# path rides in on the environment for the fresh instance to pick up.
-open_file=""
-if [ "${1:-}" != "" ] && [ -f "$1" ]; then
-  open_file="$(realpath -- "$1")"
-  if quickshell ipc -p "$ui_path" call store openFile "$open_file" >/dev/null 2>&1; then
-    exit 0
+if [ ! -x "$uni_path" ]; then
+  if [ -x "/usr/lib/thallium-store/uni/uni" ]; then
+    uni_path="/usr/lib/thallium-store/uni/uni"
+  elif [ -x "$repo_dir/vendor/uni/uni" ]; then
+    uni_path="$repo_dir/vendor/uni/uni"
   fi
 fi
 
@@ -33,9 +22,28 @@ export PATH="$HOME/.local/bin:$repo_dir/target/debug:$PATH"
 export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 export UNI_PRIVILEGE_BACKEND="${UNI_PRIVILEGE_BACKEND:-pkexec}"
+if [ -x "$uni_path" ]; then
+  export THALLIUM_STORE_UNI="${THALLIUM_STORE_UNI:-$uni_path}"
+fi
 export THALLIUM_STORE_FAKE_UNI="${THALLIUM_STORE_FAKE_UNI:-0}"
 
-if [ -n "$open_file" ]; then
-  export THALLIUM_STORE_OPEN_FILE="$open_file"
+native_binary="${THALLIUM_STORE_NATIVE:-}"
+if [ -z "$native_binary" ]; then
+  for candidate in \
+    "$HOME/.local/libexec/thallium-store/thallium-store-native" \
+    "/usr/libexec/thallium-store/thallium-store-native" \
+    "$repo_dir/target/native/thallium-store-native"; do
+    if [ -x "$candidate" ]; then
+      native_binary="$candidate"
+      break
+    fi
+  done
 fi
-exec quickshell --path "$ui_path"
+
+if [ -n "$native_binary" ] && [ -x "$native_binary" ]; then
+  exec "$native_binary"
+fi
+
+# Keep the loopback browser client as a recovery path for packages built before
+# the Qt client or systems where the native payload was removed manually.
+exec thallium-store-backend --web

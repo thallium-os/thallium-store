@@ -208,6 +208,8 @@ fn spawn_progress_ticker(
     span: u8,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let mut last_done = u64::MAX;
+        let mut last_percent = u8::MAX;
         loop {
             sleep(Duration::from_millis(200)).await;
             let total = total.load(Ordering::Relaxed);
@@ -217,6 +219,11 @@ fn spawn_progress_ticker(
                 None => base,
             };
             let mib = done as f64 / (1024.0 * 1024.0);
+            if done == last_done && percent == last_percent {
+                continue;
+            }
+            last_done = done;
+            last_percent = percent;
             emit(
                 &tx,
                 OperationState::Downloading,

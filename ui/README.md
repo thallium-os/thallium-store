@@ -1,9 +1,8 @@
-# Thallium Store UI
+# Native Qt Quick UI
 
-Run from the repository root after building the backend:
+The QML interface is hosted by the Qt 6 executable under `native/`; it has no
+Quickshell imports. Build and launch it from the repository root with:
 
 ```bash
-PATH="$PWD/target/debug:$PATH" THALLIUM_STORE_FAKE_UNI=1 quickshell --path ui/shell.qml
+./scripts/dev-run
 ```
-
-The UI starts `thallium-store-backend` from `PATH`.
