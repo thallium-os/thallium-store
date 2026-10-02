@@ -342,6 +342,29 @@ jobs:
         run: |
           pacman -Syu --noconfirm xorg-server-xvfb xorg-xwininfo xorg-xdpyinfo
           pacman -U --noconfirm arch-repo/x86_64/thallium-store-*.pkg.tar.zst
+      - name: Install an AUR helper
+        run: |
+          set -eu
+          pacman -S --noconfirm --needed base-devel git
+          useradd -m builder
+          su builder -c "cd ~ && git clone --depth 1 https://aur.archlinux.org/paru-bin.git && cd paru-bin && makepkg --noconfirm"
+          pacman -U --noconfirm /home/builder/paru-bin/paru-bin-*.pkg.tar.zst
+
+      # Real pacman and the live AUR RPC, which the unit tests only fake.
+      - name: Search pacman and the AUR through the backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          health="$(thallium-store-backend --request system.health '{}')"
+          echo "$health"
+          grep -q '"packageManager": *"pacman"' <<<"$health"
+          grep -q '"aurHelper": *"paru"' <<<"$health"
+          result="$(thallium-store-backend --request catalog.search \
+            '{"query":"htop","sources":["system","aur"],"limit":40,"protocol_version":1}')"
+          echo "$result" | head -c 3000; echo
+          grep -q '"id": *"system:htop"' <<<"$result" || { echo "pacman search found no htop" >&2; exit 1; }
+          grep -q '"source": *"aur"' <<<"$result" || { echo "AUR search returned nothing" >&2; exit 1; }
+
       - name: Launch on a virtual display
         shell: bash
         run: |
