@@ -1,0 +1,18 @@
+name = "thallium-store-root-index"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+workers_dev = false
+
+# Exact-path routes: only "/" is intercepted, so nothing else changes.
+routes = [
+  { pattern = "store.thallium81.dev/", zone_name = "thallium81.dev" },
+  { pattern = "store-qt.thallium81.dev/", zone_name = "thallium81.dev" },
+]
+
+[[r2_buckets]]
+binding = "STORE_QS"
+bucket_name = "thallium-store-qs"
+
+[[r2_buckets]]
+binding = "STORE_QT"
+bucket_name = "thallium-store-qt"
