@@ -15,7 +15,6 @@ fail() {
   exit 1
 }
 
-[ "$(id -u)" -eq 0 ] || fail "run this installer through sudo"
 [ -r /etc/os-release ] || fail "/etc/os-release is missing"
 command -v apt-get >/dev/null 2>&1 || fail "APT is required"
 command -v curl >/dev/null 2>&1 || fail "curl is required"
@@ -33,7 +32,22 @@ fi
 # not package. The native Qt build at store-qt.thallium81.dev needs nothing
 # extra.
 command -v quickshell >/dev/null 2>&1 \
-  || fail "Quickshell is required (https://quickshell.org). Without it, use the native build: curl -fsSL https://store-qt.thallium81.dev/install.sh | sudo sh"
+  || fail "Quickshell is required (https://quickshell.org). Without it, use the native build, which needs no sudo: curl -fsSL https://store-qt.thallium81.dev/install.sh | sh"
+
+# Adding an APT source needs root. Ask for it here, once, rather than making
+# people pipe a script from the internet straight into sudo.
+if [ "$(id -u)" -ne 0 ]; then
+  case " $* " in *" --as-root "*) fail "could not get root" ;; esac
+  if command -v sudo >/dev/null 2>&1; then elevate=sudo
+  elif command -v pkexec >/dev/null 2>&1; then elevate=pkexec
+  else fail "adding the APT source needs sudo or pkexec"
+  fi
+  printf '>> adding the Thallium Store APT source; %s will ask for your password\n' "$elevate"
+  self="$(mktemp)"
+  curl -fsSL --proto '=https' --tlsv1.2 "${THALLIUM_STORE_REPOSITORY:-https://store.thallium81.dev}/install.sh" -o "$self" \
+    || fail "could not download the installer"
+  exec "$elevate" sh "$self" --as-root
+fi
 
 # shellcheck disable=SC1091
 . /etc/os-release

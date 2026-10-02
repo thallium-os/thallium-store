@@ -127,7 +127,7 @@
       <h1>Every Linux app.<br><em>One store.</em></h1>
       <p class="lede">Search apt, Flathub, GitHub releases and AppImages at once. Every app shows every channel it ships on, with the safest one recommended.</p>
       <div class="install">
-        <code id="cmd">curl -fsSL https://store.thallium81.dev/install.sh | sudo sh</code>
+        <code id="cmd">curl -fsSL https://store.thallium81.dev/install.sh | sh</code>
         <button type="button" id="copy">Copy</button>
       </div>
       <div class="meta"><span>v@VERSION@</span><span>Debian 13 · amd64</span><span>GPL-3.0</span><span>Signed APT archive</span></div>
@@ -197,13 +197,13 @@
             <span class="eyebrow">You are here</span>
             <h3>Quickshell</h3>
             <p>The build Thallium 81 ships. Needs <a href="https://quickshell.org">Quickshell</a> installed. Debian 13 (trixie), amd64.</p>
-            <code>curl -fsSL https://store.thallium81.dev/install.sh | sudo sh</code>
+            <code>curl -fsSL https://store.thallium81.dev/install.sh | sh</code>
           </div>
           <div class="build">
             <span class="eyebrow">Anywhere else</span>
             <h3>Native Qt 6</h3>
-            <p>No Quickshell needed. Debian 12, Debian 13 and Ubuntu 24.04, amd64.</p>
-            <code>curl -fsSL https://store-qt.thallium81.dev/install.sh | sudo sh</code>
+            <p>No Quickshell, no sudo: installs into your home folder with its own Qt. Any x86_64 distro with glibc 2.36+ — Debian, Ubuntu, Arch, Fedora. Supports pacman and AUR helpers on Arch.</p>
+            <code>curl -fsSL https://store-qt.thallium81.dev/install.sh | sh</code>
           </div>
         </div>
         <div class="note">On <b>Thallium 81</b> the store is already installed and updates with the OS — there is nothing to add.</div>
