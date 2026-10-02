@@ -13,9 +13,14 @@
   </head>
   <body>
     <h1>Thallium Store</h1>
-    <p>Native Qt application store packages for supported Debian-based systems.</p>
-    <p>Install the repository and application with:</p>
-    <pre><code>curl -fsSL https://store-qt.thallium81.dev/install.sh | sudo sh</code></pre>
-    <p>The installer verifies the archive key, adds a narrowly scoped APT source, and installs <code>thallium-store</code>.</p>
+    <p>The native Qt 6 build of Thallium Store: apt or pacman, the AUR, Flathub, GitHub releases and AppImages in one place.</p>
+    <h2>Install — no sudo</h2>
+    <pre><code>curl -fsSL https://store-qt.thallium81.dev/install.sh | sh</code></pre>
+    <p>Installs a self-contained build into <code>~/.local</code>, with its own Qt. Works on any x86_64 distro with glibc 2.36 or newer — Debian 12+, Ubuntu 23.04+, Arch, Fedora 37+. Run it again to update; add <code>-s -- --uninstall</code> to remove it.</p>
+    <h2>Install with your package manager</h2>
+    <pre><code>curl -fsSL https://store-qt.thallium81.dev/install.sh | sh -s -- --system</code></pre>
+    <p>Adds a signed APT source (Debian 12, Debian 13, Ubuntu 24.04) or pacman repository (Arch) so the store updates with the system. It asks for your password itself.</p>
+    <h2>Downloads</h2>
+    <p><a href="portable/ThalliumStore-x86_64.AppImage">AppImage</a> · <a href="portable/thallium-store-x86_64.tar.gz">Portable tarball</a> · <a href="arch/x86_64/">Arch packages</a> · <a href="https://github.com/thallium-os/thallium-store/tree/native/qt6/packaging/arch">PKGBUILD</a></p>
   </body>
 </html>
