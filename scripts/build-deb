@@ -52,7 +52,6 @@ mkdir -p \
   "$pkg_dir/DEBIAN" \
   "$pkg_dir/usr/bin" \
   "$pkg_dir/usr/libexec/thallium-store" \
-  "$pkg_dir/usr/lib/thallium-store/uni" \
   "$pkg_dir/usr/share/thallium-store/data" \
   "$pkg_dir/usr/share/applications" \
   "$pkg_dir/usr/share/metainfo" \
@@ -63,7 +62,6 @@ install -m 0755 target/release/thallium-store-backend "$pkg_dir/usr/bin/thallium
 install -m 0755 scripts/thallium-store "$pkg_dir/usr/bin/thallium-store"
 install -m 0755 target/native-release/thallium-store-native \
   "$pkg_dir/usr/libexec/thallium-store/thallium-store-native"
-install -m 0755 vendor/uni/uni "$pkg_dir/usr/lib/thallium-store/uni/uni"
 install -m 0644 data/icons/io.thallium.Store.svg \
   "$pkg_dir/usr/share/icons/hicolor/scalable/apps/io.thallium.Store.svg"
 install -m 0644 data/github-apps.json "$pkg_dir/usr/share/thallium-store/data/github-apps.json"

@@ -1,0 +1,53 @@
+# Maintainer: Thallium Project <36neelansh@gmail.com>
+#
+# Native Qt 6 build of Thallium Store. CI builds this same file against a
+# tarball of the exact checkout (makepkg prefers a local file of the source
+# name), so what ships from store-qt.thallium81.dev and what an AUR user
+# builds are the same recipe.
+pkgname=thallium-store
+pkgver=0.1.15
+pkgrel=1
+pkgdesc="App store for pacman, the AUR, Flathub, GitHub releases and AppImages"
+arch=('x86_64')
+url="https://store-qt.thallium81.dev"
+license=('GPL-3.0-or-later')
+depends=('qt6-base' 'qt6-declarative' 'qt6-wayland' 'flatpak' 'polkit' 'curl'
+         'gcc-libs' 'glibc')
+makedepends=('cargo' 'cmake')
+optdepends=('paru: install from the AUR'
+            'yay: install from the AUR')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/thallium-os/thallium-store/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+options=('!lto')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p thallium-store-backend
+  cmake -S native -B build-native -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+  cmake --build build-native
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm0755 target/release/thallium-store-backend "$pkgdir/usr/bin/thallium-store-backend"
+  install -Dm0755 build-native/thallium-store-native "$pkgdir/usr/lib/thallium-store/thallium-store-native"
+  install -Dm0755 /dev/stdin "$pkgdir/usr/bin/thallium-store" <<'EOF'
+#!/bin/sh
+export THALLIUM_STORE_BACKEND=/usr/bin/thallium-store-backend
+exec /usr/lib/thallium-store/thallium-store-native "$@"
+EOF
+  sed 's/^Comment=.*/Comment=Install applications from pacman, the AUR, Flathub and more/' \
+    data/io.thallium.Store.desktop > io.thallium.Store.desktop
+  install -Dm0644 io.thallium.Store.desktop "$pkgdir/usr/share/applications/io.thallium.Store.desktop"
+  install -Dm0644 data/icons/io.thallium.Store.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.thallium.Store.svg"
+  install -Dm0644 data/io.thallium.Store.metainfo.xml "$pkgdir/usr/share/metainfo/io.thallium.Store.metainfo.xml"
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

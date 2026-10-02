@@ -152,9 +152,213 @@ jobs:
             exit 1
           fi
 
+  # One self-contained bundle for every distro: the store plus its own Qt.
+  # Built on Debian 12 so the bundle's glibc floor is 2.36.
+  portable:
+    name: Build portable bundle
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:12
+    permissions:
+      contents: read
+    steps:
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential cmake pkg-config file patchelf \
+            qt6-base-dev qt6-declarative-dev qt6-wayland qt6-wayland-dev qt6-svg-plugins \
+            qml6-module-qtqml-workerscript qml6-module-qtquick qml6-module-qtquick-controls \
+            qml6-module-qtquick-layouts qml6-module-qtquick-shapes qml6-module-qtquick-templates \
+            qml6-module-qtquick-window qml6-module-qtqml-models qt6-qpa-plugins libgl-dev
+
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build bundle
+        shell: bash
+        run: |
+          source "$HOME/.cargo/env"
+          # linuxdeploy-plugin-qt finds Qt through qmake.
+          export QMAKE=/usr/lib/qt6/bin/qmake
+          ./scripts/build-appdir
+          cd dist
+          mv thallium-store-*-x86_64.tar.gz thallium-store-x86_64.tar.gz
+          mv thallium-store-*-x86_64.AppImage ThalliumStore-x86_64.AppImage
+          sha256sum thallium-store-x86_64.tar.gz > thallium-store-x86_64.tar.gz.sha256
+          sha256sum ThalliumStore-x86_64.AppImage > ThalliumStore-x86_64.AppImage.sha256
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: portable
+          path: dist/*x86_64*
+          if-no-files-found: error
+
+  # The point of the bundle is that it runs where nothing Qt is installed,
+  # so test it on Ubuntu and Arch with only the X/GL client libraries a
+  # desktop always has.
+  smoke-portable:
+    name: Test portable bundle on ${{ matrix.distro }}
+    needs: portable
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: ubuntu
+            image: ubuntu:24.04
+            setup: >-
+              apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y
+              xvfb x11-utils libgl1 libegl1 libfontconfig1 libxkbcommon-x11-0 libxcb-cursor0
+              libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0
+              libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libdbus-1-3
+          - distro: arch
+            image: archlinux:latest
+            setup: >-
+              pacman -Syu --noconfirm xorg-server-xvfb xorg-xwininfo xorg-xdpyinfo
+              libglvnd fontconfig libxkbcommon-x11 xcb-util-cursor xcb-util-wm
+              xcb-util-image xcb-util-keysyms xcb-util-renderutil dbus
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: portable
+          path: portable
+      - name: Install a bare X client stack
+        run: ${{ matrix.setup }}
+      - name: Launch the bundle with no system Qt
+        shell: bash
+        run: |
+          tar -C "$RUNNER_TEMP" -xzf portable/thallium-store-x86_64.tar.gz
+          set +e
+          Xvfb :99 -screen 0 1600x1000x24 >/dev/null 2>&1 &
+          export DISPLAY=:99
+          for _ in $(seq 1 20); do xdpyinfo >/dev/null 2>&1 && break; sleep 1; done
+          QT_QUICK_BACKEND=software timeout 20s "$RUNNER_TEMP/thallium-store/AppRun" >smoke.log 2>&1 &
+          app=$!
+          mapped=1
+          for _ in $(seq 1 15); do
+            sleep 1
+            xwininfo -root -tree 2>/dev/null | grep -q "Thallium Store" && { mapped=0; break; }
+          done
+          wait "$app"; status=$?
+          cat smoke.log
+          [ "$status" -eq 124 ] || { echo "bundle exited during startup (status $status)" >&2; exit 1; }
+          [ "$mapped" -eq 0 ] || { echo "bundle never mapped its window" >&2; exit 1; }
+
+  # Native Arch package from packaging/arch/PKGBUILD, signed and published as
+  # a pacman repository at /arch/x86_64.
+  arch:
+    name: Build Arch package
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+    permissions:
+      contents: read
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git cargo cmake \
+            qt6-base qt6-declarative qt6-wayland flatpak polkit curl
+          useradd -m builder
+
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Build package
+        run: |
+          set -eu
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          sed -i "s/^pkgver=.*/pkgver=$version/" packaging/arch/PKGBUILD
+          # makepkg uses a local file named like the source instead of
+          # downloading it, so this builds exactly this checkout.
+          git archive --prefix="thallium-store-$version/" \
+            -o "packaging/arch/thallium-store-$version.tar.gz" HEAD
+          chown -R builder packaging/arch
+          su builder -c "cd packaging/arch && makepkg --skipchecksums --noconfirm"
+
+      - name: Import signing key
+        env:
+          APT_SIGNING_KEY_B64: ${{ secrets.APT_SIGNING_KEY_B64 }}
+        run: |
+          test -n "$APT_SIGNING_KEY_B64"
+          install -d -m 0700 "$RUNNER_TEMP/gnupg"
+          printf '%s' "$APT_SIGNING_KEY_B64" | base64 --decode \
+            | GNUPGHOME="$RUNNER_TEMP/gnupg" gpg --batch --import
+          echo "GNUPGHOME=$RUNNER_TEMP/gnupg" >> "$GITHUB_ENV"
+
+      - name: Sign and index the pacman repository
+        run: |
+          set -eu
+          mkdir -p arch-repo/x86_64
+          cp packaging/arch/thallium-store-*-x86_64.pkg.tar.zst arch-repo/x86_64/
+          cd arch-repo/x86_64
+          for pkg in *.pkg.tar.zst; do
+            gpg --batch --yes --local-user 460325018227E003CBE3D92796EA62D80B90F19E \
+              --detach-sign "$pkg"
+          done
+          repo-add --sign --key 460325018227E003CBE3D92796EA62D80B90F19E \
+            thallium-store.db.tar.gz ./*.pkg.tar.zst
+          # repo-add leaves symlinks; R2 serves files, not links.
+          for link in thallium-store.db thallium-store.files thallium-store.db.sig thallium-store.files.sig; do
+            [ -L "$link" ] && cp --remove-destination "$(readlink -f "$link")" "$link"
+          done
+          ls -la
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: arch
+          path: arch-repo
+          if-no-files-found: error
+
+  smoke-arch:
+    name: Test Arch package
+    needs: arch
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: arch
+          path: arch-repo
+      - name: Install the package in a clean system
+        run: |
+          pacman -Syu --noconfirm xorg-server-xvfb xorg-xwininfo xorg-xdpyinfo
+          pacman -U --noconfirm arch-repo/x86_64/thallium-store-*.pkg.tar.zst
+      - name: Launch on a virtual display
+        shell: bash
+        run: |
+          set +e
+          Xvfb :99 -screen 0 1600x1000x24 >/dev/null 2>&1 &
+          export DISPLAY=:99
+          for _ in $(seq 1 20); do xdpyinfo >/dev/null 2>&1 && break; sleep 1; done
+          QT_QUICK_BACKEND=software timeout 20s thallium-store >smoke.log 2>&1 &
+          app=$!
+          mapped=1
+          for _ in $(seq 1 15); do
+            sleep 1
+            xwininfo -root -tree 2>/dev/null | grep -q "Thallium Store" && { mapped=0; break; }
+          done
+          wait "$app"; status=$?
+          cat smoke.log
+          [ "$status" -eq 124 ] || { echo "store exited during startup (status $status)" >&2; exit 1; }
+          [ "$mapped" -eq 0 ] || { echo "store never mapped its window" >&2; exit 1; }
+
   repository:
     name: Sign repository
-    needs: smoke
+    needs: [smoke, smoke-portable, smoke-arch]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -188,6 +392,14 @@ jobs:
 
       - name: Build signed APT repository
         run: ./scripts/build-apt-repository "$PWD/apt-repository" "$PWD/release-packages"
+
+      # One tree for the bucket: the sync below deletes whatever is not in it.
+      - name: Add the portable bundle and the pacman repository
+        run: |
+          set -eu
+          mkdir -p apt-repository/portable apt-repository/arch
+          cp release-packages/portable/* apt-repository/portable/
+          cp -r release-packages/arch/x86_64 apt-repository/arch/
 
       - name: Create or update GitHub release
         if: github.ref_type == 'tag'

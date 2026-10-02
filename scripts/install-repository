@@ -1,89 +1,185 @@
 #!/bin/sh
+# Thallium Store installer, published as https://store-qt.thallium81.dev/install.sh
+#
+#   curl -fsSL https://store-qt.thallium81.dev/install.sh | sh
+#       Portable install into ~/.local. No sudo, no system packages: the
+#       bundle carries its own Qt, so it runs on any x86_64 distro with
+#       glibc 2.36 or newer (Debian 12+, Ubuntu 23.04+, Arch, Fedora 37+).
+#       Re-run to update.
+#
+#   curl -fsSL https://store-qt.thallium81.dev/install.sh | sh -s -- --system
+#       Install through the system package manager (APT on Debian/Ubuntu,
+#       pacman on Arch) so it updates with the rest of the system. Asks for
+#       your password itself; do not prefix it with sudo.
+#
+#   ... | sh -s -- --uninstall      removes the portable install.
 set -eu
 
 repository_url="${THALLIUM_STORE_REPOSITORY:-https://store-qt.thallium81.dev}"
 repository_url="${repository_url%/}"
 key_fingerprint="460325018227E003CBE3D92796EA62D80B90F19E"
 key_sha256="ef2cc9cf32a097e2e0ee6ca4a0b3c74a241d4218afdca5cb8517ab8fc88451ea"
-keyring_path="/etc/apt/keyrings/thallium-store-archive-keyring.pgp"
-source_path="/etc/apt/sources.list.d/thallium-store.sources"
-preferences_path="/etc/apt/preferences.d/thallium-store"
-legacy_source_path="/etc/apt/sources.list.d/thallium.sources"
 
 fail() {
   printf 'thallium-store installer: %s\n' "$*" >&2
   exit 1
 }
-
-[ "$(id -u)" -eq 0 ] || fail "run this installer through sudo"
-[ -r /etc/os-release ] || fail "/etc/os-release is missing"
-command -v apt-get >/dev/null 2>&1 || fail "APT is required"
-command -v curl >/dev/null 2>&1 || fail "curl is required"
-command -v dpkg >/dev/null 2>&1 || fail "dpkg is required"
-command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
-
-# shellcheck disable=SC1091
-. /etc/os-release
-
-suite=""
-if [ -n "${UBUNTU_CODENAME:-}" ]; then
-  suite="$UBUNTU_CODENAME"
-elif [ "${ID:-}" = "debian" ] || [ "${ID:-}" = "ubuntu" ]; then
-  suite="${VERSION_CODENAME:-}"
-elif printf '%s' "${ID_LIKE:-}" | grep -Eq '(^|[[:space:]])ubuntu([[:space:]]|$)'; then
-  suite="${VERSION_CODENAME:-}"
-elif printf '%s' "${ID_LIKE:-}" | grep -Eq '(^|[[:space:]])debian([[:space:]]|$)'; then
-  suite="${DEBIAN_CODENAME:-${VERSION_CODENAME:-}}"
-fi
-
-case "$suite" in
-  bookworm|trixie|noble) ;;
-  *) fail "unsupported base release '${suite:-unknown}'; supported releases are Debian 12, Debian 13, and Ubuntu 24.04" ;;
-esac
-
-architecture="$(dpkg --print-architecture)"
-[ "$architecture" = "amd64" ] || fail "unsupported architecture '$architecture'; the current repository publishes amd64 packages"
-
-temporary_key="$(mktemp)"
-cleanup() {
-  rm -f "$temporary_key"
+say() {
+  printf '>> %s\n' "$*"
 }
-trap cleanup EXIT HUP INT TERM
+need() {
+  command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
+}
+fetch() {
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$1" --output "$2" \
+    || fail "could not download $1"
+}
 
-curl --fail --silent --show-error --location \
-  --proto '=https' --tlsv1.2 \
-  "$repository_url/thallium-store-archive-keyring.pgp" \
-  --output "$temporary_key"
-printf '%s  %s\n' "$key_sha256" "$temporary_key" | sha256sum --check --status \
-  || fail "archive signing key checksum did not match fingerprint $key_fingerprint"
+mode=portable
+as_root=0
+for arg in "$@"; do
+  case "$arg" in
+    --system) mode=system ;;
+    --uninstall) mode=uninstall ;;
+    --as-root) as_root=1 ;;
+    *) fail "unknown option '$arg' (use --system or --uninstall)" ;;
+  esac
+done
 
-install -d -m 0755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d
-install -m 0644 "$temporary_key" "$keyring_path"
+[ "$(uname -m)" = "x86_64" ] || fail "unsupported architecture '$(uname -m)'; only x86_64 is published"
+need curl
+need sha256sum
 
-# Builds before the repository rename used this source file and URL. Leaving
-# it enabled makes `apt-get update` fail before it can install the replacement
-# native package. Only remove the known Thallium source; never touch a file
-# with the same name if it belongs to another repository. On Thallium OS that
-# same file is the OS update source, owned by thallium-archive-keyring --
-# removing it there cuts the machine off from every OTA, so leave it alone.
-if [ -f "$legacy_source_path" ] \
-  && ! dpkg-query -W -f='${Status}' thallium-archive-keyring 2>/dev/null | grep -q 'install ok installed' \
-  && grep -Fq 'https://dronzer-tb.github.io/Thallium_81/' "$legacy_source_path"; then
-  rm -f "$legacy_source_path"
-fi
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-cat > "$source_path" <<EOF
+# ── portable ────────────────────────────────────────────────────────────────
+data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+lib_dir="$HOME/.local/lib/thallium-store"
+bin_link="$HOME/.local/bin/thallium-store"
+desktop_file="$data_home/applications/io.thallium.Store.desktop"
+icon_file="$data_home/icons/hicolor/scalable/apps/io.thallium.Store.svg"
+
+portable_install() {
+  if [ "$(id -u)" -eq 0 ]; then
+    fail "the portable install goes into your home folder; run it without sudo (or use --system)"
+  fi
+  need tar
+  glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')"
+  if [ -n "$glibc" ] && [ "$(printf '%s\n2.36\n' "$glibc" | sort -V | head -1)" != "2.36" ]; then
+    fail "glibc $glibc is older than 2.36, which the portable build needs; try --system"
+  fi
+
+  name=thallium-store-x86_64.tar.gz
+  say "downloading $repository_url/portable/$name"
+  fetch "$repository_url/portable/$name" "$work/$name"
+  fetch "$repository_url/portable/$name.sha256" "$work/$name.sha256"
+  (cd "$work" && sha256sum --check --status "$name.sha256") \
+    || fail "checksum mismatch for $name; nothing was installed"
+
+  tar -C "$work" -xzf "$work/$name"
+  [ -x "$work/thallium-store/AppRun" ] || fail "the download is not a Thallium Store bundle"
+
+  # Swap the whole directory so a failed update never leaves half of two
+  # versions on disk.
+  mkdir -p "$(dirname "$lib_dir")" "$(dirname "$bin_link")" \
+    "$(dirname "$desktop_file")" "$(dirname "$icon_file")"
+  rm -rf "$lib_dir.new"
+  mv "$work/thallium-store" "$lib_dir.new"
+  rm -rf "$lib_dir"
+  mv "$lib_dir.new" "$lib_dir"
+  ln -sfn "$lib_dir/AppRun" "$bin_link"
+
+  install -m 0644 "$lib_dir/usr/share/icons/hicolor/scalable/apps/io.thallium.Store.svg" "$icon_file"
+  cat > "$desktop_file" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Thallium Store
+Comment=Install applications from every source in one place
+Exec=$bin_link %U
+Icon=io.thallium.Store
+Terminal=false
+Categories=System;PackageManager;
+StartupNotify=true
+EOF
+  command -v update-desktop-database >/dev/null 2>&1 \
+    && update-desktop-database "$(dirname "$desktop_file")" >/dev/null 2>&1 || true
+
+  printf '\nThallium Store is installed in %s.\n' "$lib_dir"
+  printf 'Launch it from the application menu or run: thallium-store\n'
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) printf 'Note: %s is not on your PATH; the menu entry still works.\n' "$HOME/.local/bin" ;;
+  esac
+  printf 'Run this installer again to update.\n'
+}
+
+portable_uninstall() {
+  rm -rf "$lib_dir" "$lib_dir.new"
+  rm -f "$bin_link" "$desktop_file" "$icon_file"
+  printf 'Removed the portable Thallium Store. Your settings in %s were kept.\n' \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/thallium-store"
+}
+
+# ── system ──────────────────────────────────────────────────────────────────
+fetch_key() {
+  fetch "$repository_url/thallium-store-archive-keyring.pgp" "$work/key.pgp"
+  printf '%s  %s\n' "$key_sha256" "$work/key.pgp" | sha256sum --check --status \
+    || fail "archive signing key checksum did not match fingerprint $key_fingerprint"
+}
+
+system_debian() {
+  need dpkg
+  keyring_path="/etc/apt/keyrings/thallium-store-archive-keyring.pgp"
+  source_path="/etc/apt/sources.list.d/thallium-store.sources"
+  preferences_path="/etc/apt/preferences.d/thallium-store"
+  legacy_source_path="/etc/apt/sources.list.d/thallium.sources"
+
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  suite=""
+  if [ -n "${UBUNTU_CODENAME:-}" ]; then
+    suite="$UBUNTU_CODENAME"
+  elif [ "${ID:-}" = "debian" ] || [ "${ID:-}" = "ubuntu" ]; then
+    suite="${VERSION_CODENAME:-}"
+  elif printf '%s' "${ID_LIKE:-}" | grep -Eq '(^|[[:space:]])ubuntu([[:space:]]|$)'; then
+    suite="${VERSION_CODENAME:-}"
+  elif printf '%s' "${ID_LIKE:-}" | grep -Eq '(^|[[:space:]])debian([[:space:]]|$)'; then
+    suite="${DEBIAN_CODENAME:-${VERSION_CODENAME:-}}"
+  fi
+  case "$suite" in
+    bookworm|trixie|noble) ;;
+    *) fail "no APT build for '${suite:-unknown}' (Debian 12, Debian 13, Ubuntu 24.04); the portable install works without --system" ;;
+  esac
+
+  fetch_key
+  install -d -m 0755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d
+  install -m 0644 "$work/key.pgp" "$keyring_path"
+
+  # Builds before the repository rename used this source file and URL. Leaving
+  # it enabled makes `apt-get update` fail before it can install the replacement
+  # native package. Only remove the known Thallium source; never touch a file
+  # with the same name if it belongs to another repository. On Thallium OS that
+  # same file is the OS update source, owned by thallium-archive-keyring --
+  # removing it there cuts the machine off from every OTA, so leave it alone.
+  if [ -f "$legacy_source_path" ] \
+    && ! dpkg-query -W -f='${Status}' thallium-archive-keyring 2>/dev/null | grep -q 'install ok installed' \
+    && grep -Fq 'https://dronzer-tb.github.io/Thallium_81/' "$legacy_source_path"; then
+    rm -f "$legacy_source_path"
+  fi
+
+  cat > "$source_path" <<EOF
 Types: deb
 URIs: $repository_url
 Suites: $suite
 Components: main
-Architectures: $architecture
+Architectures: amd64
 Signed-By: $keyring_path
 EOF
 
-# Only the Thallium Store package receives the normal repository priority.
-# This prevents this third-party source from replacing unrelated OS packages.
-cat > "$preferences_path" <<'EOF'
+  # Only the Thallium Store package receives the normal repository priority.
+  # This prevents this third-party source from replacing unrelated OS packages.
+  cat > "$preferences_path" <<'EOF'
 Package: *
 Pin: release o=Thallium Store
 Pin-Priority: 1
@@ -93,8 +189,47 @@ Pin: release o=Thallium Store
 Pin-Priority: 500
 EOF
 
-apt-get update
-apt-get install -y thallium-store
+  apt-get update
+  apt-get install -y thallium-store
+  printf '\nThallium Store is installed and will update through APT.\n'
+}
 
-printf '\nThallium Store is installed and will update through APT.\n'
-printf 'Launch it from the application menu or run: thallium-store\n'
+system_arch() {
+  need pacman-key
+  fetch_key
+  pacman-key --add "$work/key.pgp"
+  pacman-key --lsign-key "$key_fingerprint"
+  if ! grep -q '^\[thallium-store\]' /etc/pacman.conf; then
+    printf '\n[thallium-store]\nServer = %s/arch/$arch\n' "$repository_url" >> /etc/pacman.conf
+  fi
+  # A full -Syu, not -Sy: installing against a freshly synced database
+  # without upgrading is the partial upgrade Arch does not support. pacman
+  # asks before upgrading anything; the answer comes from the terminal, not
+  # from this script's piped stdin.
+  pacman -Syu --needed thallium-store </dev/tty
+  printf '\nThallium Store is installed and will update with pacman -Syu.\n'
+}
+
+system_install() {
+  if [ "$(id -u)" -ne 0 ]; then
+    [ "$as_root" -eq 0 ] || fail "could not get root"
+    if command -v sudo >/dev/null 2>&1; then elevate=sudo
+    elif command -v pkexec >/dev/null 2>&1; then elevate=pkexec
+    else fail "--system needs sudo or pkexec; the portable install needs neither"
+    fi
+    say "installing system-wide; $elevate will ask for your password"
+    fetch "$repository_url/install.sh" "$work/install.sh"
+    exec "$elevate" sh "$work/install.sh" --system --as-root
+  fi
+  if command -v apt-get >/dev/null 2>&1; then system_debian
+  elif command -v pacman >/dev/null 2>&1; then system_arch
+  else fail "no supported package manager (APT or pacman); the portable install works everywhere"
+  fi
+  printf 'Launch it from the application menu or run: thallium-store\n'
+}
+
+case "$mode" in
+  portable) portable_install ;;
+  uninstall) portable_uninstall ;;
+  system) system_install ;;
+esac
