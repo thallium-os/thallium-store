@@ -373,7 +373,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          health="$(thallium-store-backend --request system.health '{}')"
+          # --request is a client; the backend has to be serving first.
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/run"
+          install -d -m 0700 "$XDG_RUNTIME_DIR"
+          thallium-store-backend >backend.log 2>&1 &
+          for _ in $(seq 1 30); do
+            thallium-store-backend --request system.health '{}' >/dev/null 2>&1 && break
+            sleep 1
+          done
+          health="$(thallium-store-backend --request system.health '{}')" || { cat backend.log; exit 1; }
           echo "$health"
           grep -q '"packageManager": *"pacman"' <<<"$health"
           grep -q '"aurHelper": *"paru"' <<<"$health"
