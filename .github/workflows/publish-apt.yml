@@ -341,14 +341,15 @@ jobs:
     container:
       image: archlinux:latest
     steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: arch
-          path: arch-repo
+      # Checkout first: it cleans the workspace and would delete the artifact.
       - uses: actions/checkout@v6
         with:
           sparse-checkout: packaging/thallium-store-archive-keyring.asc
           sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: arch
+          path: arch-repo
 
       # Trust the key the way install.sh --system does, so a package signed
       # with anything else fails here instead of on a user's machine.
