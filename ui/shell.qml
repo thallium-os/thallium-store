@@ -41,6 +41,9 @@ ApplicationWindow {
     property bool operationToastError: false
     property bool operationToastVisible: false
     property string activeView: "discover"
+    // From system.health: "apt" or "pacman", and the AUR helper on Arch.
+    property string packageManager: "apt"
+    property string aurHelper: ""
     // Where details was opened from, so Back returns there instead of Home.
     property string detailsFrom: "discover"
     // Updates start capped at two rows on the Apps page; the header toggles it.
@@ -399,6 +402,8 @@ ApplicationWindow {
             return "github"
         if (source === "appimage")
             return "appimage"
+        if (source === "aur")
+            return "aur"
         return "system"
     }
 
@@ -420,7 +425,7 @@ ApplicationWindow {
     function appFromInstalled(item) {
         const source = operationSource(item.source)
         const packageId = packageIdFromInstalled(item)
-        const sourceArg = source === "system" ? "apt" : source === "flathub" ? "flatpak" : source
+        const sourceArg = source === "system" ? root.packageManager : source === "flathub" ? "flatpak" : source
         return {
             id: "installed:" + source + ":" + packageId,
             name: item.name,
@@ -451,7 +456,7 @@ ApplicationWindow {
     function enqueueUninstallInstalled(item) {
         const source = operationSource(item.source)
         const packageId = packageIdFromInstalled(item)
-        const sourceArg = source === "system" ? "apt" : source === "flathub" ? "flatpak" : source
+        const sourceArg = source === "system" ? root.packageManager : source === "flathub" ? "flatpak" : source
         request("operations.enqueue", {
             app_id: "installed:" + source + ":" + packageId,
             variant_id: sourceArg + ":" + packageId,
@@ -488,7 +493,7 @@ ApplicationWindow {
     function appFromOperation(operation) {
         const source = operationSource(operation.source)
         const packageId = packageIdFromOperation(operation)
-        const sourceArg = source === "system" ? "apt" : source === "flathub" ? "flatpak" : source
+        const sourceArg = source === "system" ? root.packageManager : source === "flathub" ? "flatpak" : source
         return {
             id: operation.app_id || "operation:" + source + ":" + packageId,
             name: operation.app_name,
@@ -594,12 +599,16 @@ ApplicationWindow {
             return "GitHub"
         if (source === "appimage")
             return "AppImage"
+        if (source === "aur")
+            return "AUR"
         return source || "Unknown"
     }
 
     function formatLabel(source) {
         if (source === "system" || source === "apt" || source === "dpkg")
-            return ".deb (dpkg)"
+            return packageManager === "pacman" ? "pacman package" : ".deb (dpkg)"
+        if (source === "aur")
+            return "AUR package (PKGBUILD)"
         if (source === "flathub" || source === "flatpak")
             return "flatpak"
         if (source === "github")
@@ -642,7 +651,9 @@ ApplicationWindow {
 
     function platformLabel(source) {
         if (source === "system" || source === "apt" || source === "dpkg")
-            return "Debian / Thallium repositories"
+            return packageManager === "pacman" ? "Arch repositories" : "Debian / Thallium repositories"
+        if (source === "aur")
+            return "Arch User Repository — user-submitted build script"
         if (source === "flathub" || source === "flatpak")
             return "Flatpak sandbox"
         if (source === "github")
@@ -721,6 +732,8 @@ ApplicationWindow {
             return cGreen        // sandboxed default — THE trusted green
         if (source === "github")
             return cPurple       // curated release (Everforest purple)
+        if (source === "aur")
+            return cPurple       // user-submitted: same caution as a release binary
         if (source === "appimage")
             return cGreenSoft    // portable (Everforest aqua)
         return cGreen
@@ -731,7 +744,7 @@ ApplicationWindow {
             return "#33301f"
         if (source === "flathub" || source === "flatpak")
             return "#2b3a2e"
-        if (source === "github")
+        if (source === "github" || source === "aur")
             return "#352a33"
         if (source === "appimage")
             return "#243530"
@@ -740,7 +753,9 @@ ApplicationWindow {
 
     function sourceShort(source) {
         if (source === "system" || source === "apt" || source === "dpkg")
-            return "APT"
+            return packageManager === "pacman" ? "PAC" : "APT"
+        if (source === "aur")
+            return "AUR"
         if (source === "flathub" || source === "flatpak")
             return "FLAT"
         if (source === "github")
@@ -834,7 +849,12 @@ ApplicationWindow {
             root.fakeUniMode = result.fakeUni === true
             root.uniHealth = result.privilege ? "ready" : "privilege helper missing"
             root.storeVersion = result.version || ""
-            root.status = result.status + " · APT " + (result.apt ? "ready" : "missing")
+            root.packageManager = result.packageManager || "apt"
+            root.aurHelper = result.aurHelper || ""
+            const pacman = root.packageManager === "pacman"
+            root.status = result.status
+                + (pacman ? " · pacman ready · AUR " + (root.aurHelper || "needs paru or yay")
+                          : " · APT " + (result.apt ? "ready" : "missing"))
                 + " · Flatpak " + (result.flatpak ? "ready" : "missing")
         }
     }
@@ -1683,7 +1703,7 @@ ApplicationWindow {
                                 }
                                 Label {
                                     text: discoverPage.onSearch
-                                          ? (root.query.length > 0 ? root.shownResults.length + " apps found across Thallium sources." : "Search apt, Flathub, GitHub and AppImage.")
+                                          ? (root.query.length > 0 ? root.shownResults.length + " apps found across Thallium sources." : (root.packageManager === "pacman" ? "Search pacman, the AUR, Flathub, GitHub and AppImage." : "Search apt, Flathub, GitHub and AppImage."))
                                           : "Curated picks from Flathub."
                                     color: root.cMuted
                                     font.family: root.fontHuman
@@ -2091,7 +2111,7 @@ ApplicationWindow {
                                 visible: discoverPage.onSearch && root.query.length === 0
                                 Label {
                                     anchors.centerIn: parent
-                                    text: "TYPE TO SEARCH · APT · FLATHUB · GITHUB · APPIMAGE"
+                                    text: root.packageManager === "pacman" ? "TYPE TO SEARCH · PACMAN · AUR · FLATHUB · GITHUB · APPIMAGE" : "TYPE TO SEARCH · APT · FLATHUB · GITHUB · APPIMAGE"
                                     color: root.cLine
                                     font.family: root.fontMono
                                     font.pixelSize: 12
