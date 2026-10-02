@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Prints the Debian version for the thallium-store package.
+#
+# The workspace version in Cargo.toml is the base, but it is not enough on its
+# own. Thallium_81 ships this package by pinning a commit SHA, and 0.5.25 went
+# out with a bumped pin and an unbumped Cargo version: new content published
+# under a version every machine already had, so apt saw no upgrade and the
+# release delivered nothing while going green. A human remembering to bump a
+# number is not a delivery mechanism.
+#
+# So the commit itself is part of the version. Bumping the pin changes the
+# version by construction, and forgetting to touch Cargo.toml costs nothing.
+#
+#   0.1.10+20260818210433.g86e2d51
+#   ^base  ^commit time (UTC)      ^short SHA
+#
+# Ordering, which is the whole point: dpkg compares the run of digits after
+# `+` numerically, so a later commit always sorts above an earlier one, and
+# any stamped build sorts above the bare base version it was built from. The
+# SHA sits behind the timestamp precisely because it does not order -- it is
+# there to identify the build, never to rank it. scripts/test-deb-version
+# asserts all of that against dpkg --compare-versions.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+base="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+if [ -z "$base" ]; then
+  echo "could not read version from Cargo.toml" >&2
+  exit 1
+fi
+
+# No git metadata (a source tarball, say) means no stamp. The bare version is
+# still correct, just not self-distinguishing.
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  printf '%s\n' "$base"
+  exit 0
+fi
+
+stamp="$(TZ=UTC git log -1 --date=format-local:%Y%m%d%H%M%S --format=%cd)"
+sha="$(git rev-parse --short=7 HEAD)"
+printf '%s+%s.g%s\n' "$base" "$stamp" "$sha"

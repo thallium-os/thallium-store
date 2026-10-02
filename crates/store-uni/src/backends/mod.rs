@@ -7,6 +7,7 @@
 //! milestones only after the child had already exited).
 
 mod appimage;
+pub mod appimage_local;
 mod apt;
 mod download;
 mod flatpak;

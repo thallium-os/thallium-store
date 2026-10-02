@@ -78,9 +78,19 @@ async fn install(
         anyhow::anyhow!("no suitable Linux asset in latest {owner}/{repo} release")
     })?;
 
-    let cache = appimage::cache_dir();
-    tokio::fs::create_dir_all(&cache).await?;
-    let dest = cache.join(&name);
+    // An `.AppImage` asset IS the installed program, so it lands straight in
+    // the appimage directory under the canonical name. Only throwaway assets
+    // (a `.deb` that apt-get consumes) stay in the cache, which is a directory
+    // any cleaner is entitled to empty.
+    let lower = name.to_ascii_lowercase();
+    let dest = if lower.ends_with(".appimage") {
+        appimage::appimage_dir().join(format!("{}.AppImage", appimage::sanitize(app_name)))
+    } else {
+        appimage::cache_dir().join(&name)
+    };
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
 
     let done = Arc::new(AtomicU64::new(0));
     let total = Arc::new(AtomicU64::new(0));
@@ -97,7 +107,6 @@ async fn install(
     // applies. A `.deb` shells out to apt-get, which touches the dpkg lock
     // just like the System backend, so it must serialize on `system_mutation`
     // (never `github_mutation`) to stay strictly serial system-wide.
-    let lower = name.to_ascii_lowercase();
     if lower.ends_with(".appimage") {
         let _mutation_permit = permits.github_mutation.clone().acquire_owned().await.ok();
         appimage::finalize(app_name, &dest, tx).await
@@ -124,29 +133,20 @@ async fn install_deb(
     )
     .await;
     let path = dest.to_string_lossy().to_string();
-    let mut command = privileged("/usr/bin/apt-get", &["install", "-y", &path]);
-    command
+    let mut child = privileged("apt-get", &["install", "-y", &path])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let output = tokio::select! {
-        output = command.output() => output?,
-        _ = token.cancelled() => anyhow::bail!("cancelled"),
+        .spawn()?;
+    let status = tokio::select! {
+        status = child.wait() => status?,
+        _ = token.cancelled() => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            anyhow::bail!("cancelled");
+        }
     };
-    if !output.status.success() {
-        // pkexec reserves 127 for a dismissed/failed authentication request.
-        // apt itself maps package/script failures to 100, so this distinction
-        // gives the user something actionable instead of a mysterious code.
-        if output.status.code() == Some(127) {
-            anyhow::bail!(
-                "administrator authorization was cancelled, or no polkit authentication agent is available"
-            );
-        }
-        let detail = command_diagnostic(&output.stdout, &output.stderr);
-        if detail.is_empty() {
-            anyhow::bail!("apt-get exited with {}", output.status);
-        }
-        anyhow::bail!("apt-get exited with {}: {detail}", output.status);
+    if !status.success() {
+        anyhow::bail!("apt-get exited with {status}");
     }
     registry::add(app_name, "dpkg", repo).await?;
     emit(
@@ -157,20 +157,6 @@ async fn install_deb(
     )
     .await;
     Ok(())
-}
-
-fn command_diagnostic(stdout: &[u8], stderr: &[u8]) -> String {
-    let mut lines = String::from_utf8_lossy(stderr)
-        .lines()
-        .chain(String::from_utf8_lossy(stdout).lines())
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if lines.len() > 4 {
-        lines.drain(..lines.len() - 4);
-    }
-    lines.join(" | ")
 }
 
 async fn github_get(client: &reqwest::Client, url: String) -> reqwest::Result<reqwest::Response> {
@@ -243,8 +229,33 @@ fn arch_patterns() -> &'static [&'static str] {
     }
 }
 
+/// Sidecar files that sit next to a real artifact and can never be installed:
+/// checksums, signatures, update metadata. Matched on suffix so
+/// `foo.AppImage.zsync` is rejected outright instead of inheriting the
+/// `.appimage` bonus and tying with the artifact it describes.
+const SIDECAR_SUFFIXES: &[&str] = &[
+    ".zsync",
+    ".blockmap",
+    ".sig",
+    ".asc",
+    ".pem",
+    ".md5",
+    ".sha1",
+    ".sha256",
+    ".sha512",
+    ".sum",
+    ".torrent",
+    ".yml",
+    ".yaml",
+    ".txt",
+];
+
 fn score_asset(name: &str) -> i32 {
     let name = name.to_ascii_lowercase();
+    if SIDECAR_SUFFIXES.iter().any(|suf| name.ends_with(suf)) {
+        return -500;
+    }
+
     let mut score = 0i32;
 
     let ours = arch_patterns();
@@ -259,9 +270,8 @@ fn score_asset(name: &str) -> i32 {
         }
     }
 
-    // Matched on the suffix, not anywhere in the name: sidecars are named after
-    // the artifact they describe, so `App-linux-x86_64.AppImage.zsync` contains
-    // `.appimage` and used to score as high as the AppImage it points at.
+    // Extensions are matched on suffix: only the real trailing extension
+    // decides the artifact type.
     for (suffix, delta) in [
         (".deb", 40),
         (".appimage", 30),
@@ -269,12 +279,6 @@ fn score_asset(name: &str) -> i32 {
         (".tar.xz", 10),
         (".zip", 5),
         (".rpm", -100),
-        (".sha256", -500),
-        (".sha512", -500),
-        (".asc", -500),
-        (".sig", -500),
-        (".zsync", -500),
-        (".blockmap", -500),
         (".exe", -300),
         (".dmg", -300),
     ] {
@@ -310,29 +314,6 @@ mod tests {
     }
 
     #[test]
-    fn scores_reject_sidecars_named_after_their_artifact() {
-        assert!(score_asset("PolyMC-Linux-x86_64-7.1.AppImage.zsync") < -100);
-        assert!(score_asset("app-linux-x86_64.AppImage.sha256") < -100);
-        assert!(
-            score_asset("PolyMC-Linux-x86_64-7.1.AppImage")
-                > score_asset("PolyMC-Linux-x86_64-7.1.AppImage.zsync")
-        );
-    }
-
-    #[test]
-    fn picks_the_appimage_over_its_zsync() {
-        let release = serde_json::json!({
-            "assets": [
-                {"name": "PolyMC-Linux-x86_64-7.1.AppImage", "browser_download_url": "u1"},
-                {"name": "PolyMC-Linux-x86_64-7.1.AppImage.zsync", "browser_download_url": "u2"}
-            ]
-        });
-        let (url, name) = pick_best_asset(&release).unwrap();
-        assert_eq!(url, "u1");
-        assert!(name.ends_with(".AppImage"));
-    }
-
-    #[test]
     fn picks_best_asset_from_release() {
         let release = serde_json::json!({
             "assets": [
@@ -347,10 +328,21 @@ mod tests {
     }
 
     #[test]
-    fn command_diagnostic_keeps_the_useful_tail() {
-        let stdout = b"line one\nline two\nline three\n";
-        let stderr = b"error one\nerror two\n";
-        let detail = command_diagnostic(stdout, stderr);
-        assert_eq!(detail, "error two | line one | line two | line three");
+    fn rejects_zsync_sidecar_next_to_appimage() {
+        // PolyMC ships `X.AppImage` and `X.AppImage.zsync`; the sidecar used to
+        // tie on score and win the last-max tie-break, downloading 119KB of
+        // update metadata and then failing as an unsupported asset type.
+        assert!(score_asset("PolyMC-Linux-amd64-7.1.AppImage.zsync") < -100);
+        let release = serde_json::json!({
+            "assets": [
+                {"name": "PolyMC-7.1.tar.gz", "browser_download_url": "u1"},
+                {"name": "PolyMC-Linux-amd64-7.1.AppImage", "browser_download_url": "u2"},
+                {"name": "PolyMC-Linux-amd64-7.1.AppImage.zsync", "browser_download_url": "u3"},
+                {"name": "PolyMC-Windows-Setup-amd64-7.1.exe", "browser_download_url": "u4"}
+            ]
+        });
+        let (url, name) = pick_best_asset(&release).unwrap();
+        assert_eq!(url, "u2");
+        assert_eq!(name, "PolyMC-Linux-amd64-7.1.AppImage");
     }
 }

@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Thallium Store</title>
+  <meta name="description" content="One store for apt, Flathub, GitHub releases and AppImages, ranked by trust. The app store for Thallium 81.">
+  <meta property="og:title" content="Thallium Store">
+  <meta property="og:description" content="One store for apt, Flathub, GitHub releases and AppImages, ranked by trust.">
+  <meta property="og:image" content="https://store.thallium81.dev/screenshots/discover.png">
+  <meta name="theme-color" content="#060607">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Albert+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&family=Unbounded:wght@600;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --base: #060607; --panel: #15191b; --dim: #1e2326; --line: #3a464c;
+      --green: #a7c080; --aqua: #83c092; --fg: #d3c6aa; --muted: #8f9a91;
+      --wash: #2b3a2e; --warn: #dbbc7f; --purple: #d699b6;
+      --brand: "Unbounded", system-ui, sans-serif;
+      --human: "Albert Sans", system-ui, sans-serif;
+      --mono: "JetBrains Mono", ui-monospace, monospace;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; background: var(--base); color: var(--fg); font: 17px/1.6 var(--human); -webkit-font-smoothing: antialiased; }
+    a { color: var(--green); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    img { display: block; max-width: 100%; height: auto; }
+    .wrap { max-width: 1180px; margin: 0 auto; padding-inline: 24px; }
+    .eyebrow { font: 600 12px/1 var(--mono); letter-spacing: .28em; text-transform: uppercase; color: var(--green); }
+    .muted { color: var(--muted); }
+
+    header { border-bottom: 1px solid var(--line); background: #0d1011; position: sticky; top: 0; z-index: 10; }
+    header .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .logo { display: flex; align-items: center; gap: 12px; color: var(--fg); }
+    .logo:hover { text-decoration: none; }
+    .mark { width: 34px; height: 34px; background: var(--green); color: var(--base); display: grid; place-items: center; font: 800 18px var(--brand); }
+    .logo b { font: 800 18px/1 var(--brand); display: block; }
+    .logo small { font: 400 9px/1 var(--mono); letter-spacing: .4em; color: var(--muted); }
+    nav { display: flex; gap: 28px; }
+    nav a { font: 400 12px var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--muted); }
+    nav a:hover { color: var(--fg); text-decoration: none; }
+
+    .hero { padding: 88px 0 56px; }
+    h1 { font: 800 clamp(40px, 7vw, 80px)/1.02 var(--brand); margin: 18px 0 20px; letter-spacing: -.01em; }
+    h1 em { font-style: normal; color: var(--green); }
+    .lede { font-size: clamp(18px, 2.2vw, 21px); max-width: 640px; color: var(--muted); margin: 0 0 36px; }
+    .install { display: flex; align-items: stretch; max-width: 720px; border: 1px solid var(--line); background: var(--dim); }
+    .install code { flex: 1; padding: 16px 18px; font: 14px var(--mono); color: var(--fg); overflow-x: auto; white-space: nowrap; }
+    .install code::before { content: "$ "; color: var(--green); }
+    .install button { border: 0; border-left: 1px solid var(--line); background: var(--green); color: var(--base); font: 600 13px var(--human); padding: 0 22px; cursor: pointer; }
+    .install button:hover { background: var(--aqua); }
+    .meta { margin-top: 14px; font: 12px var(--mono); color: var(--muted); letter-spacing: .04em; }
+    .meta span + span::before { content: " · "; color: var(--line); }
+
+    .shot { border: 1px solid var(--line); background: var(--panel); box-shadow: 0 30px 80px -30px rgba(167, 192, 128, .18); }
+    .hero .shot { margin-top: 64px; }
+
+    section { padding: 72px 0; border-top: 1px solid #14181a; }
+    h2 { font: 800 clamp(26px, 3.6vw, 38px)/1.15 var(--brand); margin: 14px 0 16px; }
+    .sources { display: flex; flex-wrap: wrap; gap: 10px; margin: 28px 0 0; }
+    .chip { font: 600 11px var(--mono); letter-spacing: .14em; text-transform: uppercase; padding: 7px 12px; border: 1px solid var(--line); background: var(--wash); color: var(--green); }
+    .chip.apt { color: var(--warn); background: #2e2a20; }
+    .chip.gh { color: var(--purple); background: #2e2229; }
+    .chip.ai { color: var(--aqua); background: #1f2e29; }
+
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); margin-top: 40px; }
+    .card { background: var(--panel); padding: 28px; }
+    .card h3 { font: 600 19px var(--human); margin: 14px 0 8px; color: var(--fg); }
+    .card p { margin: 0; color: var(--muted); font-size: 15px; }
+    .card .eyebrow { font-size: 10px; }
+
+    .feature { display: grid; grid-template-columns: 5fr 7fr; gap: 56px; align-items: center; }
+    .feature.flip { grid-template-columns: 7fr 5fr; }
+    .feature.flip .copy { order: 2; }
+    .feature p { color: var(--muted); }
+    .trust { list-style: none; padding: 0; margin: 22px 0 0; font: 13px var(--mono); }
+    .trust li { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--dim); }
+    .trust li b { font-weight: 600; }
+
+    .builds { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 36px; }
+    .build { border: 1px solid var(--line); background: var(--panel); padding: 28px; display: flex; flex-direction: column; }
+    .build.on { border-color: var(--green); }
+    .build h3 { font: 800 20px var(--brand); margin: 12px 0 10px; }
+    .build p { color: var(--muted); font-size: 15px; margin: 0 0 18px; flex: 1; }
+    .build code { font: 12px var(--mono); background: var(--dim); padding: 12px 14px; display: block; overflow-x: auto; white-space: nowrap; border: 1px solid var(--line); }
+
+    .note { margin-top: 28px; padding: 18px 22px; border-left: 3px solid var(--green); background: var(--wash); font-size: 15px; }
+
+    footer { border-top: 1px solid var(--line); padding: 36px 0 56px; font: 12px var(--mono); color: var(--muted); }
+    footer .wrap { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
+
+    @media (max-width: 860px) {
+      nav { display: none; }
+      .grid { grid-template-columns: 1fr; }
+      .feature, .feature.flip { grid-template-columns: 1fr; gap: 28px; }
+      .feature.flip .copy { order: 0; }
+      .builds { grid-template-columns: 1fr; }
+      .hero { padding-top: 56px; }
+      section { padding: 56px 0; }
+    }
+    @media (max-width: 520px) {
+      .wrap { padding-inline: 16px; }
+      .install { flex-direction: column; }
+      .install code, .build code { white-space: normal; word-break: break-all; overflow: visible; }
+      .install button { border-left: 0; border-top: 1px solid var(--line); padding: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <a class="logo" href="#"><span class="mark">T</span><span><b>Thallium</b><small>STORE</small></span></a>
+      <nav>
+        <a href="#features">Features</a>
+        <a href="#screens">Screens</a>
+        <a href="#install">Install</a>
+        <a href="https://github.com/thallium-os/thallium-store">Source</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="wrap hero">
+      <div class="eyebrow">The app store for Thallium 81</div>
+      <h1>Every Linux app.<br><em>One store.</em></h1>
+      <p class="lede">Search apt, Flathub, GitHub releases and AppImages at once. Every app shows every channel it ships on, with the safest one recommended.</p>
+      <div class="install">
+        <code id="cmd">curl -fsSL https://store.thallium81.dev/install.sh | sudo sh</code>
+        <button type="button" id="copy">Copy</button>
+      </div>
+      <div class="meta"><span>v@VERSION@</span><span>Debian 13 · amd64</span><span>GPL-3.0</span><span>Signed APT archive</span></div>
+      <img class="shot" src="screenshots/discover.png" width="1440" height="900" alt="Thallium Store home: a featured Blender banner above a row of essential apps — Firefox, VLC, Spotify, LibreOffice, Discord, Telegram.">
+    </div>
+
+    <section id="features">
+      <div class="wrap">
+        <div class="eyebrow">Four sources, one catalog</div>
+        <h2>Search once. Every source answers.</h2>
+        <p class="muted" style="max-width:680px">Results are merged and de-duplicated, then each variant is tagged with how much it can touch your system.</p>
+        <div class="sources">
+          <span class="chip apt">System · apt</span>
+          <span class="chip">Flathub</span>
+          <span class="chip gh">GitHub releases</span>
+          <span class="chip ai">AppImage</span>
+        </div>
+        <div class="grid">
+          <div class="card"><span class="eyebrow">Trust first</span><h3>Ranked by safety</h3><p>Sandboxed, system access, verified, unverified — every install channel is labelled, and the safest is recommended.</p></div>
+          <div class="card"><span class="eyebrow">No surprises</span><h3>See the exact command</h3><p>Detail pages list each source with the precise command it will run before you press Get.</p></div>
+          <div class="card"><span class="eyebrow">Open the box</span><h3>AppImage installer</h3><p>Open any <code>.AppImage</code> to see its name, version, origin and signature before anything runs, then install it with a real launcher.</p></div>
+          <div class="card"><span class="eyebrow">Curated</span><h3>Editorial home</h3><p>Hand-picked collections and a featured carousel painted with real Flathub artwork.</p></div>
+          <div class="card"><span class="eyebrow">Under the hood</span><h3>Source languages</h3><p>Open-source apps show what they are written in, straight from GitHub's linguist data.</p></div>
+          <div class="card"><span class="eyebrow">Fast</span><h3>Paints instantly</h3><p>Icons and details are cached on disk; the network is only touched for search, artwork and metadata.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="screens">
+      <div class="wrap">
+        <div class="feature">
+          <div class="copy">
+            <div class="eyebrow">Details</div>
+            <h2>Everything before you install.</h2>
+            <p>Screenshots, licence, homepage, size, and every channel the app ships on — side by side, with trust labels you can read at a glance.</p>
+            <ul class="trust">
+              <li><span>Flathub · flatpak</span><b style="color:var(--green)">SANDBOXED</b></li>
+              <li><span>System · apt</span><b style="color:var(--warn)">SYSTEM ACCESS</b></li>
+              <li><span>GitHub · release binary</span><b style="color:var(--purple)">UNVERIFIED</b></li>
+            </ul>
+          </div>
+          <img class="shot" src="screenshots/details.png" width="1440" height="900" loading="lazy" alt="Firefox detail page: Flathub source, MPL-2.0 licence, two preview screenshots, a source-language donut chart, and install channels with their commands.">
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <div class="feature flip">
+          <div class="copy">
+            <div class="eyebrow">Search</div>
+            <h2>All sources, one list.</h2>
+            <p>Fast local sources answer first while GitHub catches up, and each result carries its source tag — so you know where an app comes from before you open it.</p>
+          </div>
+          <img class="shot" src="screenshots/search.png" width="1440" height="900" loading="lazy" alt="Search results for firefox: 40 apps found, with System, Flathub, GitHub and AppImage sources all ready.">
+        </div>
+      </div>
+    </section>
+
+    <section id="install">
+      <div class="wrap">
+        <div class="eyebrow">Install</div>
+        <h2>Two builds. Same store.</h2>
+        <p class="muted" style="max-width:680px">Both drive the same Rust backend and offer the same views. Pick the one that fits your desktop — installing one replaces the other.</p>
+        <div class="builds">
+          <div class="build on">
+            <span class="eyebrow">You are here</span>
+            <h3>Quickshell</h3>
+            <p>The build Thallium 81 ships. Needs <a href="https://quickshell.org">Quickshell</a> installed. Debian 13 (trixie), amd64.</p>
+            <code>curl -fsSL https://store.thallium81.dev/install.sh | sudo sh</code>
+          </div>
+          <div class="build">
+            <span class="eyebrow">Anywhere else</span>
+            <h3>Native Qt 6</h3>
+            <p>No Quickshell needed. Debian 12, Debian 13 and Ubuntu 24.04, amd64.</p>
+            <code>curl -fsSL https://store-qt.thallium81.dev/install.sh | sudo sh</code>
+          </div>
+        </div>
+        <div class="note">On <b>Thallium 81</b> the store is already installed and updates with the OS — there is nothing to add.</div>
+        <p class="muted" style="font-size:14px;margin-top:24px">The installer checks the archive key against a pinned SHA-256, adds one APT source, and pins it so it can only ever supply <code>thallium-store</code> — never replace other system packages.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <span>Thallium Store · GPL-3.0 · part of <a href="https://thallium81.dev">Thallium 81</a></span>
+      <span><a href="https://github.com/thallium-os/thallium-store">github.com/thallium-os/thallium-store</a></span>
+    </div>
+  </footer>
+
+  <script>
+    document.getElementById("copy").addEventListener("click", function () {
+      var b = this, t = document.getElementById("cmd").textContent;
+      (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(
+        function () { b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1600); },
+        function () { b.textContent = "Select ⌘C"; });
+    });
+  </script>
+</body>
+</html>

@@ -145,6 +145,11 @@ pub struct Operation {
     pub variant_id: String,
     pub source: SourceKind,
     pub action: OperationAction,
+    /// The package the operation acts on, kept so a failed operation can be
+    /// retried from its own record. Optional because rows written before this
+    /// field existed deserialize with it absent.
+    #[serde(default)]
+    pub package_id: Option<String>,
     pub state: OperationState,
     pub percent: u8,
     pub message: String,

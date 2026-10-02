@@ -1,0 +1,3 @@
+[Default Applications]
+application/vnd.appimage=io.thallium.Store.desktop
+application/x-iso9660-appimage=io.thallium.Store.desktop
