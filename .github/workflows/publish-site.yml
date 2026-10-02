@@ -70,6 +70,10 @@ jobs:
         run: |
           set -eu
           rclone copy "$RUNNER_TEMP/site/pool" r2:thallium-store-qs/pool
+          # Indexes and the page must never come from an edge cache.
+          rclone copy "$RUNNER_TEMP/site" r2:thallium-store-qs \
+            --include "dists/*/*" --include "dists/*/main/binary-amd64/Packages*" --include "*.html" \
+            --header-upload "Cache-Control: no-cache"
           rclone copy "$RUNNER_TEMP/site" r2:thallium-store-qs
           rclone sync "$RUNNER_TEMP/site" r2:thallium-store-qs
 

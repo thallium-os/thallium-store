@@ -47,7 +47,17 @@ install -m 0644 "${packages[@]}" "$site_root/$pool/"
     -o APT::FTPArchive::Release::Architectures='amd64' \
     -o APT::FTPArchive::Release::Components='main' \
     -o APT::FTPArchive::Release::Description='Thallium Store, Quickshell build' \
+    -o APT::FTPArchive::Release::Acquire-By-Hash=yes \
     release "dists/$suite" > "dists/$suite/Release"
+  # By-hash copies, made after Release so it does not list them: apt fetches
+  # each index by hash, a URL no CDN cache can hold an older file under.
+  for f in "dists/$suite/main/binary-amd64/Packages" "dists/$suite/main/binary-amd64/Packages.gz"; do
+    for algo in SHA256 SHA512; do
+      mkdir -p "$(dirname "$f")/by-hash/$algo"
+      sum="$(${algo,,}sum "$f" | cut -d' ' -f1)"
+      cp "$f" "$(dirname "$f")/by-hash/$algo/$sum"
+    done
+  done
   gpg --batch --yes --local-user "$fingerprint" --armor --detach-sign \
     --output "dists/$suite/Release.gpg" "dists/$suite/Release"
   gpg --batch --yes --local-user "$fingerprint" --clearsign \
