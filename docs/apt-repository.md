@@ -7,7 +7,7 @@ APT resolves the correct Qt ABI for that operating system.
 ## User installation
 
 ```bash
-curl -fsSL https://store-qt.thallium81.dev/install.sh | sudo sh
+curl -fsSL https://store-qt.thallium81.dev/install.sh | sh
 ```
 
 The installer detects the base distribution, verifies the archive public key,
