@@ -61,7 +61,7 @@ chmod +x "$work/AppRun"
 export QML_SOURCES_PATHS="$PWD/ui"
 export EXTRA_PLATFORM_PLUGINS="libqwayland-egl.so;libqwayland-generic.so"
 export EXTRA_QT_MODULES="waylandclient"
-export EXTRA_QT_PLUGINS="wayland-decoration-client;wayland-graphics-integration-client;wayland-shell-integration"
+export EXTRA_QT_PLUGINS="wayland-decoration-client;wayland-graphics-integration-client;wayland-shell-integration;imageformats;iconengines"
 "$tools/linuxdeploy" --appdir "$appdir" \
   --executable "$appdir/usr/bin/thallium-store-native" \
   --desktop-file "$work/io.thallium.Store.desktop" \
