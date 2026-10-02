@@ -2,6 +2,11 @@ name: Publish native APT repository
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to store-qt.thallium81.dev (off = build and test only)"
+        type: boolean
+        default: true
   push:
     tags:
       - "v*"
@@ -359,6 +364,7 @@ jobs:
   repository:
     name: Sign repository
     needs: [smoke, smoke-portable, smoke-arch]
+    if: github.ref_type == 'tag' || inputs.publish
     runs-on: ubuntu-24.04
     permissions:
       contents: write
