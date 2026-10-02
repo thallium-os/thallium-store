@@ -8,6 +8,8 @@ pub enum SourceKind {
     Flathub,
     Github,
     Appimage,
+    /// Arch User Repository, built and installed through paru or yay.
+    Aur,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -163,4 +165,16 @@ pub struct OperationLog {
     pub timestamp: DateTime<Utc>,
     pub level: String,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aur_source_wire_name_is_aur() {
+        assert_eq!(serde_json::to_value(SourceKind::Aur).unwrap(), "aur");
+        let parsed: SourceKind = serde_json::from_str("\"aur\"").unwrap();
+        assert_eq!(parsed, SourceKind::Aur);
+    }
 }

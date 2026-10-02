@@ -53,7 +53,8 @@ impl LockPlan {
         }
 
         match source {
-            SourceKind::System => {
+            // An AUR install ends in a pacman transaction on the same database.
+            SourceKind::System | SourceKind::Aur => {
                 exclusive.push(LockDomain::DpkgDatabase);
                 exclusive.push(LockDomain::PrivilegePrompt);
             }

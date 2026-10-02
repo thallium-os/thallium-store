@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use store_catalog::CatalogManager;
+use store_core::host;
 use store_core::{
     AppVariant, CanonicalApp, EnqueueOperation, Operation, OperationLog, OperationState,
     SearchParams, SourceKind, TrustLevel,
@@ -785,7 +786,9 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
                 "mode": if state.fake_uni { "fake" } else { "real-json" },
                 "apt": readiness.apt,
                 "flatpak": readiness.flatpak,
-                "privilege": readiness.privilege
+                "privilege": readiness.privilege,
+                "packageManager": readiness.package_manager,
+                "aurHelper": readiness.aur_helper
             }))
         }
         "catalog.search" => {
@@ -1010,7 +1013,7 @@ async fn enqueue_operation(params: Value, state: AppState) -> Result<Value> {
         let trust = match source {
             SourceKind::System => TrustLevel::SystemAccess,
             SourceKind::Flathub => TrustLevel::Sandboxed,
-            SourceKind::Github | SourceKind::Appimage => TrustLevel::Unverified,
+            SourceKind::Github | SourceKind::Appimage | SourceKind::Aur => TrustLevel::Unverified,
         };
         let variant = AppVariant {
             id: request.variant_id.clone(),
@@ -1103,9 +1106,7 @@ async fn run_operation(
                 // to "downloading" for as long as the transfer took to give up.
                 let terminal = matches!(
                     progress.state,
-                    OperationState::Succeeded
-                        | OperationState::Failed
-                        | OperationState::Cancelled
+                    OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
                 );
                 if cancelled.is_cancelled() && !terminal {
                     continue;
@@ -1382,7 +1383,10 @@ struct UpdatesReport {
 async fn updates_list(refresh: bool) -> UpdatesReport {
     // Sequenced, not joined: reading apt's cache before refreshing it would
     // answer from exactly the stale data the refresh exists to replace.
-    let apt_refresh: AptRefresh = if refresh {
+    let pacman = host::is_pacman_host();
+    // pacman hosts never refresh here: `pacman -Sy` without `-u` is a
+    // partial upgrade waiting to happen, so updates read the current sync db.
+    let apt_refresh: AptRefresh = if refresh && !pacman {
         apt_cache::refresh(APT_REFRESH_TIMEOUT).await
     } else {
         AptRefresh::skipped()
@@ -1390,7 +1394,14 @@ async fn updates_list(refresh: bool) -> UpdatesReport {
 
     let (apt, flatpak, github) = tokio::join!(
         async {
-            tokio::time::timeout(UPDATES_TIMEOUT, read_apt_updates())
+            let system = async {
+                if pacman {
+                    read_pacman_updates().await
+                } else {
+                    read_apt_updates().await
+                }
+            };
+            tokio::time::timeout(UPDATES_TIMEOUT, system)
                 .await
                 .unwrap_or_default()
         },
@@ -1464,6 +1475,64 @@ fn parse_apt_upgradable_line(line: &str) -> Option<UpdateItem> {
         source: "apt".to_string(),
         current_version,
         available_version: Some(available_version),
+        managed_by_uni: false,
+    })
+}
+
+/// Repo updates from `pacman -Qu` against the current sync db, plus AUR
+/// updates from the helper's `-Qua` when one is installed. Both are read-only
+/// and both exit 1 when there is nothing to update.
+async fn read_pacman_updates() -> Vec<UpdateItem> {
+    let mut items = query_updates("pacman", &["-Qu"], "pacman", "system").await;
+    if let Some(helper) = host::aur_helper() {
+        items.extend(query_updates(helper.binary(), &["-Qua"], "aur", "aur").await);
+    }
+    items
+}
+
+async fn query_updates(
+    program: &str,
+    args: &[&str],
+    id_prefix: &str,
+    source: &str,
+) -> Vec<UpdateItem> {
+    let output = match Command::new(program).args(args).output().await {
+        Ok(output) => output,
+        Err(err) => {
+            tracing::warn!("running {program} {}: {err}", args.join(" "));
+            return Vec::new();
+        }
+    };
+    if !output.status.success() && !output.stderr.is_empty() {
+        tracing::warn!(
+            "{program} {} exited with {}: {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| parse_pacman_update_line(line, id_prefix, source))
+        .collect()
+}
+
+/// Parses `name old -> new` (`pacman -Qu`, `paru -Qua`, `yay -Qua`); a
+/// trailing `[ignored]` marker is tolerated.
+fn parse_pacman_update_line(line: &str, id_prefix: &str, source: &str) -> Option<UpdateItem> {
+    let mut parts = line.split_whitespace();
+    let name = parts.next()?;
+    let current = parts.next()?;
+    if parts.next()? != "->" {
+        return None;
+    }
+    let available = parts.next()?;
+    Some(UpdateItem {
+        id: format!("{id_prefix}:{name}"),
+        name: name.to_string(),
+        source: source.to_string(),
+        current_version: Some(current.to_string()),
+        available_version: Some(available.to_string()),
         managed_by_uni: false,
     })
 }
@@ -1624,6 +1693,26 @@ mod tests {
             Some("117.0+build2-0ubuntu0.22.04.1")
         );
         assert!(!item.managed_by_uni);
+    }
+
+    #[test]
+    fn parse_pacman_update_lines_for_repo_and_aur() {
+        let item = parse_pacman_update_line("firefox 130.0-1 -> 131.0.3-1", "pacman", "system")
+            .expect("parses -Qu line");
+        assert_eq!(item.id, "pacman:firefox");
+        assert_eq!(item.source, "system");
+        assert_eq!(item.current_version.as_deref(), Some("130.0-1"));
+        assert_eq!(item.available_version.as_deref(), Some("131.0.3-1"));
+
+        let aur = parse_pacman_update_line("yay 12.4.1-1 -> 12.4.2-1 [ignored]", "aur", "aur")
+            .expect("parses -Qua line");
+        assert_eq!(aur.source, "aur");
+        assert_eq!(aur.available_version.as_deref(), Some("12.4.2-1"));
+
+        assert!(
+            parse_pacman_update_line(":: Searching AUR for updates...", "aur", "aur").is_none()
+        );
+        assert!(parse_pacman_update_line("", "pacman", "system").is_none());
     }
 
     #[test]
