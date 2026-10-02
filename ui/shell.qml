@@ -10,6 +10,8 @@ ShellRoot {
     property string backendBinary: Quickshell.env("THALLIUM_STORE_BACKEND") || "thallium-store-backend"
     property string query: ""
     property var results: []
+    // What search actually shows: results minus apt companion packages.
+    readonly property var shownResults: visibleResults()
     property var providers: []
     property var discover: []
     property var selectedApp: null
@@ -28,6 +30,8 @@ ShellRoot {
     property string activeMethod: ""
     property string status: "Starting backend"
     property string activeView: "discover"
+    // Where details was opened from, so Back returns there instead of Home.
+    property string detailsFrom: "discover"
     property bool fakeUniMode: true
     // system.health's native shape: {status, fakeUni, mode, apt, flatpak,
     // privilege, version}. The `uni` field it used to carry went with the bash
@@ -43,7 +47,6 @@ ShellRoot {
     property var searchCache: ({})
     property string activeSearchQuery: ""
     readonly property int searchCacheTtlMs: 60000
-    property bool searchCommitted: false
     property var storeLog: []
     property bool installOpen: false
     property var installApp: null
@@ -475,6 +478,8 @@ ShellRoot {
         // that returns focus to the window drags the view back to search.
         searchField.focus = false
         selectedApp = app
+        if (activeView !== "details")
+            detailsFrom = activeView
         activeView = "details"
         if (app && app.id)
             request("catalog.appDetails", { id: app.id })
@@ -514,11 +519,71 @@ ShellRoot {
             variant_id: variant.id,
             action: action || "install"
         })
-        activeView = "installed"
+        // Stay put. Jumping to Apps on every Get threw away the page the user
+        // was browsing; the button now reports progress where it was pressed,
+        // and the Apps tab badge counts what is in flight.
     }
 
     function enqueueInstall(app) {
         enqueueVariant(app, recommendedVariant(app))
+    }
+
+    // The queued or running operation for this app, if any.
+    function liveOpFor(app) {
+        if (!app)
+            return null
+        for (let i = 0; i < operations.length; i++) {
+            const op = operations[i]
+            const s = op.state
+            if (op.app_id === app.id && s !== "succeeded" && s !== "failed" && s !== "cancelled")
+                return op
+        }
+        return null
+    }
+
+    // One label for every Get button, so the same app reads the same
+    // everywhere it appears.
+    function getLabel(app) {
+        const op = liveOpFor(app)
+        if (op) {
+            if (op.action === "remove")
+                return "Removing…"
+            return op.percent > 0 ? op.percent + "%" : "Queued"
+        }
+        return app && app.installed ? "Installed" : "Get"
+    }
+
+    function canGet(app) {
+        return !!app && !app.installed && !liveOpFor(app)
+    }
+
+    // The catalog's stand-in for a missing summary is noise on a card; an
+    // empty line reads cleaner than the same sentence repeated down a rail.
+    // A field with nothing in it is a row of noise; leave it out.
+    function hasValue(v) {
+        return !!v && v !== "\u2014" && v !== "Not provided"
+    }
+
+    function cleanSummary(app) {
+        const s = app && app.summary ? app.summary : ""
+        return s === "No summary provided" ? "" : s
+    }
+
+    // apt answers "firefox" with every translation, debug and doc split of it.
+    // Hide those companions unless the query asks for them, so the list is the
+    // apps a person means rather than forty rows to scan past.
+    function visibleResults() {
+        const q = query.toLowerCase()
+        const noise = /-(l10n|i18n|locale|dbg|dbgsym|doc|dev|data|common)(-|$)/
+        const out = []
+        for (let i = 0; i < results.length; i++) {
+            const name = (results[i].name || "").toLowerCase()
+            const m = name.match(noise)
+            if (m && q.indexOf(m[1]) < 0)
+                continue
+            out.push(results[i])
+        }
+        return out
     }
 
     function operationSource(source) {
@@ -606,7 +671,6 @@ ShellRoot {
             package_id: variant.package_id,
             source: variant.source
         })
-        activeView = "installed"
     }
 
     function packageIdFromOperation(operation) {
@@ -1086,7 +1150,7 @@ ShellRoot {
     Timer {
         interval: 5000
         repeat: true
-        running: root.activeView === "discover" && root.discover.length > 0
+        running: root.activeView === "discover" && root.discover.length > 0 && !featuredHover.hovered
         onTriggered: {
             const count = root.featuredPool().length
             if (count > 0)
@@ -1142,7 +1206,7 @@ ShellRoot {
         property string view: ""
         property int badge: 0
         readonly property bool selected: root.activeView === view
-            || (view === "search" && root.activeView === "details")
+            || (root.activeView === "details" && root.detailsFrom === view)
 
         width: tabRow.implicitWidth
         height: 64
@@ -1798,12 +1862,18 @@ ShellRoot {
         property bool hovered: false
         property bool pressed: false
         property bool active: true
+        // Destructive actions arm on the first click and fire on the second,
+        // within 3 s. A slip of the pointer must not remove an app.
+        property bool confirm: false
+        property bool armed: false
         signal clicked()
+
+        Timer { id: disarm; interval: 3000; onTriggered: action.armed = false }
 
         height: 40
         implicitHeight: height
         implicitWidth: actionText.implicitWidth + 28
-        color: pressed ? Qt.darker(fill, 1.18) : hovered ? Qt.lighter(fill, 1.08) : fill
+        color: armed ? root.cRed : pressed ? Qt.darker(fill, 1.18) : hovered ? Qt.lighter(fill, 1.08) : fill
         border.color: fill === root.cPanel || fill === root.cDim ? root.cLine : fill
         radius: 0
         scale: pressed ? 0.985 : hovered ? 1.008 : 1.0
@@ -1817,8 +1887,8 @@ ShellRoot {
             anchors.fill: parent
             anchors.leftMargin: 8
             anchors.rightMargin: 8
-            text: action.label
-            color: action.textColor
+            text: action.armed ? "Confirm?" : action.label
+            color: action.armed ? root.cBase : action.textColor
             font.family: root.fontHuman
             font.pixelSize: 13
             font.bold: true
@@ -1839,7 +1909,16 @@ ShellRoot {
             }
             onPressed: action.pressed = true
             onReleased: action.pressed = false
-            onClicked: action.clicked()
+            onClicked: {
+                if (action.confirm && !action.armed) {
+                    action.armed = true
+                    disarm.restart()
+                    return
+                }
+                action.armed = false
+                disarm.stop()
+                action.clicked()
+            }
         }
     }
 
@@ -1915,31 +1994,23 @@ ShellRoot {
                     Row {
                         anchors.centerIn: parent
                         spacing: 36
-                        // Ribbon steps aside while search is expanded over it.
-                        opacity: searchBox.expanded ? 0 : 1
-                        enabled: !searchBox.expanded
-                        Behavior on opacity { NumberAnimation { duration: root.tMed; easing.type: Easing.OutCubic } }
+                        // The tabs never leave. Covering them with the search field
+                        // stranded every search and detail page with no way to Home
+                        // or Apps except Back -- navigation has to stay where it is.
                         TopTab { label: "Home"; view: "discover" }
                         TopTab { label: "Apps"; view: "installed"; badge: root.activeOpsCount() }
-                        TopTab { label: "Search"; view: "search" }
                         TopTab { label: "Settings"; view: "settings" }
                     }
 
-                    // Search: an icon at rest; typing expands it left over the
-                    // ribbon tabs, Apple-style.
+                    // Search: always present at the right edge, where desktop
+                    // apps put it. Ctrl+F or / focuses it from anywhere.
                     Rectangle {
                         id: searchBox
-                        readonly property bool expanded: searchField.activeFocus
-                            || root.query.length > 0 || root.activeView === "search"
-                        // Centred: it opens over the nav row, in the same place the eye
-                        // already is, rather than off in the corner the icon used to sit in.
-                        anchors.horizontalCenter: parent.horizontalCenter
+                        readonly property bool expanded: true
+                        anchors.right: parent.right
+                        anchors.rightMargin: root.contentSideMargin()
                         anchors.verticalCenter: parent.verticalCenter
-                        // No resting magnifier in the corner: SEARCH is a nav tab now,
-                        // so the icon was a second, quieter control for the same thing.
-                        // The field appears when that tab puts the view on search.
-                        visible: expanded
-                        width: expanded ? Math.min(640, Math.round(window.width * 0.42)) : 36
+                        width: Math.max(200, Math.min(340, Math.round(window.width * 0.24)))
                         height: 36
                         z: 10
                         color: root.cDim
@@ -1963,7 +2034,7 @@ ShellRoot {
                                 id: searchField
                                 visible: searchBox.expanded
                                 Layout.fillWidth: searchBox.expanded
-                                placeholderText: "Search apps"
+                                placeholderText: "Search apps   Ctrl+F"
                                 text: root.query
                                 color: root.cFg
                                 placeholderTextColor: root.cMuted
@@ -1980,12 +2051,12 @@ ShellRoot {
                                     if (text === root.query)
                                         return
                                     root.query = text
-                                    root.searchCommitted = false
                                     if (root.activeView !== "search")
                                         root.activeView = "search"
                                     searchDebounce.restart()
                                 }
-                                onAccepted: root.searchCommitted = true
+                                // Enter opens the top hit: the common case is one keystroke.
+                                onAccepted: if (root.shownResults.length > 0) root.selectApp(root.shownResults[0])
                                 Keys.onEscapePressed: {
                                     root.activeView = "discover"
                                     focus = false
@@ -1994,7 +2065,7 @@ ShellRoot {
 
                             // Clear + exit search.
                             Label {
-                                visible: searchBox.expanded
+                                visible: root.query.length > 0
                                 text: "✕"
                                 color: searchCloseHover.hovered ? root.cFg : root.cMuted
                                 font.family: root.fontMono
@@ -2007,7 +2078,6 @@ ShellRoot {
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: {
                                         root.query = ""
-                                        root.searchCommitted = false
                                         root.results = []
                                         searchDebounce.stop()
                                         searchField.focus = false
@@ -2018,6 +2088,20 @@ ShellRoot {
                         }
 
                     }
+                }
+
+                Shortcut {
+                    sequences: ["Ctrl+F", "/"]
+                    onActivated: {
+                        searchField.forceActiveFocus()
+                        searchField.selectAll()
+                    }
+                }
+                // Esc backs out one level: details -> where it came from.
+                Shortcut {
+                    sequence: "Esc"
+                    enabled: root.activeView === "details" && !searchField.activeFocus && !root.installOpen
+                    onActivated: root.activeView = root.detailsFrom
                 }
 
                 StackLayout {
@@ -2073,7 +2157,7 @@ ShellRoot {
                                 }
                                 Label {
                                     text: discoverPage.onSearch
-                                          ? (root.query.length > 0 ? root.results.length + " apps found across Thallium sources." : "Search apt, Flathub, GitHub and AppImage.")
+                                          ? (root.query.length > 0 ? root.shownResults.length + " apps found across Thallium sources." : "Search apt, Flathub, GitHub and AppImage.")
                                           : "Curated picks from Flathub."
                                     color: root.cMuted
                                     font.family: root.fontHuman
@@ -2088,17 +2172,31 @@ ShellRoot {
                                 visible: discoverPage.onSearch && root.query.length > 0
                                 Repeater {
                                     model: root.providers
+                                    // A source that failed says why, on the chip itself. "GitHub ·
+                                    // failed" with the reason dropped left people guessing whether
+                                    // the app did not exist or the source was down.
                                     delegate: Rectangle {
+                                        readonly property bool ok: modelData.state === "ready"
+                                        readonly property bool failed: modelData.state === "failed"
                                         height: 26
-                                        implicitWidth: providerText.implicitWidth + 18
+                                        implicitWidth: Math.min(providerText.implicitWidth + 18, 420)
                                         radius: 0
-                                        color: modelData.state === "ready" ? "#233024" : "#332b1a"
-                                        border.color: modelData.state === "ready" ? "#4a5f3f" : "#5f4f2a"
+                                        color: ok ? "#233024" : failed ? "#33201f" : "#332b1a"
+                                        border.color: ok ? "#4a5f3f" : failed ? "#6b3a39" : "#5f4f2a"
+                                        HoverHandler { id: providerHover }
+                                        ToolTip.visible: !ok && providerHover.hovered && !!modelData.message
+                                        ToolTip.text: modelData.message || ""
+                                        ToolTip.delay: 300
                                         Label {
                                             id: providerText
-                                            anchors.centerIn: parent
-                                            text: root.sourceLabel(modelData.source) + " · " + modelData.state
-                                            color: modelData.state === "ready" ? root.cGreen : root.cWarn
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 9
+                                            anchors.rightMargin: 9
+                                            verticalAlignment: Text.AlignVCenter
+                                            text: root.sourceLabel(modelData.source) + " · "
+                                                  + (ok || !modelData.message ? modelData.state : modelData.message)
+                                            color: ok ? root.cGreen : failed ? root.cRed : root.cWarn
+                                            elide: Text.ElideRight
                                             font.family: root.fontHuman
                                             font.pixelSize: 12
                                             font.bold: true
@@ -2127,6 +2225,8 @@ ShellRoot {
                                         Layout.fillWidth: true
                                         Layout.preferredHeight: Math.round(236 * root.uiScale()) + 24
                                         visible: root.featuredPool().length > 0
+                                        // Holds the carousel still while it is being read or aimed at.
+                                        HoverHandler { id: featuredHover }
 
                                         ListView {
                                             id: featuredCarousel
@@ -2277,7 +2377,8 @@ ShellRoot {
                                                             Layout.fillWidth: true
                                                         }
                                                         Label {
-                                                            text: featCard.app.summary
+                                                            text: root.cleanSummary(featCard.app)
+                                                            visible: text.length > 0
                                                             color: root.cFg
                                                             opacity: 0.72
                                                             font.family: root.fontHuman
@@ -2291,24 +2392,13 @@ ShellRoot {
                                                             Layout.topMargin: 6
                                                             spacing: 14
                                                             ActionButton {
-                                                                label: featCard.app.installed ? "Installed" : "Get"
-                                                                fill: featCard.app.installed ? root.cDim : root.cGreen
-                                                                textColor: featCard.app.installed ? root.cMuted : root.cBase
-                                                                active: !featCard.app.installed
+                                                                label: root.getLabel(featCard.app)
+                                                                fill: root.canGet(featCard.app) ? root.cGreen : root.cDim
+                                                                textColor: root.canGet(featCard.app) ? root.cBase : root.cMuted
+                                                                active: root.canGet(featCard.app)
                                                                 height: 36
                                                                 Layout.preferredWidth: 104
-                                                                onClicked: {
-                                                                    if (!featCard.app.installed)
-                                                                        root.selectApp(featCard.app)
-                                                                }
-                                                            }
-                                                            Label {
-                                                                text: "FREE"
-                                                                color: root.cFg
-                                                                opacity: 0.5
-                                                                font.family: root.fontMono
-                                                                font.pixelSize: 10
-                                                                font.letterSpacing: 2
+                                                                onClicked: root.openInstall(featCard.app)
                                                             }
                                                         }
                                                     }
@@ -2346,7 +2436,8 @@ ShellRoot {
                                                     Behavior on color { ColorAnimation { duration: root.tFast } }
                                                     MouseArea {
                                                         anchors.fill: parent
-                                                        anchors.margins: -5
+                                                        // 6 px dots, 26 px targets.
+                                                        anchors.margins: -10
                                                         cursorShape: Qt.PointingHandCursor
                                                         onClicked: featuredCarousel.currentIndex = index
                                                     }
@@ -2442,7 +2533,7 @@ ShellRoot {
                                                         }
 
                                                         Label {
-                                                            text: railCard.app.summary || ""
+                                                            text: root.cleanSummary(railCard.app)
                                                             color: root.cMuted
                                                             font.family: root.fontHuman
                                                             font.pixelSize: 11
@@ -2487,7 +2578,7 @@ ShellRoot {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 visible: discoverPage.onSearch && root.query.length > 0
-                                         && root.results.length === 0
+                                         && root.shownResults.length === 0
                                          && !root.isBusy() && !searchDebounce.running
                                 Label {
                                     anchors.centerIn: parent
@@ -2508,7 +2599,7 @@ ShellRoot {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 visible: discoverPage.onSearch && root.query.length > 0
-                                         && root.results.length === 0
+                                         && root.shownResults.length === 0
                                          && (root.isBusy() || searchDebounce.running)
                                 ColumnLayout {
                                     anchors.centerIn: parent
@@ -2530,83 +2621,19 @@ ShellRoot {
                                 }
                             }
 
-                            // Typeahead suggestions — quick list while typing (press Enter for full cards).
                             ScrollView {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
-                                visible: discoverPage.onSearch && root.query.length > 0 && !root.searchCommitted && root.results.length > 0
-
-                                ListView {
-                                    width: parent.width
-                                    model: root.results
-                                    spacing: 0
-                                    delegate: Rectangle {
-                                        id: sugRow
-                                        property var app: modelData
-                                        width: ListView.view ? ListView.view.width : 0
-                                        height: 50
-                                        color: sugHover.hovered ? root.cDim : "transparent"
-
-                                        HoverHandler { id: sugHover }
-                                        Behavior on color { ColorAnimation { duration: 120 } }
-                                        MouseArea {
-                                            anchors.fill: parent
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: root.selectApp(sugRow.app)
-                                        }
-
-                                        RowLayout {
-                                            anchors.fill: parent
-                                            anchors.leftMargin: 6
-                                            anchors.rightMargin: 12
-                                            spacing: 12
-                                            Label {
-                                                text: "⌕"
-                                                color: root.cMuted
-                                                font.family: root.fontMono
-                                                font.pixelSize: 15
-                                                Layout.preferredWidth: 22
-                                                horizontalAlignment: Text.AlignHCenter
-                                            }
-                                            Label {
-                                                text: sugRow.app.name
-                                                color: root.cFg
-                                                font.family: root.fontHuman
-                                                font.pixelSize: 15
-                                                elide: Text.ElideRight
-                                                Layout.fillWidth: true
-                                            }
-                                            SourceTag {
-                                                source: sugRow.app.variants && sugRow.app.variants.length > 0 ? sugRow.app.variants[0].source : "flathub"
-                                                trust: sugRow.app.variants && sugRow.app.variants.length > 0 ? sugRow.app.variants[0].trust : ""
-                                            }
-                                        }
-
-                                        Rectangle {
-                                            anchors.bottom: parent.bottom
-                                            width: parent.width
-                                            height: 1
-                                            color: root.cLine
-                                            opacity: 0.4
-                                        }
-                                    }
-                                }
-                            }
-
-                            ScrollView {
-                                Layout.fillWidth: true
-                                Layout.fillHeight: true
-                                clip: true
-                                visible: discoverPage.onSearch && root.searchCommitted
+                                visible: discoverPage.onSearch && root.query.length > 0 && root.shownResults.length > 0
 
                                 GridView {
                                     id: resultGrid
                                     width: parent.width
                                     height: parent.height
-                                    model: root.results
+                                    model: root.shownResults
                                     cellWidth: {
-                                        const columns = Math.max(1, Math.floor(width / 320))
+                                        const columns = Math.max(1, Math.floor(width / 380))  // 320 truncated every name
                                         return Math.floor(width / columns)
                                     }
                                     cellHeight: Math.round(132 * root.uiScale())
@@ -2710,7 +2737,8 @@ ShellRoot {
                                                     Layout.fillWidth: true
                                                 }
                                                 Label {
-                                                    text: appCard.app.summary
+                                                    text: root.cleanSummary(appCard.app)
+                                                    visible: text.length > 0
                                                     color: root.cMuted
                                                     font.family: root.fontHuman
                                                     font.pixelSize: Math.round(12 * root.uiScale())
@@ -2744,16 +2772,13 @@ ShellRoot {
                                             }
 
                                             ActionButton {
-                                                label: appCard.app.installed ? "Installed" : "Get"
-                                                fill: appCard.app.installed ? root.cDim : root.cBlue
-                                                textColor: appCard.app.installed ? root.cMuted : "white"
-                                                active: !appCard.app.installed
+                                                label: root.getLabel(appCard.app)
+                                                fill: root.canGet(appCard.app) ? root.cGreen : root.cDim
+                                                textColor: root.canGet(appCard.app) ? root.cBase : root.cMuted
+                                                active: root.canGet(appCard.app)
                                                 Layout.preferredWidth: 86
                                                 Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
-                                                onClicked: {
-                                                    if (!appCard.app.installed)
-                                                        root.enqueueInstall(appCard.app)
-                                                }
+                                                onClicked: root.openInstall(appCard.app)
                                             }
                                         }
                                     }
@@ -2792,7 +2817,7 @@ ShellRoot {
                                     fill: root.cDim
                                     textColor: root.cFg
                                     Layout.preferredWidth: 84
-                                    onClicked: root.activeView = "discover"
+                                    onClicked: root.activeView = root.detailsFrom
                                 }
 
 
@@ -2912,9 +2937,15 @@ ShellRoot {
                                                 Layout.alignment: Qt.AlignVCenter
                                                 spacing: 6
                                                 ActionButton {
-                                                    label: root.selectedApp && root.selectedApp.installed ? "Uninstall" : "Get"
-                                                    fill: root.selectedApp && root.selectedApp.installed ? root.cRed : root.cGreen
-                                                    textColor: root.selectedApp && root.selectedApp.installed ? "white" : root.cBase
+                                                    readonly property bool owned: !!root.selectedApp && root.selectedApp.installed
+                                                    readonly property var op: root.liveOpFor(root.selectedApp)
+                                                    label: op ? root.getLabel(root.selectedApp) : owned ? "Uninstall" : "Get"
+                                                    // Removing is available, not advertised: a quiet button
+                                                    // that asks once more, not a red slab.
+                                                    fill: op || owned ? root.cDim : root.cGreen
+                                                    textColor: op ? root.cMuted : owned ? root.cRed : root.cBase
+                                                    active: !op
+                                                    confirm: owned
                                                     Layout.preferredWidth: 132
                                                     onClicked: {
                                                         if (root.selectedApp && root.selectedApp.installed)
@@ -2966,7 +2997,7 @@ ShellRoot {
                                                         { t: "SOURCE",    val: v ? root.sourceLabel(v.source) : "\u2014" },
                                                         { t: "DEVELOPER", val: root.compactDeveloper(root.selectedApp) || "\u2014" },
                                                         { t: "SIZE",      val: root.sizeLabel(root.selectedApp) }
-                                                    ]
+                                                    ].filter(e => root.hasValue(e.val))
                                                 }
                                                 delegate: ColumnLayout {
                                                     Layout.fillWidth: true
@@ -3017,7 +3048,7 @@ ShellRoot {
                                                 { t: "LICENSE",    val: root.selectedApp && root.selectedApp.license ? root.selectedApp.license : "\u2014" },
                                                 { t: "HOMEPAGE",   val: root.selectedApp && root.selectedApp.homepage ? root.selectedApp.homepage : "\u2014" },
                                                 { t: "IDENTIFIER", val: root.selectedApp ? root.selectedApp.id : "\u2014" }
-                                            ]
+                                            ].filter(e => root.hasValue(e.val))
                                             delegate: RowLayout {
                                                 Layout.fillWidth: true
                                                 Layout.fillHeight: true
@@ -4070,7 +4101,7 @@ ShellRoot {
                                     height: parent.height
                                     model: root.installedItems
                                     cellWidth: {
-                                        const columns = Math.max(1, Math.floor(width / 320))
+                                        const columns = Math.max(1, Math.floor(width / 380))  // 320 truncated every name
                                         return Math.floor(width / columns)
                                     }
                                     cellHeight: Math.round(142 * root.uiScale())
@@ -4271,17 +4302,15 @@ ShellRoot {
                                                 Layout.maximumWidth: 92
                                                 Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
                                                 spacing: 8
-                                                ActionButton {
-                                                    label: "Details"
-                                                    fill: root.cDim
-                                                    textColor: root.cBlue
-                                                    Layout.fillWidth: true
-                                                    onClicked: root.selectApp(root.appFromInstalled(installedCard.item))
-                                                }
+                                                // The card itself opens details, so a Details button
+                                                // only doubled the target. Uninstall stays reachable
+                                                // but quiet: a wall of red slabs made the destructive
+                                                // action the loudest thing on the page.
                                                 ActionButton {
                                                     label: "Uninstall"
-                                                    fill: root.cRed
-                                                    textColor: "white"
+                                                    fill: root.cDim
+                                                    textColor: root.cRed
+                                                    confirm: true
                                                     Layout.fillWidth: true
                                                     onClicked: root.enqueueUninstallInstalled(installedCard.item)
                                                 }

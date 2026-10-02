@@ -62,7 +62,7 @@ impl CatalogManager {
     async fn warm_featured_art(&self) {
         let mut set = tokio::task::JoinSet::new();
         for (_, _, ids) in CURATED_COLLECTIONS {
-            for id in ids.iter().take(2) {
+            for (id, _, _) in ids.iter().take(2) {
                 let id: &'static str = id;
                 set.spawn(async move { (id, flathub_appstream(id).await) });
             }
@@ -91,8 +91,8 @@ impl CatalogManager {
                 subtitle: subtitle.to_string(),
                 apps: ids
                     .iter()
-                    .map(|id| {
-                        let mut app = curated_flathub_app(&index, id);
+                    .map(|(id, name, summary)| {
+                        let mut app = curated_flathub_app(&index, id, name, summary);
                         if let Some((icon, shots)) = art.get(*id) {
                             if let Some(icon) = icon {
                                 app.icon = Some(icon.clone());
@@ -557,64 +557,140 @@ fn apt_index_search(entries: &[AptEntry], query: &str) -> Vec<CanonicalApp> {
         .collect()
 }
 
-const CURATED_COLLECTIONS: &[(&str, &str, &[&str])] = &[
+/// (title, subtitle, [(flathub id, name, summary)]). The name and summary are
+/// shown until the Flathub index is warm -- deriving a name from the id gave
+/// "Client" for Spotify and "desktop" for Telegram on every cold start.
+const CURATED_COLLECTIONS: &[(&str, &str, &[(&str, &str, &str)])] = &[
     (
         "Essentials",
         "Apps to get you started",
         &[
-            "org.mozilla.firefox",
-            "org.videolan.VLC",
-            "com.spotify.Client",
-            "org.libreoffice.LibreOffice",
-            "com.discordapp.Discord",
-            "org.telegram.desktop",
+            (
+                "org.mozilla.firefox",
+                "Firefox",
+                "Fast, private and safe web browser",
+            ),
+            (
+                "org.videolan.VLC",
+                "VLC",
+                "Plays nearly any video or audio file",
+            ),
+            (
+                "com.spotify.Client",
+                "Spotify",
+                "Music and podcasts, streamed",
+            ),
+            (
+                "org.libreoffice.LibreOffice",
+                "LibreOffice",
+                "Documents, spreadsheets and presentations",
+            ),
+            (
+                "com.discordapp.Discord",
+                "Discord",
+                "Voice, video and text chat",
+            ),
+            ("org.telegram.desktop", "Telegram", "Fast, secure messaging"),
         ],
     ),
     (
         "Create",
         "Design, draw, and edit",
         &[
-            "org.gimp.GIMP",
-            "org.blender.Blender",
-            "org.inkscape.Inkscape",
-            "org.kde.krita",
-            "org.audacityteam.Audacity",
-            "org.kde.kdenlive",
+            (
+                "org.gimp.GIMP",
+                "GIMP",
+                "Photo editing and image manipulation",
+            ),
+            (
+                "org.blender.Blender",
+                "Blender",
+                "3D modelling, animation and rendering",
+            ),
+            (
+                "org.inkscape.Inkscape",
+                "Inkscape",
+                "Vector graphics editor",
+            ),
+            ("org.kde.krita", "Krita", "Digital painting for artists"),
+            (
+                "org.audacityteam.Audacity",
+                "Audacity",
+                "Record and edit audio",
+            ),
+            ("org.kde.kdenlive", "Kdenlive", "Video editing"),
         ],
     ),
     (
         "Develop",
         "Tools for building",
         &[
-            "com.visualstudio.code",
-            "dev.zed.Zed",
-            "org.gnome.Builder",
-            "io.github.shiftey.Desktop",
-            "rest.insomnia.Insomnia",
-            "io.dbeaver.DBeaverCommunity",
+            (
+                "com.visualstudio.code",
+                "Visual Studio Code",
+                "Code editor from Microsoft",
+            ),
+            ("dev.zed.Zed", "Zed", "High-performance code editor"),
+            ("org.gnome.Builder", "Builder", "IDE for GNOME apps"),
+            (
+                "io.github.shiftey.Desktop",
+                "GitHub Desktop",
+                "Git and GitHub, without the command line",
+            ),
+            (
+                "rest.insomnia.Insomnia",
+                "Insomnia",
+                "API client for REST and GraphQL",
+            ),
+            (
+                "io.dbeaver.DBeaverCommunity",
+                "DBeaver",
+                "Universal database tool",
+            ),
         ],
     ),
     (
         "Play",
         "Games and launchers",
         &[
-            "com.valvesoftware.Steam",
-            "net.lutris.Lutris",
-            "org.prismlauncher.PrismLauncher",
-            "com.heroicgameslauncher.hgl",
+            (
+                "com.valvesoftware.Steam",
+                "Steam",
+                "Games and the Steam store",
+            ),
+            (
+                "net.lutris.Lutris",
+                "Lutris",
+                "Play games from every launcher",
+            ),
+            (
+                "org.prismlauncher.PrismLauncher",
+                "Prism Launcher",
+                "Minecraft instances and mods",
+            ),
+            (
+                "com.heroicgameslauncher.hgl",
+                "Heroic",
+                "Epic, GOG and Amazon games",
+            ),
         ],
     ),
 ];
 
 /// Resolve a curated Flathub app id to a card: name/summary from the index
-/// when warm, otherwise a prettified id; the icon is always derivable.
-fn curated_flathub_app(index: &CatalogIndex, app_id: &str) -> CanonicalApp {
+/// when warm, otherwise the curated fallback; the icon is always derivable.
+fn curated_flathub_app(
+    index: &CatalogIndex,
+    app_id: &str,
+    fallback_name: &str,
+    fallback_summary: &str,
+) -> CanonicalApp {
     let (name, summary) = index
         .flathub
         .as_ref()
         .and_then(|list| list.iter().find(|entry| entry.app_id == app_id))
         .map(|entry| (entry.name.clone(), entry.summary.clone()))
-        .unwrap_or_else(|| (pretty_app_name(app_id), String::new()));
+        .unwrap_or_else(|| (fallback_name.to_string(), fallback_summary.to_string()));
     let mut app = single_variant_app(
         &format!("flathub:{app_id}"),
         &name,
@@ -626,11 +702,6 @@ fn curated_flathub_app(index: &CatalogIndex, app_id: &str) -> CanonicalApp {
     );
     app.icon = Some(flathub_icon_url(app_id));
     app
-}
-
-/// `org.videolan.VLC` -> `VLC`; falls back to the whole id when it has no dots.
-fn pretty_app_name(app_id: &str) -> String {
-    app_id.rsplit('.').next().unwrap_or(app_id).to_string()
 }
 
 /// Predictable Flathub AppStream icon URL, derivable from the app id alone
