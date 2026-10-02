@@ -8,7 +8,7 @@ pub use backends::appimage_local::{inspect as inspect_appimage, Inspection as Ap
 pub use backends::StagePermits;
 
 use serde::{Deserialize, Serialize};
-use store_core::{OperationAction, OperationState, SourceKind};
+use store_core::{host, OperationAction, OperationState, SourceKind};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
@@ -32,6 +32,10 @@ pub struct NativeReadiness {
     pub apt: bool,
     pub flatpak: bool,
     pub privilege: bool,
+    /// Host package manager behind the `system` source: `apt` or `pacman`.
+    pub package_manager: String,
+    /// `paru` / `yay` when the AUR source can install, else None.
+    pub aur_helper: Option<String>,
 }
 
 fn readiness_from(apt: bool, flatpak: bool, root: bool, escalator: bool) -> NativeReadiness {
@@ -39,6 +43,8 @@ fn readiness_from(apt: bool, flatpak: bool, root: bool, escalator: bool) -> Nati
         apt,
         flatpak,
         privilege: root || escalator,
+        package_manager: host::package_manager().as_str().to_string(),
+        aur_helper: host::aur_helper().map(|helper| helper.binary().to_string()),
     }
 }
 
@@ -64,10 +70,11 @@ impl UniAdapter {
         source: SourceKind,
     ) -> Vec<String> {
         let source_arg = match source {
-            SourceKind::System => "apt",
+            SourceKind::System => host::package_manager().as_str(),
             SourceKind::Flathub => "flatpak",
             SourceKind::Github => "github",
             SourceKind::Appimage => "appimage",
+            SourceKind::Aur => "aur",
         };
         let action_arg = match action {
             OperationAction::Install | OperationAction::Reinstall => "install",
@@ -165,14 +172,8 @@ mod tests {
 
     #[test]
     fn readiness_from_requires_root_or_escalator_for_privilege() {
-        assert_eq!(
-            readiness_from(true, true, false, false),
-            NativeReadiness {
-                apt: true,
-                flatpak: true,
-                privilege: false
-            }
-        );
+        let readiness = readiness_from(true, true, false, false);
+        assert!(readiness.apt && readiness.flatpak && !readiness.privilege);
         assert!(readiness_from(false, false, true, false).privilege);
         assert!(readiness_from(false, false, false, true).privilege);
     }
@@ -183,10 +184,14 @@ mod tests {
             apt: true,
             flatpak: false,
             privilege: true,
+            package_manager: "pacman".into(),
+            aur_helper: Some("paru".into()),
         };
         let value = serde_json::to_value(&readiness).unwrap();
         assert_eq!(value["apt"], serde_json::json!(true));
         assert_eq!(value["flatpak"], serde_json::json!(false));
         assert_eq!(value["privilege"], serde_json::json!(true));
+        assert_eq!(value["packageManager"], serde_json::json!("pacman"));
+        assert_eq!(value["aurHelper"], serde_json::json!("paru"));
     }
 }

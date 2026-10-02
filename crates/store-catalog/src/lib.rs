@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{Duration, Instant};
+use store_core::host::{self, PackageManager, NO_AUR_HELPER};
 use store_core::{
     rank_variants, AppVariant, CanonicalApp, DiscoverCollection, LanguageStat, ProviderStatus,
     SearchParams, SearchResponse, SourceKind, TrustLevel,
@@ -110,12 +111,16 @@ impl CatalogManager {
         let limit = params.limit.unwrap_or(30);
         let query = params.query.trim().to_ascii_lowercase();
         let wanted = params.sources.unwrap_or_else(|| {
-            vec![
+            let mut sources = vec![
                 SourceKind::System,
                 SourceKind::Flathub,
                 SourceKind::Github,
                 SourceKind::Appimage,
-            ]
+            ];
+            if host::is_pacman_host() {
+                sources.push(SourceKind::Aur);
+            }
+            sources
         });
 
         let mut results = Vec::new();
@@ -133,6 +138,7 @@ impl CatalogManager {
         let want_flathub = wanted.contains(&SourceKind::Flathub);
         let want_system = wanted.contains(&SourceKind::System);
         let want_github = wanted.contains(&SourceKind::Github);
+        let want_aur = wanted.contains(&SourceKind::Aur);
 
         // Serve apt/flathub from the warmed in-memory index (the common case):
         // a sub-millisecond substring filter, no subprocess, no network. A
@@ -171,7 +177,7 @@ impl CatalogManager {
 
         // Only sources without a ready index run live; GitHub is always live
         // (it can't be prefetched) and is the sole network source per query.
-        let (flathub, system, github) = tokio::join!(
+        let (flathub, system, github, aur) = tokio::join!(
             async {
                 if want_flathub && !flathub_ready {
                     flathub_provider(&query).await
@@ -193,9 +199,16 @@ impl CatalogManager {
                     (Vec::new(), Vec::new())
                 }
             },
+            async {
+                if want_aur {
+                    aur_provider(&query).await
+                } else {
+                    (Vec::new(), Vec::new())
+                }
+            },
         );
 
-        for (mut apps, mut provs) in [flathub, system, github] {
+        for (mut apps, mut provs) in [flathub, system, github, aur] {
             results.append(&mut apps);
             providers.append(&mut provs);
         }
@@ -254,7 +267,7 @@ impl CatalogManager {
                     SourceKind::Github => github_info(&pkg).await,
                     SourceKind::Flathub => flathub_info(&pkg).await,
                     SourceKind::System => apt_info(&pkg).await,
-                    SourceKind::Appimage => None,
+                    SourceKind::Appimage | SourceKind::Aur => None,
                 };
                 (i, info)
             });
@@ -459,6 +472,9 @@ struct CatalogIndex {
 /// `apt-cache search .` once — the full available-package list with summaries.
 /// Parsed into memory so per-query search is a substring filter, not a spawn.
 async fn build_apt_index() -> Option<Vec<AptEntry>> {
+    if host::is_pacman_host() {
+        return None; // pacman hosts search live via `pacman -Ss`
+    }
     let output = Command::new("apt-cache")
         .args(["search", "."])
         .output()
@@ -859,6 +875,288 @@ async fn apt_search(query: &str) -> Result<Vec<CanonicalApp>> {
         .collect())
 }
 
+/// One `pacman -Ss` hit.
+#[derive(Debug, PartialEq)]
+struct PacmanEntry {
+    repo: String,
+    name: String,
+    version: String,
+    description: String,
+    installed: bool,
+}
+
+/// Parse `pacman -Ss` output: a `repo/name version [(groups)] [[installed...]]`
+/// header, then the description on indented lines (joined when wrapped).
+fn parse_pacman_ss(text: &str) -> Vec<PacmanEntry> {
+    let mut entries: Vec<PacmanEntry> = Vec::new();
+    for line in text.lines() {
+        if line.starts_with(char::is_whitespace) {
+            if let Some(entry) = entries.last_mut() {
+                let part = line.trim();
+                if !part.is_empty() {
+                    if !entry.description.is_empty() {
+                        entry.description.push(' ');
+                    }
+                    entry.description.push_str(part);
+                }
+            }
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let Some((repo, name)) = fields.next().and_then(|id| id.split_once('/')) else {
+            continue;
+        };
+        let Some(version) = fields.next() else {
+            continue;
+        };
+        entries.push(PacmanEntry {
+            repo: repo.to_string(),
+            name: name.to_string(),
+            version: version.to_string(),
+            description: String::new(),
+            installed: line.contains("[installed"),
+        });
+    }
+    entries
+}
+
+/// pacman -Ss takes an extended regex; search for the literal text instead.
+fn pacman_regex_escape(query: &str) -> String {
+    let mut escaped = String::with_capacity(query.len());
+    for c in query.chars() {
+        if "\\.^$*+?()[]{}|".contains(c) {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
+/// Explain a failed `pacman -Ss`, or None when it simply matched nothing
+/// (pacman exits 1 with no output in that case).
+fn pacman_search_failure(code: Option<i32>, stdout: &str, stderr: &str) -> Option<String> {
+    let stderr = stderr.trim();
+    if stderr.contains("database file for") && stderr.contains("does not exist") {
+        return Some("pacman sync database missing — run pacman -Sy".to_string());
+    }
+    if code == Some(1) && stdout.trim().is_empty() && stderr.is_empty() {
+        return None;
+    }
+    let last = stderr.lines().last().unwrap_or("no error output");
+    Some(match code {
+        Some(code) => format!("`pacman -Ss` exited with code {code}: {last}"),
+        None => format!("`pacman -Ss` was killed by a signal: {last}"),
+    })
+}
+
+fn pacman_entry_to_app(entry: &PacmanEntry) -> CanonicalApp {
+    let mut app = single_variant_app(
+        &format!("system:{}", entry.name),
+        &entry.name,
+        &entry.description,
+        SourceKind::System,
+        &entry.name,
+        TrustLevel::SystemAccess,
+        true,
+    );
+    app.installed = entry.installed;
+    if let Some(variant) = app.variants.first_mut() {
+        variant.version = Some(entry.version.clone());
+        variant.repository = Some(entry.repo.clone());
+    }
+    app
+}
+
+async fn pacman_search(query: &str) -> Result<Vec<CanonicalApp>> {
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let output = Command::new("pacman")
+        .args(["-Ss", "--", &pacman_regex_escape(query)])
+        .output()
+        .await
+        .map_err(|err| anyhow::anyhow!("could not run pacman: {err}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() || stdout.trim().is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if let Some(message) = pacman_search_failure(output.status.code(), &stdout, &stderr) {
+            anyhow::bail!(message);
+        }
+    }
+    Ok(parse_pacman_ss(&stdout)
+        .iter()
+        .filter(|entry| !entry.name.starts_with("lib32-"))
+        .take(20)
+        .map(pacman_entry_to_app)
+        .collect())
+}
+
+async fn pacman_provider(query: &str) -> (Vec<CanonicalApp>, Vec<ProviderStatus>) {
+    let (apps, state, message) =
+        match tokio::time::timeout(SEARCH_TIMEOUT, pacman_search(query)).await {
+            Ok(Ok(apps)) => (
+                apps,
+                "ready",
+                "pacman read-only search completed".to_string(),
+            ),
+            Ok(Err(err)) => (Vec::new(), "failed", err.to_string()),
+            Err(_) => (Vec::new(), "failed", "pacman search timed out".to_string()),
+        };
+    (
+        apps,
+        vec![ProviderStatus {
+            source: SourceKind::System,
+            state: state.to_string(),
+            message: Some(message),
+        }],
+    )
+}
+
+const AUR_RPC: &str = "https://aur.archlinux.org/rpc/v5/search/";
+const AUR_RESULT_CAP: usize = 25;
+
+/// Map an AUR RPC v5 search reply, most-voted first, capped.
+fn parse_aur_search(body: &Value) -> Result<Vec<CanonicalApp>> {
+    if body.get("type").and_then(Value::as_str) == Some("error") {
+        let error = body
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        anyhow::bail!("AUR search failed: {error}");
+    }
+    let mut items: Vec<&Value> = body
+        .get("results")
+        .and_then(Value::as_array)
+        .map(|results| results.iter().collect())
+        .unwrap_or_default();
+    let votes = |item: &Value| item.get("NumVotes").and_then(Value::as_u64).unwrap_or(0);
+    items.sort_by_key(|item| std::cmp::Reverse(votes(item)));
+    Ok(items
+        .into_iter()
+        .filter_map(aur_item_to_app)
+        .take(AUR_RESULT_CAP)
+        .collect())
+}
+
+fn aur_item_to_app(item: &Value) -> Option<CanonicalApp> {
+    let text = |key: &str| {
+        item.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let name = text("Name")?;
+    let mut app = single_variant_app(
+        &format!("aur:{name}"),
+        name,
+        text("Description").unwrap_or(""),
+        SourceKind::Aur,
+        name,
+        TrustLevel::Unverified,
+        false,
+    );
+    let votes = item.get("NumVotes").and_then(Value::as_u64).unwrap_or(0);
+    let popularity = item
+        .get("Popularity")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let out_of_date = item.get("OutOfDate").and_then(Value::as_i64);
+    app.homepage = text("URL").map(str::to_string);
+    app.developer = Some(
+        text("Maintainer")
+            .unwrap_or("orphaned (no maintainer)")
+            .to_string(),
+    );
+    app.rating = Some(votes as f32);
+    app.last_updated = item
+        .get("LastModified")
+        .and_then(Value::as_i64)
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0));
+    if out_of_date.is_some() {
+        app.tags.push("out-of-date".to_string());
+    }
+    if let Some(variant) = app.variants.first_mut() {
+        variant.version = text("Version").map(str::to_string);
+        variant.repository = Some("aur".to_string());
+        variant.ranking_reasons = vec![format!(
+            "user-submitted AUR build script; {votes} votes, popularity {popularity:.2}"
+        )];
+        if let Some(since) = out_of_date.and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        {
+            variant.ranking_reasons.push(format!(
+                "flagged out of date since {}",
+                since.format("%Y-%m-%d")
+            ));
+        }
+    }
+    Some(app)
+}
+
+async fn aur_search(query: &str) -> Result<Vec<CanonicalApp>> {
+    // The RPC rejects one-character queries ("Query arg too small").
+    if query.chars().count() < 2 {
+        return Ok(Vec::new());
+    }
+    let mut url = reqwest::Url::parse(AUR_RPC)?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("bad AUR RPC url"))?
+        .pop_if_empty()
+        .push(query);
+    url.query_pairs_mut().append_pair("by", "name-desc");
+    let response = reqwest::Client::builder()
+        .user_agent("thallium-store")
+        .build()?
+        .get(url)
+        .send()
+        .await
+        .map_err(|err| anyhow::anyhow!("AUR RPC request failed: {err}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        anyhow::bail!("AUR RPC returned HTTP {status}");
+    }
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|err| anyhow::anyhow!("AUR RPC reply was not JSON: {err}"))?;
+    parse_aur_search(&body)
+}
+
+async fn aur_provider(query: &str) -> (Vec<CanonicalApp>, Vec<ProviderStatus>) {
+    let status = |state: &str, message: String| {
+        vec![ProviderStatus {
+            source: SourceKind::Aur,
+            state: state.to_string(),
+            message: Some(message),
+        }]
+    };
+    if !host::is_pacman_host() {
+        return (
+            Vec::new(),
+            status(
+                "unavailable",
+                "The AUR is only available on Arch Linux hosts".to_string(),
+            ),
+        );
+    }
+    let Some(helper) = host::aur_helper() else {
+        return (Vec::new(), status("unavailable", NO_AUR_HELPER.to_string()));
+    };
+    match tokio::time::timeout(SEARCH_TIMEOUT, aur_search(query)).await {
+        Ok(Ok(apps)) => (
+            apps,
+            status(
+                "ready",
+                format!("AUR search completed (installs via {})", helper.binary()),
+            ),
+        ),
+        Ok(Err(err)) => (Vec::new(), status("failed", err.to_string())),
+        Err(_) => (
+            Vec::new(),
+            status("failed", "AUR search timed out".to_string()),
+        ),
+    }
+}
+
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(3);
 
 async fn flathub_provider(query: &str) -> (Vec<CanonicalApp>, Vec<ProviderStatus>) {
@@ -899,6 +1197,9 @@ async fn flathub_provider(query: &str) -> (Vec<CanonicalApp>, Vec<ProviderStatus
 }
 
 async fn system_provider(query: &str) -> (Vec<CanonicalApp>, Vec<ProviderStatus>) {
+    if host::package_manager() == PackageManager::Pacman {
+        return pacman_provider(query).await;
+    }
     match tokio::time::timeout(SEARCH_TIMEOUT, apt_search(query)).await {
         Ok(Ok(apps)) => (
             apps,
@@ -1595,6 +1896,7 @@ fn result_score(app: &CanonicalApp, query: &str) -> u16 {
             SourceKind::System => 4,
             SourceKind::Appimage => 8,
             SourceKind::Github => 12,
+            SourceKind::Aur => 10,
         })
         .unwrap_or(20);
 
@@ -1603,10 +1905,11 @@ fn result_score(app: &CanonicalApp, query: &str) -> u16 {
 
 fn source_arg(source: SourceKind) -> &'static str {
     match source {
-        SourceKind::System => "apt",
+        SourceKind::System => host::package_manager().as_str(),
         SourceKind::Flathub => "flatpak",
         SourceKind::Github => "github",
         SourceKind::Appimage => "appimage",
+        SourceKind::Aur => "aur",
     }
 }
 
@@ -1616,15 +1919,20 @@ fn source_key(source: SourceKind) -> &'static str {
         SourceKind::Flathub => "flathub",
         SourceKind::Github => "github",
         SourceKind::Appimage => "appimage",
+        SourceKind::Aur => "aur",
     }
 }
 
 fn install_location(source: SourceKind) -> &'static str {
     match source {
+        SourceKind::System if host::is_pacman_host() => {
+            "System package database (/usr, managed by pacman)"
+        }
         SourceKind::System => "System package database (/usr, managed by APT/dpkg)",
         SourceKind::Flathub => "User Flatpak installation (Flathub remote)",
         SourceKind::Github => "UNI-selected release asset location",
         SourceKind::Appimage => "$HOME/.local/share/uni/appimages",
+        SourceKind::Aur => "System package database (/usr, built from an AUR PKGBUILD)",
     }
 }
 
@@ -1815,6 +2123,138 @@ fn bundled_catalog() -> Vec<CanonicalApp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_pacman_ss_reads_headers_markers_and_wrapped_descriptions() {
+        let text = "\
+extra/firefox 131.0.3-1 [installed]
+    Fast, Private & Safe Web Browser
+extra/firefox-developer-edition 132.0b9-1 (browsers) [installed: 131.0b1-1]
+    Fast, Private & Safe Web Browser
+    for developers
+community/foo 1.0-1
+    Plain
+";
+        let entries = parse_pacman_ss(text);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries[0],
+            PacmanEntry {
+                repo: "extra".into(),
+                name: "firefox".into(),
+                version: "131.0.3-1".into(),
+                description: "Fast, Private & Safe Web Browser".into(),
+                installed: true,
+            }
+        );
+        assert_eq!(entries[1].name, "firefox-developer-edition");
+        assert!(entries[1].installed);
+        assert_eq!(
+            entries[1].description,
+            "Fast, Private & Safe Web Browser for developers"
+        );
+        assert!(!entries[2].installed);
+
+        let app = pacman_entry_to_app(&entries[0]);
+        assert!(app.installed);
+        assert_eq!(app.variants[0].source, SourceKind::System);
+        assert_eq!(app.variants[0].version.as_deref(), Some("131.0.3-1"));
+        assert_eq!(app.variants[0].repository.as_deref(), Some("extra"));
+    }
+
+    #[test]
+    fn pacman_search_failure_explains_or_accepts_no_match() {
+        assert_eq!(pacman_search_failure(Some(1), "", ""), None);
+        assert_eq!(
+            pacman_search_failure(
+                Some(1),
+                "",
+                "warning: database file for 'core' does not exist (use '-Sy' to download)\n"
+            )
+            .as_deref(),
+            Some("pacman sync database missing — run pacman -Sy")
+        );
+        assert_eq!(
+            pacman_search_failure(Some(1), "", "error: invalid regular expression\n").as_deref(),
+            Some("`pacman -Ss` exited with code 1: error: invalid regular expression")
+        );
+    }
+
+    #[test]
+    fn pacman_regex_escape_makes_queries_literal() {
+        assert_eq!(pacman_regex_escape("c++"), "c\\+\\+");
+        assert_eq!(pacman_regex_escape("vlc"), "vlc");
+    }
+
+    #[test]
+    fn parse_aur_search_maps_rpc_fields_sorted_by_votes() {
+        let body = serde_json::json!({
+            "resultcount": 2,
+            "type": "search",
+            "version": 5,
+            "results": [
+                {
+                    "Name": "yay-git", "Version": "12.4.2.r0-1",
+                    "Description": "Yet another yogurt (git)",
+                    "URL": "https://github.com/Jguer/yay",
+                    "NumVotes": 50, "Popularity": 0.5,
+                    "Maintainer": null, "OutOfDate": 1700000000,
+                    "LastModified": 1710000000, "PackageBase": "yay-git"
+                },
+                {
+                    "Name": "yay", "Version": "12.4.2-1",
+                    "Description": "Yet another yogurt. Pacman wrapper and AUR helper written in go.",
+                    "URL": "https://github.com/Jguer/yay",
+                    "NumVotes": 2500, "Popularity": 20.12345,
+                    "Maintainer": "jguer", "OutOfDate": null,
+                    "LastModified": 1720000000, "PackageBase": "yay"
+                }
+            ]
+        });
+        let apps = parse_aur_search(&body).unwrap();
+        assert_eq!(apps.len(), 2);
+        let yay = &apps[0];
+        assert_eq!(yay.id, "aur:yay");
+        assert_eq!(yay.developer.as_deref(), Some("jguer"));
+        assert_eq!(
+            yay.homepage.as_deref(),
+            Some("https://github.com/Jguer/yay")
+        );
+        assert_eq!(yay.rating, Some(2500.0));
+        assert!(yay.last_updated.is_some());
+        let variant = &yay.variants[0];
+        assert_eq!(variant.source, SourceKind::Aur);
+        assert_eq!(variant.trust, TrustLevel::Unverified);
+        assert!(!variant.verified);
+        assert_eq!(variant.id, "aur:yay");
+        assert_eq!(variant.version.as_deref(), Some("12.4.2-1"));
+        assert!(variant.ranking_reasons[0].contains("2500 votes"));
+
+        let git = &apps[1];
+        assert_eq!(git.developer.as_deref(), Some("orphaned (no maintainer)"));
+        assert!(git.tags.iter().any(|t| t == "out-of-date"));
+        assert!(git.variants[0].ranking_reasons[1].starts_with("flagged out of date since"));
+    }
+
+    #[test]
+    fn parse_aur_search_caps_results_and_surfaces_rpc_errors() {
+        let results: Vec<_> = (0..40)
+            .map(|i| serde_json::json!({"Name": format!("pkg{i}"), "NumVotes": i}))
+            .collect();
+        let apps =
+            parse_aur_search(&serde_json::json!({"type": "search", "results": results})).unwrap();
+        assert_eq!(apps.len(), AUR_RESULT_CAP);
+        assert_eq!(apps[0].name, "pkg39");
+
+        let err = parse_aur_search(
+            &serde_json::json!({"type": "error", "error": "Too many package results."}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "AUR search failed: Too many package results."
+        );
+    }
 
     #[test]
     fn github_repo_to_app_maps_search_result() {

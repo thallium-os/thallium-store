@@ -9,12 +9,15 @@
 mod appimage;
 pub mod appimage_local;
 mod apt;
+mod aur;
 mod download;
 mod flatpak;
 mod github;
+mod pacman;
 
 use crate::UniProgress;
 use std::sync::Arc;
+use store_core::host::{package_manager, PackageManager};
 use store_core::{OperationAction, OperationState, SourceKind};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Semaphore;
@@ -46,6 +49,30 @@ pub async fn run(
     permits: StagePermits,
 ) {
     match source {
+        SourceKind::System if package_manager() == PackageManager::Pacman => {
+            pacman::run(
+                action,
+                &app_name,
+                &package_id,
+                &tx,
+                &token,
+                &permits.network,
+                &permits.system_mutation,
+            )
+            .await
+        }
+        SourceKind::Aur => {
+            aur::run(
+                action,
+                &app_name,
+                &package_id,
+                &tx,
+                &token,
+                &permits.network,
+                &permits.system_mutation,
+            )
+            .await
+        }
         SourceKind::System => {
             apt::run(
                 action,

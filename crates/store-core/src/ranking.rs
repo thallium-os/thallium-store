@@ -21,6 +21,7 @@ fn score_variant(variant: &AppVariant) -> u8 {
         (SourceKind::System, _, _) => 30,
         (SourceKind::Github, _, _) => 40,
         (SourceKind::Appimage, _, _) => 50,
+        (SourceKind::Aur, _, _) => 60,
     }
 }
 
@@ -32,6 +33,7 @@ fn default_reason(variant: &AppVariant) -> &'static str {
         SourceKind::Github if variant.verified => "curated GitHub release",
         SourceKind::Github => "unverified GitHub release",
         SourceKind::Appimage => "portable AppImage",
+        SourceKind::Aur => "user-submitted AUR build script",
     }
 }
 
