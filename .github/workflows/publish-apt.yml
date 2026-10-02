@@ -228,12 +228,14 @@ jobs:
               xvfb x11-utils libgl1 libegl1 libfontconfig1 libxkbcommon-x11-0 libxcb-cursor0
               libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0
               libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libdbus-1-3
+              libopengl0 libharfbuzz0b libfreetype6 libglib2.0-0
           - distro: arch
             image: archlinux:latest
             setup: >-
               pacman -Syu --noconfirm xorg-server-xvfb xorg-xwininfo xorg-xdpyinfo
               libglvnd fontconfig libxkbcommon-x11 xcb-util-cursor xcb-util-wm
               xcb-util-image xcb-util-keysyms xcb-util-renderutil dbus
+              harfbuzz freetype2 glib2
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -245,6 +247,11 @@ jobs:
         shell: bash
         run: |
           tar -C "$RUNNER_TEMP" -xzf portable/thallium-store-x86_64.tar.gz
+          # Every unresolved system library at once, not just the first.
+          for elf in "$RUNNER_TEMP"/thallium-store/usr/bin/thallium-store-native \
+                     "$RUNNER_TEMP"/thallium-store/usr/plugins/platforms/*.so; do
+            ldd "$elf"
+          done | awk '/not found/ {print "MISSING " $1}' | sort -u
           set +e
           Xvfb :99 -screen 0 1600x1000x24 >/dev/null 2>&1 &
           export DISPLAY=:99
@@ -338,10 +345,20 @@ jobs:
         with:
           name: arch
           path: arch-repo
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: packaging/thallium-store-archive-keyring.asc
+          sparse-checkout-cone-mode: false
+
+      # Trust the key the way install.sh --system does, so a package signed
+      # with anything else fails here instead of on a user's machine.
       - name: Install the package in a clean system
         run: |
+          pacman-key --init
+          pacman-key --add packaging/thallium-store-archive-keyring.asc
+          pacman-key --lsign-key 460325018227E003CBE3D92796EA62D80B90F19E
           pacman -Syu --noconfirm xorg-server-xvfb xorg-xwininfo xorg-xdpyinfo
-          pacman -U --noconfirm arch-repo/x86_64/thallium-store-*.pkg.tar.zst
+          pacman -U --noconfirm arch-repo/x86_64/thallium-store-[0-9]*.pkg.tar.zst
       - name: Install an AUR helper
         run: |
           set -eu
