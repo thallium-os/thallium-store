@@ -31,17 +31,24 @@ sudo apt install cmake g++ qt6-base-dev qt6-declarative-dev \
 
 ## Installation
 
-On Debian 12, Debian 13, Ubuntu 24.04, and compatible Ubuntu derivatives, add
-the signed Thallium Store repository and install the native application with
-one command:
+No sudo, any x86_64 distro with glibc 2.36+ (Debian 12+, Ubuntu 23.04+, Arch,
+Fedora 37+). Installs a self-contained build, with its own Qt, into `~/.local`;
+run it again to update:
 
 ```bash
 curl -fsSL https://store-qt.thallium81.dev/install.sh | sh
 ```
 
-The source remains installed, so new releases arrive through the system's
-normal `apt update` and upgrade process. See
-[`docs/apt-repository.md`](docs/apt-repository.md) for supported systems and
+To have the system package manager own it instead -- a signed APT source on
+Debian 12/13 and Ubuntu 24.04, a signed pacman repository on Arch -- add
+`--system`. It asks for your password itself:
+
+```bash
+curl -fsSL https://store-qt.thallium81.dev/install.sh | sh -s -- --system
+```
+
+Arch users can also build [`packaging/arch/PKGBUILD`](packaging/arch/PKGBUILD)
+with `makepkg -si`. See [`docs/apt-repository.md`](docs/apt-repository.md) for
 repository security details.
 
 ### Build locally
