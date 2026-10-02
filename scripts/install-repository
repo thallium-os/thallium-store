@@ -63,8 +63,11 @@ install -m 0644 "$temporary_key" "$keyring_path"
 # Builds before the repository rename used this source file and URL. Leaving
 # it enabled makes `apt-get update` fail before it can install the replacement
 # native package. Only remove the known Thallium source; never touch a file
-# with the same name if it belongs to another repository.
+# with the same name if it belongs to another repository. On Thallium OS that
+# same file is the OS update source, owned by thallium-archive-keyring --
+# removing it there cuts the machine off from every OTA, so leave it alone.
 if [ -f "$legacy_source_path" ] \
+  && ! dpkg-query -W -f='${Status}' thallium-archive-keyring 2>/dev/null | grep -q 'install ok installed' \
   && grep -Fq 'https://dronzer-tb.github.io/Thallium_81/' "$legacy_source_path"; then
   rm -f "$legacy_source_path"
 fi
