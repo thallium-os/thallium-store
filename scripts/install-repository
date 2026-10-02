@@ -1,0 +1,113 @@
+#!/bin/sh
+set -eu
+
+repository_url="${THALLIUM_STORE_REPOSITORY:-https://store.thallium81.dev}"
+repository_url="${repository_url%/}"
+key_fingerprint="460325018227E003CBE3D92796EA62D80B90F19E"
+key_sha256="ef2cc9cf32a097e2e0ee6ca4a0b3c74a241d4218afdca5cb8517ab8fc88451ea"
+keyring_path="/etc/apt/keyrings/thallium-store-archive-keyring.pgp"
+source_path="/etc/apt/sources.list.d/thallium-store.sources"
+preferences_path="/etc/apt/preferences.d/thallium-store"
+legacy_source_path="/etc/apt/sources.list.d/thallium.sources"
+
+fail() {
+  printf 'thallium-store installer: %s\n' "$*" >&2
+  exit 1
+}
+
+[ "$(id -u)" -eq 0 ] || fail "run this installer through sudo"
+[ -r /etc/os-release ] || fail "/etc/os-release is missing"
+command -v apt-get >/dev/null 2>&1 || fail "APT is required"
+command -v curl >/dev/null 2>&1 || fail "curl is required"
+command -v dpkg >/dev/null 2>&1 || fail "dpkg is required"
+command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
+
+# Thallium OS ships this store in its own archive; a second source for the
+# same package would only fight it.
+if dpkg-query -W -f='${Status}' thallium-archive-keyring 2>/dev/null | grep -q 'install ok installed'; then
+  printf 'Thallium OS already includes Thallium Store; nothing to install.\n'
+  exit 0
+fi
+
+# This is the Quickshell build: it runs inside Quickshell, which Debian does
+# not package. The native Qt build at store-qt.thallium81.dev needs nothing
+# extra.
+command -v quickshell >/dev/null 2>&1 \
+  || fail "Quickshell is required (https://quickshell.org). Without it, use the native build: curl -fsSL https://store-qt.thallium81.dev/install.sh | sudo sh"
+
+# shellcheck disable=SC1091
+. /etc/os-release
+
+suite=""
+if [ -n "${UBUNTU_CODENAME:-}" ]; then
+  suite="$UBUNTU_CODENAME"
+elif [ "${ID:-}" = "debian" ] || [ "${ID:-}" = "ubuntu" ]; then
+  suite="${VERSION_CODENAME:-}"
+elif printf '%s' "${ID_LIKE:-}" | grep -Eq '(^|[[:space:]])ubuntu([[:space:]]|$)'; then
+  suite="${VERSION_CODENAME:-}"
+elif printf '%s' "${ID_LIKE:-}" | grep -Eq '(^|[[:space:]])debian([[:space:]]|$)'; then
+  suite="${DEBIAN_CODENAME:-${VERSION_CODENAME:-}}"
+fi
+
+case "$suite" in
+  trixie) ;;
+  *) fail "unsupported base release '${suite:-unknown}'; this build supports Debian 13 (trixie)" ;;
+esac
+
+architecture="$(dpkg --print-architecture)"
+[ "$architecture" = "amd64" ] || fail "unsupported architecture '$architecture'; the current repository publishes amd64 packages"
+
+temporary_key="$(mktemp)"
+cleanup() {
+  rm -f "$temporary_key"
+}
+trap cleanup EXIT HUP INT TERM
+
+curl --fail --silent --show-error --location \
+  --proto '=https' --tlsv1.2 \
+  "$repository_url/thallium-store-archive-keyring.pgp" \
+  --output "$temporary_key"
+printf '%s  %s\n' "$key_sha256" "$temporary_key" | sha256sum --check --status \
+  || fail "archive signing key checksum did not match fingerprint $key_fingerprint"
+
+install -d -m 0755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d
+install -m 0644 "$temporary_key" "$keyring_path"
+
+# Builds before the repository rename used this source file and URL. Leaving
+# it enabled makes `apt-get update` fail before it can install the replacement
+# native package. Only remove the known Thallium source; never touch a file
+# with the same name if it belongs to another repository. On Thallium OS that
+# same file is the OS update source, owned by thallium-archive-keyring --
+# removing it there cuts the machine off from every OTA, so leave it alone.
+if [ -f "$legacy_source_path" ] \
+  && ! dpkg-query -W -f='${Status}' thallium-archive-keyring 2>/dev/null | grep -q 'install ok installed' \
+  && grep -Fq 'https://dronzer-tb.github.io/Thallium_81/' "$legacy_source_path"; then
+  rm -f "$legacy_source_path"
+fi
+
+cat > "$source_path" <<EOF
+Types: deb
+URIs: $repository_url
+Suites: $suite
+Components: main
+Architectures: $architecture
+Signed-By: $keyring_path
+EOF
+
+# Only the Thallium Store package receives the normal repository priority.
+# This prevents this third-party source from replacing unrelated OS packages.
+cat > "$preferences_path" <<'EOF'
+Package: *
+Pin: release o=Thallium Store
+Pin-Priority: 1
+
+Package: thallium-store
+Pin: release o=Thallium Store
+Pin-Priority: 500
+EOF
+
+apt-get update
+apt-get install -y thallium-store
+
+printf '\nThallium Store is installed and will update through APT.\n'
+printf 'Launch it from the application menu or run: thallium-store\n'

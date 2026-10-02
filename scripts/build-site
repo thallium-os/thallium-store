@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Builds what store.thallium81.dev serves: the product page and a signed APT
+# archive for the Quickshell build, in one tree.
+#
+# Usage: build-site <out-dir> <deb-dir>
+# Needs the archive signing key imported into GNUPGHOME.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+site_root="${1:?usage: build-site <out-dir> <deb-dir>}"
+deb_dir="${2:?missing deb dir}"
+public_key="$PWD/packaging/thallium-store-archive-keyring.asc"
+fingerprint="460325018227E003CBE3D92796EA62D80B90F19E"
+suite=trixie
+
+for command_name in apt-ftparchive dpkg-deb gpg gzip; do
+  command -v "$command_name" >/dev/null 2>&1 \
+    || { echo "$command_name is required" >&2; exit 1; }
+done
+
+secret="$(gpg --batch --with-colons --list-secret-keys "$fingerprint" \
+  | awk -F: '$1 == "fpr" { print $10; exit }')"
+[ "$secret" = "$fingerprint" ] \
+  || { echo "the imported signing key does not match the committed archive key" >&2; exit 1; }
+
+packages=("$deb_dir"/thallium-store_*.deb)
+[ -e "${packages[0]}" ] || { echo "no thallium-store .deb in $deb_dir" >&2; exit 1; }
+
+rm -rf "$site_root"
+pool="pool/$suite/main/t/thallium-store"
+mkdir -p "$site_root/$pool" "$site_root/dists/$suite/main/binary-amd64"
+install -m 0644 "${packages[@]}" "$site_root/$pool/"
+
+(
+  cd "$site_root"
+  apt-ftparchive packages "$pool" > "dists/$suite/main/binary-amd64/Packages"
+  gzip -9n < "dists/$suite/main/binary-amd64/Packages" \
+    > "dists/$suite/main/binary-amd64/Packages.gz"
+  # Origin matches the native archive on purpose: the installer's APT pin
+  # keys on it, and the two builds are alternatives sharing one source file.
+  apt-ftparchive \
+    -o APT::FTPArchive::Release::Origin='Thallium Store' \
+    -o APT::FTPArchive::Release::Label='Thallium Store' \
+    -o APT::FTPArchive::Release::Suite="$suite" \
+    -o APT::FTPArchive::Release::Codename="$suite" \
+    -o APT::FTPArchive::Release::Architectures='amd64' \
+    -o APT::FTPArchive::Release::Components='main' \
+    -o APT::FTPArchive::Release::Description='Thallium Store, Quickshell build' \
+    release "dists/$suite" > "dists/$suite/Release"
+  gpg --batch --yes --local-user "$fingerprint" --armor --detach-sign \
+    --output "dists/$suite/Release.gpg" "dists/$suite/Release"
+  gpg --batch --yes --local-user "$fingerprint" --clearsign \
+    --output "dists/$suite/InRelease" "dists/$suite/Release"
+)
+
+gpg --batch --yes --dearmor \
+  --output "$site_root/thallium-store-archive-keyring.pgp" "$public_key"
+install -m 0755 scripts/install-repository "$site_root/install.sh"
+cp -r site/. "$site_root/"
+
+version="$(dpkg-deb -f "${packages[0]}" Version)"
+sed -i "s/@VERSION@/$version/g" "$site_root/index.html"
+
+echo "$site_root"

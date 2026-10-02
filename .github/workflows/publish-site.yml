@@ -1,0 +1,81 @@
+name: Publish store.thallium81.dev
+
+# The product page plus a signed APT archive of the Quickshell build. Thallium
+# OS machines do not read this archive -- they get the store from the OS
+# archive -- so publishing here never touches the fleet.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: store-site
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    # trixie, not the runner: the .deb has to link against what Debian 13 ships.
+    container: debian:trixie
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config dpkg-dev \
+            apt-utils gnupg rclone
+
+      - uses: actions/checkout@v4
+        with:
+          # scripts/deb-version stamps the commit time into the version.
+          fetch-depth: 0
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # rustup, not trixie's cargo: the dependency tree needs rustc >= 1.86.
+      - name: Build the .deb
+        run: |
+          curl -fsSL --max-time 120 https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path
+          . "$HOME/.cargo/env"
+          rm -f dist/*.deb
+          scripts/build-deb
+
+      - name: Import signing key
+        env:
+          APT_SIGNING_KEY_B64: ${{ secrets.APT_SIGNING_KEY_B64 }}
+        run: |
+          test -n "$APT_SIGNING_KEY_B64" || { echo "APT_SIGNING_KEY_B64 is not set" >&2; exit 1; }
+          install -d -m 0700 "$RUNNER_TEMP/gnupg"
+          printf '%s' "$APT_SIGNING_KEY_B64" | base64 --decode \
+            | GNUPGHOME="$RUNNER_TEMP/gnupg" gpg --batch --import
+          echo "GNUPGHOME=$RUNNER_TEMP/gnupg" >> "$GITHUB_ENV"
+
+      - name: Build site and archive
+        run: scripts/build-site "$RUNNER_TEMP/site" dist
+
+      # Pool first, indexes and page second, prune last: a client mid-update
+      # never sees an index naming a .deb that is not there yet. The token is
+      # scoped to objects, so rclone must not try to create the bucket.
+      - name: Publish to R2
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+        run: |
+          set -eu
+          rclone copy "$RUNNER_TEMP/site/pool" r2:thallium-store-qs/pool
+          rclone copy "$RUNNER_TEMP/site" r2:thallium-store-qs
+          rclone sync "$RUNNER_TEMP/site" r2:thallium-store-qs
+
+      - name: Verify
+        run: |
+          set -eu
+          curl -fsS https://store.thallium81.dev/dists/trixie/InRelease | head -3
+          curl -fsS https://store.thallium81.dev/ | grep -q '<title>Thallium Store</title>'
+          curl -fsSI https://store.thallium81.dev/install.sh | head -1
