@@ -70,6 +70,10 @@
     .card h3 { font: 600 19px var(--human); margin: 14px 0 8px; color: var(--fg); }
     .card p { margin: 0; color: var(--muted); font-size: 15px; }
     .card .eyebrow { font-size: 10px; }
+    .news { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 22px; padding: 7px 14px 7px 7px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); font: 500 13px var(--human); }
+    .news:hover { border-color: var(--green); text-decoration: none; }
+    .news b { background: var(--green); color: var(--base); font: 600 10px var(--mono); letter-spacing: .18em; padding: 4px 8px; }
+    .news span + span::before { content: "·"; margin-right: 10px; color: var(--line); }
 
     .feature { display: grid; grid-template-columns: 5fr 7fr; gap: 56px; align-items: center; }
     .feature.flip { grid-template-columns: 7fr 5fr; }
@@ -102,6 +106,7 @@
     }
     @media (max-width: 520px) {
       .wrap { padding-inline: 16px; }
+      .news span + span::before { content: none; }
       .install { flex-direction: column; }
       .install code, .build code { white-space: normal; word-break: break-all; overflow: visible; }
       .install button { border-left: 0; border-top: 1px solid var(--line); padding: 12px; }
@@ -123,6 +128,7 @@
 
   <main>
     <div class="wrap hero">
+      <a class="news" href="#install"><b>NEW</b><span>Arch Linux + AUR (paru / yay)</span><span>Install without sudo</span></a>
       <div class="eyebrow">The app store for Thallium 81</div>
       <h1>Every Linux app.<br><em>One store.</em></h1>
       <p class="lede">Search apt, Flathub, GitHub releases and AppImages at once. Every app shows every channel it ships on, with the safest one recommended.</p>
