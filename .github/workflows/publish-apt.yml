@@ -455,6 +455,13 @@ jobs:
           set -euo pipefail
           sudo apt-get install -y --no-install-recommends rclone
           rclone copy apt-repository/pool r2:thallium-store-qt/pool
+          # Indexes, the pacman db, checksums and the page must never come
+          # from an edge cache; packages and by-hash copies are immutable.
+          rclone copy apt-repository r2:thallium-store-qt \
+            --include "dists/*/*" --include "dists/*/main/binary-amd64/Packages*" \
+            --include "arch/x86_64/thallium-store.*" --include "portable/*" \
+            --include "*.html" --include "install.sh" \
+            --header-upload "Cache-Control: no-cache"
           rclone copy apt-repository r2:thallium-store-qt
           rclone sync apt-repository r2:thallium-store-qt
 
