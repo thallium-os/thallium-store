@@ -158,8 +158,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      pages: write
-      id-token: write
     steps:
       - name: Check out source
         uses: actions/checkout@v6
@@ -201,25 +199,21 @@ jobs:
           find release-packages -type f -name '*.deb' -print0 \
             | xargs -0 gh release upload "$GITHUB_REF_NAME" --clobber
 
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v6
+      # Pool first, indexes second, prune last: a client mid-update never
+      # sees an index naming a .deb that is not there yet. The token is
+      # scoped to objects in this one bucket, so rclone must not create it.
+      - name: Publish to R2
+        env:
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends rclone
+          rclone copy apt-repository/pool r2:thallium-store-qt/pool
+          rclone copy apt-repository r2:thallium-store-qt
+          rclone sync apt-repository r2:thallium-store-qt
 
-      - name: Upload APT repository for Pages
-        uses: actions/upload-pages-artifact@v5
-        with:
-          path: apt-repository
-
-  deploy:
-    name: Deploy APT repository
-    needs: repository
-    runs-on: ubuntu-24.04
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5

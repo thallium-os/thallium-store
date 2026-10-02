@@ -7,7 +7,7 @@ APT resolves the correct Qt ABI for that operating system.
 ## User installation
 
 ```bash
-curl -fsSL https://dronzer-tb.github.io/thallium-store/install.sh | sudo sh
+curl -fsSL https://store-qt.thallium81.dev/install.sh | sudo sh
 ```
 
 The installer detects the base distribution, verifies the archive public key,
@@ -29,8 +29,11 @@ base codename through `/etc/os-release`.
    native QML application offscreen;
 3. generates and signs `Packages`, `Release`, `Release.gpg`, and `InRelease`;
 4. uploads tagged packages to a GitHub Release; and
-5. deploys the complete APT repository to GitHub Pages.
+5. publishes the complete APT repository to the `thallium-store-qt` R2
+   bucket, served at `store-qt.thallium81.dev`.
 
-The repository must have GitHub Pages configured to use GitHub Actions and an
-`APT_SIGNING_KEY_B64` Actions secret containing the base64-encoded OpenPGP
-secret key matching `packaging/thallium-store-archive-keyring.asc`.
+The repository needs an `APT_SIGNING_KEY_B64` Actions secret containing the
+base64-encoded OpenPGP secret key matching
+`packaging/thallium-store-archive-keyring.asc`, and `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY` and `R2_ACCOUNT_ID` for an R2 token with object
+read/write on that bucket.

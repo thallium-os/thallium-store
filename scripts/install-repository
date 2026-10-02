@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repository_url="${THALLIUM_STORE_REPOSITORY:-https://dronzer-tb.github.io/thallium-store}"
+repository_url="${THALLIUM_STORE_REPOSITORY:-https://store-qt.thallium81.dev}"
 repository_url="${repository_url%/}"
 key_fingerprint="460325018227E003CBE3D92796EA62D80B90F19E"
 key_sha256="ef2cc9cf32a097e2e0ee6ca4a0b3c74a241d4218afdca5cb8517ab8fc88451ea"

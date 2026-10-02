@@ -36,7 +36,7 @@ the signed Thallium Store repository and install the native application with
 one command:
 
 ```bash
-curl -fsSL https://dronzer-tb.github.io/thallium-store/install.sh | sudo sh
+curl -fsSL https://store-qt.thallium81.dev/install.sh | sudo sh
 ```
 
 The source remains installed, so new releases arrive through the system's
