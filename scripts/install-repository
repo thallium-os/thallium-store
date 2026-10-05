@@ -1,4 +1,11 @@
 #!/bin/sh
+# Thallium Store installer, published as https://store.thallium81.dev/install.sh
+#
+#   curl -fsSL https://store.thallium81.dev/install.sh | sh
+#       With Quickshell on Debian 13: adds a pinned APT source and installs
+#       the Quickshell build (asks for your password itself).
+#       Anywhere else: runs the native Qt installer from store-qt, a no-sudo
+#       install into ~/.local. Its options (--system, --uninstall) pass through.
 set -eu
 
 repository_url="${THALLIUM_STORE_REPOSITORY:-https://store.thallium81.dev}"
@@ -15,24 +22,47 @@ fail() {
   exit 1
 }
 
-[ -r /etc/os-release ] || fail "/etc/os-release is missing"
-command -v apt-get >/dev/null 2>&1 || fail "APT is required"
 command -v curl >/dev/null 2>&1 || fail "curl is required"
-command -v dpkg >/dev/null 2>&1 || fail "dpkg is required"
-command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
 
 # Thallium OS ships this store in its own archive; a second source for the
 # same package would only fight it.
-if dpkg-query -W -f='${Status}' thallium-archive-keyring 2>/dev/null | grep -q 'install ok installed'; then
+if command -v dpkg-query >/dev/null 2>&1 \
+  && dpkg-query -W -f='${Status}' thallium-archive-keyring 2>/dev/null | grep -q 'install ok installed'; then
   printf 'Thallium OS already includes Thallium Store; nothing to install.\n'
   exit 0
 fi
 
-# This is the Quickshell build: it runs inside Quickshell, which Debian does
-# not package. The native Qt build at store-qt.thallium81.dev needs nothing
-# extra.
-command -v quickshell >/dev/null 2>&1 \
-  || fail "Quickshell is required (https://quickshell.org). Without it, use the native build, which needs no sudo: curl -fsSL https://store-qt.thallium81.dev/install.sh | sh"
+# One link for both builds. The Quickshell build needs Quickshell, APT and
+# Debian 13; everything else gets the native Qt build, which needs no sudo.
+# Skipped on the root re-run: the choice is already made, and root's PATH
+# may not see a Quickshell installed under ~/.local/bin.
+case " $* " in
+  *" --as-root "*) ;;
+  *)
+    native_reason=""
+    if ! command -v quickshell >/dev/null 2>&1; then
+      native_reason="Quickshell is not installed"
+    elif ! command -v apt-get >/dev/null 2>&1; then
+      native_reason="this system does not use APT"
+    elif ! grep -q 'trixie' /etc/os-release 2>/dev/null; then
+      native_reason="the Quickshell build is for Debian 13 only"
+    fi
+    if [ -n "$native_reason" ]; then
+      native_url="https://store-qt.thallium81.dev/install.sh"
+      printf '>> %s, so installing the native Qt build from %s\n' "$native_reason" "$native_url"
+      native="$(mktemp)"
+      curl -fsSL --proto '=https' --tlsv1.2 "$native_url" -o "$native" \
+        || fail "could not download $native_url"
+      exec sh "$native" "$@"
+    fi
+    printf '>> Quickshell found; installing the Quickshell build\n'
+    ;;
+esac
+
+[ -r /etc/os-release ] || fail "/etc/os-release is missing"
+command -v apt-get >/dev/null 2>&1 || fail "APT is required"
+command -v dpkg >/dev/null 2>&1 || fail "dpkg is required"
+command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
 
 # Adding an APT source needs root. Ask for it here, once, rather than making
 # people pipe a script from the internet straight into sudo.
