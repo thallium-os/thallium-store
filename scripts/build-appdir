@@ -46,15 +46,33 @@ sed 's/^Exec=.*/Exec=thallium-store-native %U/' data/io.thallium.Store.desktop \
 
 # The backend is found through PATH; the bundled Qt through the plugin's
 # qt.conf. Wayland is preferred when the session has it, X11 otherwise.
+# The bundled Qt can fail to drive a newer host Mesa (no wayland-egl, GLX
+# segfault), so a start that dies within seconds is retried once with
+# software rendering on X11. THALLIUM_STORE_SOFTWARE=1 forces that mode.
 cat > "$work/AppRun" <<'EOF'
 #!/bin/sh
 here="$(dirname "$(readlink -f "$0")")"
 export PATH="$here/usr/bin:$PATH"
 export THALLIUM_STORE_BACKEND="$here/usr/bin/thallium-store-backend"
+native="$here/usr/bin/thallium-store-native"
+
+software() {
+  export QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software QT_XCB_GL_INTEGRATION=none
+  exec "$native" "$@"
+}
+
+[ "${THALLIUM_STORE_SOFTWARE:-}" = 1 ] && software "$@"
 if [ -z "${QT_QPA_PLATFORM:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
   export QT_QPA_PLATFORM="wayland;xcb"
 fi
-exec "$here/usr/bin/thallium-store-native" "$@"
+started="$(date +%s)"
+"$native" "$@" && exit 0
+status=$?
+# 128+ is a signal: SIGINT/SIGTERM from the user should not relaunch.
+case "$status" in 130|143) exit "$status" ;; esac
+[ $(($(date +%s) - started)) -lt 10 ] || exit "$status"
+echo "thallium-store: graphics start failed; retrying with software rendering" >&2
+software "$@"
 EOF
 chmod +x "$work/AppRun"
 
