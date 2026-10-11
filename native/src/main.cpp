@@ -1,7 +1,6 @@
 #include "storeclient.h"
 
 #include <QGuiApplication>
-#include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickImageProvider>
@@ -18,8 +17,13 @@ public:
     QImage requestImage(const QString &id, QSize *size, const QSize &requestedSize) override
     {
         const QString iconName = QUrl::fromPercentEncoding(id.toUtf8());
-        const QSize target = requestedSize.isValid() ? requestedSize : QSize(128, 128);
-        const QImage image = QIcon::fromTheme(iconName).pixmap(target).toImage();
+        // Called on Qt's image loader thread for asynchronous images, where
+        // QIcon and QPixmap must not be used; StoreClient renders on the GUI
+        // thread and this only scales the cached QImage.
+        QImage image = StoreClient::themeIcon(iconName);
+        if (!image.isNull() && requestedSize.isValid()) {
+            image = image.scaled(requestedSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        }
         if (size) {
             *size = image.size();
         }

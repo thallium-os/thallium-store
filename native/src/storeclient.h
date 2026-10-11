@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHash>
+#include <QImage>
 #include <QJsonObject>
 #include <QLocalSocket>
 #include <QObject>
@@ -27,6 +28,10 @@ public:
     Q_INVOKABLE void start();
     Q_INVOKABLE void request(const QString &method, const QVariantMap &params = {});
     Q_INVOKABLE QString iconSource(const QVariantList &candidates) const;
+
+    // Theme icon rendered by iconSource(). Safe from any thread, unlike
+    // QIcon, which image providers are called on for asynchronous images.
+    static QImage themeIcon(const QString &name);
 
 signals:
     void readyChanged();

@@ -6,11 +6,17 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QList>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QUrl>
 
 namespace {
 constexpr int kConnectionIntervalMs = 100;
 constexpr int kMaximumConnectionAttempts = 80;
+constexpr int kThemeIconSize = 256;
+
+QMutex themeIconMutex;
+QHash<QString, QImage> themeIcons;
 }
 
 StoreClient::StoreClient(QObject *parent)
@@ -114,11 +120,23 @@ QString StoreClient::iconSource(const QVariantList &candidates) const
     for (const QVariant &candidate : candidates) {
         const QString name = candidate.toString().trimmed();
         if (!name.isEmpty() && QIcon::hasThemeIcon(name)) {
+            // Render here, on the GUI thread; the image provider only copies.
+            QMutexLocker lock(&themeIconMutex);
+            if (!themeIcons.contains(name)) {
+                themeIcons.insert(name, QIcon::fromTheme(name)
+                    .pixmap(QSize(kThemeIconSize, kThemeIconSize)).toImage());
+            }
             return QStringLiteral("image://theme/%1")
                 .arg(QString::fromUtf8(QUrl::toPercentEncoding(name)));
         }
     }
     return {};
+}
+
+QImage StoreClient::themeIcon(const QString &name)
+{
+    QMutexLocker lock(&themeIconMutex);
+    return themeIcons.value(name);
 }
 
 void StoreClient::attemptConnection()
