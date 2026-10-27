@@ -58,6 +58,13 @@ ShellRoot {
     property string installVariantId: ""
     property var storeSettings: ({})
     property var cacheInfo: ({ iconBytes: 0, iconCount: 0 })
+    // Download sources (Settings). Errors, probe results and busy flags are
+    // keyed by source id so each card shows only its own.
+    property var sourcesList: []
+    property var sourcesErrors: ({})
+    property var sourcesProbe: ({})
+    property var sourcesBusy: ({})
+    property string activeSource: ""
     property bool setupOpen: false
     property int setupStep: 0
     // The Apps view is two pages behind one tab: what is on this machine, and
@@ -423,6 +430,35 @@ ShellRoot {
         return frames[activityFrame % frames.length]
     }
 
+    function setSourceKey(prop, id, value) {
+        const next = Object.assign({}, root[prop])
+        if (value === undefined || value === null || value === false)
+            delete next[id]
+        else
+            next[id] = value
+        root[prop] = next
+    }
+
+    function formatSpeed(bps) {
+        if (bps >= 1048576)
+            return (bps / 1048576).toFixed(1) + " MB/s"
+        return Math.max(1, Math.round(bps / 1024)) + " KB/s"
+    }
+
+    // Id of the fastest mirror from the last probe, or "" when none answered.
+    function fastestMirror(sourceId) {
+        const probe = sourcesProbe[sourceId] || {}
+        let best = "", bestSpeed = 0
+        for (const id in probe) {
+            const r = probe[id]
+            if (r.ok && (r.bytesPerSec || 0) > bestSpeed) {
+                best = id
+                bestSpeed = r.bytesPerSec
+            }
+        }
+        return best
+    }
+
     function request(method, params) {
         const nextQueue = requestQueue.slice()
         nextQueue.push({ method: method, params: params || {} })
@@ -440,6 +476,7 @@ ShellRoot {
         activeMethod = item.method
         if (item.method === "catalog.search")
             activeSearchQuery = item.params.query
+        activeSource = item.method.indexOf("sources.") === 0 ? (item.params.source || "") : ""
         rpc.command = [backendBinary, "--request", item.method, JSON.stringify(item.params)]
         rpc.running = true
     }
@@ -993,6 +1030,8 @@ ShellRoot {
         running: false
         onRunningChanged: {
             if (!running && root.requestRunning) {
+                if (root.activeMethod === "sources.probe" && root.activeSource !== "")
+                    root.setSourceKey("sourcesBusy", root.activeSource, false)
                 root.requestRunning = false
                 root.drainRequests()
             }
@@ -1002,6 +1041,10 @@ ShellRoot {
                 try {
                     const message = JSON.parse(line)
                     if (message.error) {
+                        if (root.activeMethod.indexOf("sources.") === 0 && root.activeSource !== "") {
+                            root.setSourceKey("sourcesErrors", root.activeSource, message.error.message)
+                            root.setSourceKey("sourcesBusy", root.activeSource, false)
+                        }
                         root.status = message.error.message
                         pushLog("✗ " + message.error.message)
                         return
@@ -1009,7 +1052,18 @@ ShellRoot {
                     const result = message.result
                     if (!result)
                         return
-                    if (result.results !== undefined) {
+                    if (result.sources !== undefined) {
+                        root.sourcesList = result.sources
+                        if (root.activeSource !== "")
+                            root.setSourceKey("sourcesErrors", root.activeSource, null)
+                    } else if (result.source !== undefined && result.results !== undefined && root.activeMethod === "sources.probe") {
+                        const byId = {}
+                        for (const r of result.results)
+                            byId[r.id] = r
+                        root.setSourceKey("sourcesProbe", result.source, byId)
+                        root.setSourceKey("sourcesBusy", result.source, false)
+                        root.setSourceKey("sourcesErrors", result.source, null)
+                    } else if (result.results !== undefined) {
                         root.results = result.results
                         root.providers = result.providers || []
                         root.status = root.results.length + " result" + (root.results.length === 1 ? "" : "s")
@@ -1270,6 +1324,7 @@ ShellRoot {
                 if (tab.view === "settings") {
                     root.request("system.cacheInfo", {})
                     root.request("settings.get", {})
+                    root.request("sources.list", {})
                 }
             }
         }
@@ -3401,6 +3456,304 @@ ShellRoot {
                                                 textColor: root.cRed
                                                 Layout.preferredWidth: 118
                                                 onClicked: root.request("system.clearIconCache", {})
+                                            }
+                                        }
+                                    }
+
+                                    HudRailHeader { title: "Download sources" }
+
+                                    Repeater {
+                                        model: root.sourcesList
+                                        delegate: Rectangle {
+                                            id: srcCard
+                                            property var src: modelData
+                                            property bool adding: false
+                                            property bool busy: root.sourcesBusy[src.id] === true
+                                            property string fastestId: root.fastestMirror(src.id)
+
+                                            Layout.fillWidth: true
+                                            color: root.cPanel
+                                            border.color: root.cLine
+                                            radius: 0
+                                            implicitHeight: srcCol.implicitHeight + 36
+
+                                            ColumnLayout {
+                                                id: srcCol
+                                                anchors.left: parent.left
+                                                anchors.right: parent.right
+                                                anchors.top: parent.top
+                                                anchors.margins: 18
+                                                spacing: 10
+
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 14
+
+                                                    ColumnLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 3
+                                                        Label {
+                                                            text: srcCard.src.name
+                                                            color: root.cFg
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 14
+                                                            font.bold: true
+                                                            Layout.fillWidth: true
+                                                        }
+                                                        Label {
+                                                            visible: srcCard.src.needsAdmin === true
+                                                            text: "Changing this asks for your password"
+                                                            color: root.cMuted
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 12
+                                                            Layout.fillWidth: true
+                                                        }
+                                                    }
+
+                                                    ActionButton {
+                                                        label: srcCard.busy ? "Testing…" : "Test speed"
+                                                        fill: root.cDim
+                                                        textColor: root.cGreen
+                                                        height: 32
+                                                        active: !srcCard.busy
+                                                        Layout.preferredWidth: 118
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                        onClicked: {
+                                                            root.setSourceKey("sourcesBusy", srcCard.src.id, true)
+                                                            root.setSourceKey("sourcesErrors", srcCard.src.id, null)
+                                                            root.request("sources.probe", { source: srcCard.src.id })
+                                                        }
+                                                    }
+                                                }
+
+                                                Repeater {
+                                                    model: srcCard.src.mirrors
+                                                    delegate: Rectangle {
+                                                        id: mirrorRow
+                                                        property var m: modelData
+                                                        property bool isActive: srcCard.src.active === m.id
+                                                        property var probe: (root.sourcesProbe[srcCard.src.id] || {})[m.id]
+
+                                                        Layout.fillWidth: true
+                                                        implicitHeight: 48
+                                                        color: isActive ? root.cBlueSoft : mirrorHover.hovered ? root.cDim : root.cPanel
+                                                        border.color: isActive ? root.cGreen : root.cLine
+                                                        radius: 0
+                                                        Behavior on color { ColorAnimation { duration: root.tFast } }
+
+                                                        HoverHandler { id: mirrorHover }
+                                                        MouseArea {
+                                                            anchors.fill: parent
+                                                            enabled: !mirrorRow.isActive
+                                                            cursorShape: mirrorRow.isActive ? Qt.ArrowCursor : Qt.PointingHandCursor
+                                                            onClicked: root.request("sources.setActive", { source: srcCard.src.id, mirrorId: mirrorRow.m.id })
+                                                        }
+
+                                                        RowLayout {
+                                                            anchors.fill: parent
+                                                            anchors.leftMargin: 14
+                                                            anchors.rightMargin: 10
+                                                            spacing: 12
+
+                                                            ColumnLayout {
+                                                                Layout.fillWidth: true
+                                                                spacing: 2
+                                                                Label {
+                                                                    text: mirrorRow.m.name
+                                                                    color: root.cFg
+                                                                    font.family: root.fontHuman
+                                                                    font.pixelSize: 13
+                                                                    font.bold: true
+                                                                    elide: Text.ElideRight
+                                                                    Layout.fillWidth: true
+                                                                }
+                                                                Label {
+                                                                    text: mirrorRow.m.url === "" ? "direct" : mirrorRow.m.url
+                                                                    color: root.cMuted
+                                                                    font.family: root.fontMono
+                                                                    font.pixelSize: 11
+                                                                    elide: Text.ElideRight
+                                                                    Layout.fillWidth: true
+                                                                }
+                                                            }
+
+                                                            Label {
+                                                                visible: mirrorRow.probe !== undefined
+                                                                text: mirrorRow.probe === undefined ? ""
+                                                                      : mirrorRow.probe.ok ? root.formatSpeed(mirrorRow.probe.bytesPerSec || 0)
+                                                                      : "failed"
+                                                                color: mirrorRow.probe !== undefined && !mirrorRow.probe.ok ? root.cRed : root.cFg
+                                                                font.family: root.fontMono
+                                                                font.pixelSize: 11
+                                                            }
+
+                                                            Label {
+                                                                visible: srcCard.fastestId === mirrorRow.m.id
+                                                                text: "FASTEST"
+                                                                color: root.cGreen
+                                                                font.family: root.fontMono
+                                                                font.pixelSize: 10
+                                                                font.letterSpacing: 2
+                                                            }
+
+                                                            Label {
+                                                                visible: mirrorRow.isActive
+                                                                text: "IN USE"
+                                                                color: root.cGreen
+                                                                font.family: root.fontMono
+                                                                font.pixelSize: 10
+                                                                font.letterSpacing: 2
+                                                            }
+
+                                                            ActionButton {
+                                                                visible: mirrorRow.m.builtin === false
+                                                                label: "Remove"
+                                                                fill: root.cDim
+                                                                textColor: root.cRed
+                                                                confirm: true
+                                                                height: 30
+                                                                Layout.preferredWidth: 88
+                                                                onClicked: root.request("sources.removeMirror", { source: srcCard.src.id, mirrorId: mirrorRow.m.id })
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                RowLayout {
+                                                    visible: srcCard.src.id === "flathub"
+                                                    Layout.fillWidth: true
+                                                    spacing: 12
+
+                                                    SelectBox {
+                                                        checked: srcCard.src.parallel === true
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                        MouseArea {
+                                                            anchors.fill: parent
+                                                            cursorShape: Qt.PointingHandCursor
+                                                            onClicked: root.request("sources.setParallel", { source: srcCard.src.id, enabled: srcCard.src.parallel !== true })
+                                                        }
+                                                    }
+                                                    ColumnLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 2
+                                                        Label {
+                                                            text: "Parallel connections"
+                                                            color: root.cFg
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 13
+                                                            font.bold: true
+                                                        }
+                                                        Label {
+                                                            text: "Opens 8 connections instead of one. Helps on slow routes."
+                                                            color: root.cMuted
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 12
+                                                            wrapMode: Text.WordWrap
+                                                            Layout.fillWidth: true
+                                                        }
+                                                    }
+                                                }
+
+                                                Label {
+                                                    visible: srcCard.src.id === "github"
+                                                    text: "Mirrors are only used for files GitHub publishes a checksum for; each download is verified."
+                                                    color: root.cMuted
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: 12
+                                                    wrapMode: Text.WordWrap
+                                                    Layout.fillWidth: true
+                                                }
+
+                                                RowLayout {
+                                                    visible: srcCard.adding
+                                                    Layout.fillWidth: true
+                                                    spacing: 8
+
+                                                    TextField {
+                                                        id: mirrorNameField
+                                                        placeholderText: "Name"
+                                                        color: root.cFg
+                                                        placeholderTextColor: root.cMuted
+                                                        font.family: root.fontHuman
+                                                        font.pixelSize: 13
+                                                        leftPadding: 10
+                                                        rightPadding: 10
+                                                        Layout.preferredWidth: 180
+                                                        Layout.preferredHeight: 34
+                                                        background: Rectangle {
+                                                            color: root.cDim
+                                                            border.color: mirrorNameField.activeFocus ? root.cGreen : root.cLine
+                                                            radius: 0
+                                                        }
+                                                    }
+                                                    TextField {
+                                                        id: mirrorUrlField
+                                                        placeholderText: "https://mirror.example/path"
+                                                        color: root.cFg
+                                                        placeholderTextColor: root.cMuted
+                                                        font.family: root.fontMono
+                                                        font.pixelSize: 12
+                                                        leftPadding: 10
+                                                        rightPadding: 10
+                                                        Layout.fillWidth: true
+                                                        Layout.preferredHeight: 34
+                                                        background: Rectangle {
+                                                            color: root.cDim
+                                                            border.color: mirrorUrlField.activeFocus ? root.cGreen : root.cLine
+                                                            radius: 0
+                                                        }
+                                                    }
+                                                    ActionButton {
+                                                        label: "Add"
+                                                        fill: root.cGreen
+                                                        textColor: root.cBase
+                                                        height: 34
+                                                        active: mirrorNameField.text.trim().length > 0 && mirrorUrlField.text.trim().length > 0
+                                                        Layout.preferredWidth: 72
+                                                        onClicked: {
+                                                            root.request("sources.addMirror", {
+                                                                source: srcCard.src.id,
+                                                                name: mirrorNameField.text.trim(),
+                                                                url: mirrorUrlField.text.trim()
+                                                            })
+                                                            srcCard.adding = false
+                                                            mirrorNameField.text = ""
+                                                            mirrorUrlField.text = ""
+                                                        }
+                                                    }
+                                                    ActionButton {
+                                                        label: "Cancel"
+                                                        fill: root.cDim
+                                                        textColor: root.cMuted
+                                                        height: 34
+                                                        Layout.preferredWidth: 80
+                                                        onClicked: {
+                                                            srcCard.adding = false
+                                                            mirrorNameField.text = ""
+                                                            mirrorUrlField.text = ""
+                                                        }
+                                                    }
+                                                }
+
+                                                ActionButton {
+                                                    visible: !srcCard.adding
+                                                    label: "Add mirror"
+                                                    fill: root.cDim
+                                                    textColor: root.cGreen
+                                                    height: 32
+                                                    Layout.preferredWidth: 118
+                                                    onClicked: srcCard.adding = true
+                                                }
+
+                                                Label {
+                                                    visible: (root.sourcesErrors[srcCard.src.id] || "") !== ""
+                                                    text: root.sourcesErrors[srcCard.src.id] || ""
+                                                    color: root.cRed
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: 12
+                                                    wrapMode: Text.WordWrap
+                                                    Layout.fillWidth: true
+                                                }
                                             }
                                         }
                                     }
