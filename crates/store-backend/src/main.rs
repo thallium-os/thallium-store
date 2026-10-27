@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -99,7 +99,10 @@ fn settings_path() -> PathBuf {
 }
 
 fn str_param<'a>(params: &'a Value, key: &str) -> Result<&'a str> {
-    params.get(key).and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("missing {key}"))
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing {key}"))
 }
 
 fn source_param(params: &Value) -> Result<store_uni::sources::SourceId> {
@@ -192,7 +195,8 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
     // did not export the variable -- silently faked every install: progress
     // bars that move, an operation that "downloads" without touching the
     // network, and nothing on disk at the end of it.
-    let fake_uni = std::env::var("THALLIUM_STORE_FAKE_UNI").unwrap_or_else(|_| "0".to_string()) != "0";
+    let fake_uni =
+        std::env::var("THALLIUM_STORE_FAKE_UNI").unwrap_or_else(|_| "0".to_string()) != "0";
     let db_path = data_home().join("thallium-store/store.db");
     let (progress_tx, _) = broadcast::channel(256);
     let db = StoreDb::open(&db_path)?;
@@ -237,13 +241,14 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
     {
         let socket_path = socket_path.clone();
         tokio::spawn(async move {
-            let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(sig) => sig,
-                Err(err) => {
-                    tracing::warn!("cannot watch for SIGTERM: {err}");
-                    return;
-                }
-            };
+            let mut term =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(sig) => sig,
+                    Err(err) => {
+                        tracing::warn!("cannot watch for SIGTERM: {err}");
+                        return;
+                    }
+                };
             tokio::select! {
                 _ = term.recv() => {}
                 _ = tokio::signal::ctrl_c() => {}
@@ -377,7 +382,11 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
         "sources.list" => store_uni::sources::list().await,
         "sources.probe" => store_uni::sources::probe(source_param(&request.params)?).await,
         "sources.setActive" => {
-            store_uni::sources::set_active(source_param(&request.params)?, str_param(&request.params, "mirrorId")?).await
+            store_uni::sources::set_active(
+                source_param(&request.params)?,
+                str_param(&request.params, "mirrorId")?,
+            )
+            .await
         }
         "sources.addMirror" => {
             store_uni::sources::add_mirror(
@@ -388,12 +397,20 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
             .await
         }
         "sources.removeMirror" => {
-            store_uni::sources::remove_mirror(source_param(&request.params)?, str_param(&request.params, "mirrorId")?).await
+            store_uni::sources::remove_mirror(
+                source_param(&request.params)?,
+                str_param(&request.params, "mirrorId")?,
+            )
+            .await
         }
         "sources.findNode" => store_uni::sources::find_node(source_param(&request.params)?).await,
         "sources.clearNode" => store_uni::sources::clear_node(source_param(&request.params)?).await,
         "sources.setParallel" => {
-            let enabled = request.params.get("enabled").and_then(Value::as_bool).ok_or_else(|| anyhow::anyhow!("missing enabled"))?;
+            let enabled = request
+                .params
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| anyhow::anyhow!("missing enabled"))?;
             store_uni::sources::set_flathub_parallel(enabled).await
         }
         "system.cacheInfo" => Ok(icon_cache_info()),
@@ -425,6 +442,7 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
         "catalog.search" => {
             let params: SearchParams = serde_json::from_value(request.params)?;
             let mut response = state.catalog.search(params).await;
+            mark_installed(&mut response.results).await;
             let mut cache = state.recent_apps.lock().await;
             for app in &response.results {
                 cache.insert(app.id.clone(), app.clone());
@@ -436,6 +454,10 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
         }
         "catalog.discover" => {
             let mut collections = state.catalog.discover();
+            let installed = installed_package_ids().await;
+            for collection in &mut collections {
+                set_installed(&mut collection.apps, &installed);
+            }
             let mut cache = state.recent_apps.lock().await;
             for collection in &collections {
                 for app in &collection.apps {
@@ -459,6 +481,7 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
             let app = cached.or_else(|| state.catalog.app_details(id));
             if let Some(app) = app {
                 let mut app = state.catalog.enrich_details(app).await;
+                mark_installed(std::slice::from_mut(&mut app)).await;
                 store_catalog::rewrite_icon(&mut app);
                 Ok(serde_json::to_value(app)?)
             } else {
@@ -737,9 +760,7 @@ async fn run_operation(
                 // to "downloading" for as long as the transfer took to give up.
                 let terminal = matches!(
                     progress.state,
-                    OperationState::Succeeded
-                        | OperationState::Failed
-                        | OperationState::Cancelled
+                    OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
                 );
                 if cancelled.is_cancelled() && !terminal {
                     continue;
@@ -917,6 +938,33 @@ async fn installed_list() -> Vec<InstalledItem> {
     items.extend(read_registry_installed().await);
     items.extend(read_flatpak_installed().await);
     dedupe_installed(items)
+}
+
+/// Package ids present on the system, so catalog results can say
+/// "Installed" instead of offering a Get that silently no-ops.
+async fn installed_package_ids() -> HashSet<String> {
+    installed_list()
+        .await
+        .into_iter()
+        .map(|item| match item.id.strip_prefix("flatpak:") {
+            Some(app_id) => app_id.to_string(),
+            None => item.detail,
+        })
+        .collect()
+}
+
+fn set_installed(apps: &mut [CanonicalApp], installed: &HashSet<String>) {
+    for app in apps {
+        app.installed = app
+            .variants
+            .iter()
+            .any(|v| installed.contains(&v.package_id));
+    }
+}
+
+async fn mark_installed(apps: &mut [CanonicalApp]) {
+    let installed = installed_package_ids().await;
+    set_installed(apps, &installed);
 }
 
 async fn read_registry_installed() -> Vec<InstalledItem> {
