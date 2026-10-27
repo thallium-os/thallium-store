@@ -777,6 +777,7 @@ async fn flatpak_search(query: &str) -> Result<Vec<CanonicalApp>> {
 
     let remotes = Command::new("flatpak")
         .args(["remotes", "--columns=name"])
+        .kill_on_drop(true)
         .output()
         .await?;
     if !remotes.status.success() {
@@ -791,6 +792,7 @@ async fn flatpak_search(query: &str) -> Result<Vec<CanonicalApp>> {
 
     let output = Command::new("flatpak")
         .args(["search", "--columns=application,name,description", query])
+        .kill_on_drop(true)
         .output()
         .await?;
 
@@ -831,6 +833,7 @@ async fn apt_search(query: &str) -> Result<Vec<CanonicalApp>> {
 
     let output = Command::new("apt-cache")
         .args(["search", query])
+        .kill_on_drop(true)
         .output()
         .await?;
     if !output.status.success() {
@@ -859,6 +862,8 @@ async fn apt_search(query: &str) -> Result<Vec<CanonicalApp>> {
         .collect())
 }
 
+// Each search spawn sets kill_on_drop: a timed-out future is dropped here,
+// and without it the child keeps running and piles up per keystroke.
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(3);
 
 async fn flathub_provider(query: &str) -> (Vec<CanonicalApp>, Vec<ProviderStatus>) {
