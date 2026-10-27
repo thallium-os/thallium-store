@@ -98,6 +98,14 @@ fn settings_path() -> PathBuf {
     config.join("thallium-store/settings.json")
 }
 
+fn str_param<'a>(params: &'a Value, key: &str) -> Result<&'a str> {
+    params.get(key).and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("missing {key}"))
+}
+
+fn source_param(params: &Value) -> Result<store_uni::sources::SourceId> {
+    store_uni::sources::SourceId::parse(str_param(params, "source")?)
+}
+
 fn load_settings() -> Value {
     std::fs::read_to_string(settings_path())
         .ok()
@@ -365,6 +373,26 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
             }
             save_settings(&settings)?;
             Ok(json!({ "settings": settings }))
+        }
+        "sources.list" => store_uni::sources::list().await,
+        "sources.probe" => store_uni::sources::probe(source_param(&request.params)?).await,
+        "sources.setActive" => {
+            store_uni::sources::set_active(source_param(&request.params)?, str_param(&request.params, "mirrorId")?).await
+        }
+        "sources.addMirror" => {
+            store_uni::sources::add_mirror(
+                source_param(&request.params)?,
+                str_param(&request.params, "name")?,
+                str_param(&request.params, "url")?,
+            )
+            .await
+        }
+        "sources.removeMirror" => {
+            store_uni::sources::remove_mirror(source_param(&request.params)?, str_param(&request.params, "mirrorId")?).await
+        }
+        "sources.setParallel" => {
+            let enabled = request.params.get("enabled").and_then(Value::as_bool).ok_or_else(|| anyhow::anyhow!("missing enabled"))?;
+            store_uni::sources::set_flathub_parallel(enabled).await
         }
         "system.cacheInfo" => Ok(icon_cache_info()),
         "system.clearIconCache" => {

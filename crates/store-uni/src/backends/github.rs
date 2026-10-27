@@ -98,6 +98,14 @@ async fn install(
         tokio::fs::create_dir_all(parent).await?;
     }
 
+    // A mirror only serves assets GitHub publishes a SHA-256 for, so it can
+    // never hand over a different file than GitHub would.
+    let digest = asset_digest(&release, &name);
+    let url = match (crate::sources::github_prefix(), &digest) {
+        (Some(prefix), Some(_)) => format!("{prefix}{url}"),
+        _ => url,
+    };
+
     let done = Arc::new(AtomicU64::new(0));
     let total = Arc::new(AtomicU64::new(0));
     let ticker = appimage::spawn_ticker(tx.clone(), Arc::clone(&done), Arc::clone(&total), 5, 80);
@@ -108,6 +116,13 @@ async fn install(
     ticker.abort();
     drop(network_permit);
     result?;
+    if let Some(expected) = digest {
+        let actual = crate::sources::sha256_file(&dest).await?;
+        if actual != expected {
+            let _ = tokio::fs::remove_file(&dest).await;
+            anyhow::bail!("{name} failed its SHA-256 check (expected {expected}, got {actual})");
+        }
+    }
 
     // Install stage: the resulting asset type decides which mutation permit
     // applies. A `.deb` shells out to apt-get, which touches the dpkg lock
@@ -163,6 +178,19 @@ async fn install_deb(
     )
     .await;
     Ok(())
+}
+
+/// GitHub's published `sha256:` digest for the asset called `name`.
+fn asset_digest(release: &Value, name: &str) -> Option<String> {
+    release
+        .get("assets")?
+        .as_array()?
+        .iter()
+        .find(|a| a.get("name").and_then(Value::as_str) == Some(name))?
+        .get("digest")?
+        .as_str()?
+        .strip_prefix("sha256:")
+        .map(str::to_ascii_lowercase)
 }
 
 /// Pick the highest-scoring asset URL/name, rejecting clearly wrong artifacts.

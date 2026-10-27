@@ -1,5 +1,6 @@
 pub mod apt_cache;
 pub mod registry;
+pub mod sources;
 
 mod backends;
 mod privilege;
