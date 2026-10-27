@@ -13,7 +13,10 @@ use crate::privilege;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
@@ -235,7 +238,7 @@ pub async fn list() -> Result<Value> {
         }
         // Set by hand outside the store: show it rather than pretend.
         if active.is_none() {
-            if let Some(url) = current.filter(|u| !u.is_empty()) {
+            if let Some(url) = current.clone().filter(|u| !u.is_empty()) {
                 mirrors.push(json!({ "id": "detected", "name": "Current setting", "url": url, "builtin": true }));
                 active = Some("detected".into());
             }
@@ -249,6 +252,13 @@ pub async fn list() -> Result<Value> {
         });
         if source == SourceId::Flathub {
             entry["parallel"] = json!(flathub_parallel());
+        }
+        // Node pinning only means something while the Fastly host is in use.
+        if let Some((host, _)) = fastly_host(source)
+            .filter(|(h, _)| current.as_deref().is_some_and(|u| url_host(u) == Some(*h)))
+        {
+            entry["nodeHost"] = json!(host);
+            entry["node"] = json!(hosts_pins().get(host));
         }
         sources.push(entry);
     }
@@ -382,23 +392,29 @@ async fn time_download(url: &str) -> Result<(u64, f64)> {
     let client = reqwest::Client::builder()
         .user_agent("thallium-store")
         .build()?;
+    time_download_with(&client, url, PROBE_BYTES, PROBE_TIMEOUT).await
+}
+
+async fn time_download_with(
+    client: &reqwest::Client,
+    url: &str,
+    limit: u64,
+    timeout: Duration,
+) -> Result<(u64, f64)> {
     let start = Instant::now();
-    let deadline = start + PROBE_TIMEOUT;
+    let deadline = start + timeout;
     let mut resp = tokio::time::timeout(
-        PROBE_TIMEOUT,
+        timeout,
         client
             .get(url)
-            .header(
-                reqwest::header::RANGE,
-                format!("bytes=0-{}", PROBE_BYTES - 1),
-            )
+            .header(reqwest::header::RANGE, format!("bytes=0-{}", limit - 1))
             .send(),
     )
     .await
     .context("no response")??
     .error_for_status()?;
     let mut bytes = 0u64;
-    while bytes < PROBE_BYTES {
+    while bytes < limit {
         match tokio::time::timeout_at(deadline.into(), resp.chunk()).await {
             Ok(Ok(Some(chunk))) => bytes += chunk.len() as u64,
             Ok(Ok(None)) | Err(_) => break,
@@ -406,6 +422,204 @@ async fn time_download(url: &str) -> Result<(u64, f64)> {
         }
     }
     Ok((bytes, start.elapsed().as_secs_f64()))
+}
+
+// --- Fastly node pinning -------------------------------------------------------
+//
+// dl.flathub.org and deb.debian.org sit on Fastly, which serves every
+// hostname from every edge address and picks the edge by anycast routing. An
+// ISP with a congested link into its local Fastly edge (measured: 7 KB/s)
+// can still reach other edges at MB/s, so we scan edge addresses, keep the
+// fastest, and pin it in /etc/hosts. TLS (Flathub) and repository signatures
+// (both) still authenticate whatever the edge returns.
+
+const HOSTS: &str = "/etc/hosts";
+const PIN_BEGIN: &str = "# BEGIN thallium-store";
+const PIN_END: &str = "# END thallium-store";
+/// Fastly edge ranges that serve customer hostnames on the `.91` addresses.
+const FASTLY_RANGES: &[(u8, u8, u8, u8)] = &[
+    // (a, b, first third octet, last third octet)
+    (146, 75, 0, 127),
+    (199, 232, 0, 255),
+    (167, 82, 0, 127),
+    (140, 248, 64, 255),
+    (151, 101, 0, 255),
+];
+const SCAN_PARALLEL: usize = 48;
+const SPEED_CANDIDATES: usize = 36;
+const SPEED_PARALLEL: usize = 12;
+const SPEED_BYTES: u64 = 1024 * 1024;
+
+fn fastly_host(source: SourceId) -> Option<(&'static str, u16)> {
+    match source {
+        SourceId::Flathub => Some(("dl.flathub.org", 443)),
+        SourceId::System => Some(("deb.debian.org", 80)),
+        SourceId::Github => None,
+    }
+}
+
+fn url_host(url: &str) -> Option<&str> {
+    let rest = url.split_once("://")?.1;
+    rest.split(['/', ':']).next()
+}
+
+/// Edge addresses follow `a.b.c.91` with `c % 4 == 1`.
+fn fastly_candidates() -> Vec<Ipv4Addr> {
+    FASTLY_RANGES
+        .iter()
+        .flat_map(|&(a, b, lo, hi)| {
+            (lo..=hi)
+                .filter(|c| c % 4 == 1)
+                .map(move |c| Ipv4Addr::new(a, b, c, 91))
+        })
+        .collect()
+}
+
+fn node_urls(source: SourceId, host: &str) -> (String, String) {
+    match source {
+        SourceId::Flathub => (
+            format!("https://{host}/repo/summary.idx"),
+            format!(
+                "https://{host}/repo/appstream/{}/appstream.xml.gz",
+                std::env::consts::ARCH
+            ),
+        ),
+        _ => (
+            format!("http://{host}/debian/dists/{}/InRelease", codename()),
+            format!(
+                "http://{host}/debian/dists/{}/main/Contents-{}.gz",
+                codename(),
+                deb_arch()
+            ),
+        ),
+    }
+}
+
+fn pinned_client(host: &str, addr: SocketAddr) -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .user_agent("thallium-store")
+        .resolve(host, addr)
+        .build()?)
+}
+
+/// Scan Fastly edges for `source`'s host, pin the fastest in /etc/hosts.
+pub async fn find_node(source: SourceId) -> Result<Value> {
+    let (host, _) = fastly_host(source).context("this source is not served by Fastly")?;
+    let (ip, speed, tested) = fastest_edge(source).await?;
+    let mut pins = hosts_pins();
+    pins.insert(host.to_string(), ip.to_string());
+    write_pins(&pins).await?;
+    let mut out = list().await?;
+    out["node"] = json!({ "source": source.key(), "ip": ip.to_string(), "bytesPerSec": speed, "tested": tested });
+    Ok(out)
+}
+
+/// (fastest edge, its bytes/s, how many edges were speed-tested).
+async fn fastest_edge(source: SourceId) -> Result<(Ipv4Addr, u64, usize)> {
+    let (host, port) = fastly_host(source).context("this source is not served by Fastly")?;
+    let (small, large) = node_urls(source, host);
+
+    // Stage 1: which edges answer for the host at all (most do, some don't).
+    let gate = Arc::new(tokio::sync::Semaphore::new(SCAN_PARALLEL));
+    let mut set = tokio::task::JoinSet::new();
+    for ip in fastly_candidates() {
+        let (gate, small) = (Arc::clone(&gate), small.clone());
+        set.spawn(async move {
+            let _permit = gate.acquire_owned().await.ok()?;
+            let client = pinned_client(host, SocketAddr::new(ip.into(), port)).ok()?;
+            let req = client.get(&small).timeout(Duration::from_secs(4)).send();
+            req.await.ok()?.error_for_status().ok().map(|_| ip)
+        });
+    }
+    let mut alive = Vec::new();
+    while let Some(res) = set.join_next().await {
+        if let Ok(Some(ip)) = res {
+            alive.push(ip);
+        }
+    }
+    if alive.is_empty() {
+        bail!("no Fastly server answered for {host}");
+    }
+
+    // Stage 2: latency says nothing about congestion, so time a real
+    // download from a spread of the live edges.
+    let seed = Instant::now().elapsed().subsec_nanos() ^ std::process::id();
+    alive.sort_by_key(|ip| u32::from(*ip).wrapping_mul(2_654_435_761) ^ seed);
+    alive.truncate(SPEED_CANDIDATES);
+    let tested = alive.len();
+    let gate = Arc::new(tokio::sync::Semaphore::new(SPEED_PARALLEL));
+    let mut set = tokio::task::JoinSet::new();
+    for ip in alive {
+        let (gate, large) = (Arc::clone(&gate), large.clone());
+        set.spawn(async move {
+            let _permit = gate.acquire_owned().await.ok()?;
+            let client = pinned_client(host, SocketAddr::new(ip.into(), port)).ok()?;
+            let (bytes, secs) =
+                time_download_with(&client, &large, SPEED_BYTES, Duration::from_secs(6))
+                    .await
+                    .ok()?;
+            Some((ip, (bytes as f64 / secs.max(0.001)) as u64))
+        });
+    }
+    let mut best: Option<(Ipv4Addr, u64)> = None;
+    while let Some(res) = set.join_next().await {
+        if let Ok(Some((ip, speed))) = res {
+            if speed > best.map_or(0, |(_, s)| s) {
+                best = Some((ip, speed));
+            }
+        }
+    }
+    let (ip, speed) =
+        best.with_context(|| format!("no Fastly server finished a test download for {host}"))?;
+
+    Ok((ip, speed, tested))
+}
+
+pub async fn clear_node(source: SourceId) -> Result<Value> {
+    let (host, _) = fastly_host(source).context("this source is not served by Fastly")?;
+    let mut pins = hosts_pins();
+    if pins.remove(host).is_some() {
+        write_pins(&pins).await?;
+    }
+    list().await
+}
+
+/// host -> address pinned inside our /etc/hosts block.
+fn hosts_pins() -> BTreeMap<String, String> {
+    std::fs::read_to_string(HOSTS)
+        .map(|text| parse_pins(&text))
+        .unwrap_or_default()
+}
+
+fn parse_pins(text: &str) -> BTreeMap<String, String> {
+    text.lines()
+        .skip_while(|l| l.trim() != PIN_BEGIN)
+        .skip(1)
+        .take_while(|l| l.trim() != PIN_END)
+        .filter_map(|l| {
+            let mut cols = l.split_whitespace();
+            let ip = cols.next()?;
+            Some((cols.next()?.to_string(), ip.to_string()))
+        })
+        .collect()
+}
+
+/// Rewrite our block in /etc/hosts as root. Lines go in as positional
+/// arguments, never spliced into the script.
+async fn write_pins(pins: &BTreeMap<String, String>) -> Result<()> {
+    let lines: Vec<String> = pins
+        .iter()
+        .filter(|(_, ip)| ip.parse::<Ipv4Addr>().is_ok())
+        .map(|(host, ip)| format!("{ip} {host}"))
+        .collect();
+    let script = format!(
+        "set -e; t=$(mktemp); sed '/^{PIN_BEGIN}$/,/^{PIN_END}$/d' {HOSTS} > \"$t\"; \
+         if [ $# -gt 0 ]; then {{ echo '{PIN_BEGIN}'; printf '%s\\n' \"$@\"; echo '{PIN_END}'; }} >> \"$t\"; fi; \
+         cat \"$t\" > {HOSTS}; rm -f \"$t\""
+    );
+    let mut args = vec!["-c", script.as_str(), "sh"];
+    args.extend(lines.iter().map(String::as_str));
+    run(&mut privilege::privileged("sh", &args)).await
 }
 
 fn os_release(key: &str) -> Option<String> {
@@ -653,6 +867,15 @@ pub async fn sha256_file(path: &Path) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// Live network scan; run with `cargo test -- --ignored fastly_scan`.
+    #[tokio::test]
+    #[ignore]
+    async fn fastly_scan_finds_a_flathub_edge() {
+        let (ip, speed, tested) = fastest_edge(SourceId::Flathub).await.unwrap();
+        eprintln!("fastest {ip} {speed} B/s of {tested}");
+        assert!(speed > 0);
+    }
+
     #[test]
     fn finds_debian_archive_in_one_line_format() {
         let text = "deb http://security.debian.org/debian-security/ trixie-security main\n\
@@ -679,6 +902,25 @@ mod tests {
             debian_url_in("deb https://apt.thallium81.dev/ stable main\n", false),
             None
         );
+    }
+
+    #[test]
+    fn reads_only_our_hosts_block() {
+        let text = "127.0.0.1 localhost\n1.2.3.4 dl.flathub.org\n# BEGIN thallium-store\n\
+                    146.75.45.91 dl.flathub.org\n# END thallium-store\n";
+        let pins = parse_pins(text);
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins["dl.flathub.org"], "146.75.45.91");
+    }
+
+    #[test]
+    fn fastly_candidates_follow_the_edge_pattern() {
+        let c = fastly_candidates();
+        assert!(c.contains(&Ipv4Addr::new(146, 75, 117, 91)));
+        assert!(c.contains(&Ipv4Addr::new(199, 232, 57, 91)));
+        assert!(c
+            .iter()
+            .all(|ip| ip.octets()[3] == 91 && ip.octets()[2] % 4 == 1));
     }
 
     #[test]

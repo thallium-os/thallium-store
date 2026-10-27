@@ -390,6 +390,8 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
         "sources.removeMirror" => {
             store_uni::sources::remove_mirror(source_param(&request.params)?, str_param(&request.params, "mirrorId")?).await
         }
+        "sources.findNode" => store_uni::sources::find_node(source_param(&request.params)?).await,
+        "sources.clearNode" => store_uni::sources::clear_node(source_param(&request.params)?).await,
         "sources.setParallel" => {
             let enabled = request.params.get("enabled").and_then(Value::as_bool).ok_or_else(|| anyhow::anyhow!("missing enabled"))?;
             store_uni::sources::set_flathub_parallel(enabled).await

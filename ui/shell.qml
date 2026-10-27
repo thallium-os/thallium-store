@@ -64,6 +64,13 @@ ShellRoot {
     property var sourcesErrors: ({})
     property var sourcesProbe: ({})
     property var sourcesBusy: ({})
+    property var sourcesScanning: ({})
+    property var sourcesNode: ({})
+    // sources.* calls other than list can take 30 s (scans) or wait on a
+    // password prompt, so they get their own lane instead of the shared queue.
+    property var slowQueue: []
+    property bool slowRunning: false
+    property string slowSource: ""
     property string activeSource: ""
     property bool setupOpen: false
     property int setupStep: 0
@@ -460,10 +467,26 @@ ShellRoot {
     }
 
     function request(method, params) {
+        if (method.indexOf("sources.") === 0 && method !== "sources.list") {
+            slowQueue = slowQueue.concat([{ method: method, params: params || {} }])
+            drainSlow()
+            return
+        }
         const nextQueue = requestQueue.slice()
         nextQueue.push({ method: method, params: params || {} })
         requestQueue = nextQueue
         drainRequests()
+    }
+
+    function drainSlow() {
+        if (slowRunning || slowQueue.length === 0)
+            return
+        const item = slowQueue[0]
+        slowQueue = slowQueue.slice(1)
+        slowRunning = true
+        slowSource = item.params.source || ""
+        slowRpc.command = [backendBinary, "--request", item.method, JSON.stringify(item.params)]
+        slowRpc.running = true
     }
 
     function drainRequests() {
@@ -1023,6 +1046,49 @@ ShellRoot {
         id: backend
         command: [root.backendBinary]
         running: true
+    }
+
+    Process {
+        id: slowRpc
+        running: false
+        onRunningChanged: {
+            if (!running && root.slowRunning) {
+                root.setSourceKey("sourcesBusy", root.slowSource, false)
+                root.setSourceKey("sourcesScanning", root.slowSource, false)
+                root.slowRunning = false
+                root.drainSlow()
+            }
+        }
+        stdout: SplitParser {
+            onRead: line => {
+                try {
+                    const message = JSON.parse(line)
+                    if (message.error) {
+                        root.setSourceKey("sourcesErrors", root.slowSource, message.error.message)
+                        pushLog("✗ " + message.error.message)
+                        return
+                    }
+                    const result = message.result
+                    if (!result)
+                        return
+                    if (result.sources !== undefined) {
+                        root.sourcesList = result.sources
+                        root.setSourceKey("sourcesErrors", root.slowSource, null)
+                    }
+                    if (result.node !== undefined)
+                        root.setSourceKey("sourcesNode", result.node.source, result.node)
+                    if (result.results !== undefined && result.source !== undefined) {
+                        const byId = {}
+                        for (const r of result.results)
+                            byId[r.id] = r
+                        root.setSourceKey("sourcesProbe", result.source, byId)
+                        root.setSourceKey("sourcesErrors", result.source, null)
+                    }
+                } catch (error) {
+                    pushLog("✗ " + error)
+                }
+            }
+        }
     }
 
     Process {
@@ -3615,6 +3681,65 @@ ShellRoot {
                                                                 Layout.preferredWidth: 88
                                                                 onClicked: root.request("sources.removeMirror", { source: srcCard.src.id, mirrorId: mirrorRow.m.id })
                                                             }
+                                                        }
+                                                    }
+                                                }
+
+                                                RowLayout {
+                                                    visible: srcCard.src.nodeHost !== undefined
+                                                    Layout.fillWidth: true
+                                                    spacing: 12
+                                                    property bool scanning: root.sourcesScanning[srcCard.src.id] === true
+                                                    property var found: root.sourcesNode[srcCard.src.id]
+
+                                                    ColumnLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 2
+                                                        Label {
+                                                            text: "Fastest server"
+                                                            color: root.cFg
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 13
+                                                            font.bold: true
+                                                        }
+                                                        Label {
+                                                            text: parent.parent.scanning
+                                                                  ? "Testing Fastly servers from your connection. Takes about 30 seconds."
+                                                                  : srcCard.src.node
+                                                                    ? "Pinned to " + srcCard.src.node
+                                                                      + (parent.parent.found && parent.parent.found.ip === srcCard.src.node
+                                                                         ? " (" + root.formatSpeed(parent.parent.found.bytesPerSec) + ", best of " + parent.parent.found.tested + ")" : "")
+                                                                      + ". If downloads slow down again, find a new one."
+                                                                    : srcCard.src.nodeHost + " is on Fastly, whose nearest server can be congested on some ISPs. Finds a faster one and pins it; asks for your password."
+                                                            color: root.cMuted
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 12
+                                                            wrapMode: Text.WordWrap
+                                                            Layout.fillWidth: true
+                                                        }
+                                                    }
+                                                    ActionButton {
+                                                        visible: srcCard.src.node !== null && srcCard.src.node !== undefined && !parent.scanning
+                                                        label: "Unpin"
+                                                        fill: root.cDim
+                                                        textColor: root.cRed
+                                                        height: 32
+                                                        Layout.preferredWidth: 88
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                        onClicked: root.request("sources.clearNode", { source: srcCard.src.id })
+                                                    }
+                                                    ActionButton {
+                                                        label: parent.scanning ? "Scanning…" : (srcCard.src.node ? "Find again" : "Find fastest")
+                                                        fill: root.cDim
+                                                        textColor: root.cGreen
+                                                        height: 32
+                                                        active: !parent.scanning
+                                                        Layout.preferredWidth: 118
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                        onClicked: {
+                                                            root.setSourceKey("sourcesScanning", srcCard.src.id, true)
+                                                            root.setSourceKey("sourcesErrors", srcCard.src.id, null)
+                                                            root.request("sources.findNode", { source: srcCard.src.id })
                                                         }
                                                     }
                                                 }
