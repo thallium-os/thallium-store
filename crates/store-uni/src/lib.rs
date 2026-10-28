@@ -7,6 +7,7 @@ mod privilege;
 
 pub use backends::appimage_local::{inspect as inspect_appimage, Inspection as AppImageInspection};
 pub use backends::StagePermits;
+pub use privilege::privileged;
 
 use serde::{Deserialize, Serialize};
 use store_core::{OperationAction, OperationState, SourceKind, Transfer, TransferPart};

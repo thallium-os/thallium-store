@@ -141,7 +141,6 @@ pub struct SourceToggles {
     pub flathub: bool,
     pub github: bool,
     pub appimage: bool,
-    pub aur: bool,
 }
 
 impl Default for SourceToggles {
@@ -151,7 +150,6 @@ impl Default for SourceToggles {
             flathub: true,
             github: true,
             appimage: true,
-            aur: false,
         }
     }
 }
@@ -159,11 +157,9 @@ impl Default for SourceToggles {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default)]
 pub struct Prerelease {
-    pub apt_backports: bool,
     pub flathub_beta: bool,
     pub github: bool,
     pub appimage: bool,
-    pub aur_git: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -222,6 +218,16 @@ pub fn apply(path: &Path, patch: &Value) -> Result<Settings> {
     Ok(settings)
 }
 
+/// Back to every default; the file is rewritten (unknown keys are dropped).
+pub fn reset(path: &Path) -> Result<Settings> {
+    let settings = Settings::default();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&settings)?)?;
+    Ok(settings)
+}
+
 fn merge(target: &mut Value, patch: &Value) {
     match (target, patch) {
         (Value::Object(target), Value::Object(patch)) => {
@@ -257,7 +263,7 @@ mod tests {
         let value = serde_json::to_value(load(Path::new("/nonexistent/settings.json"))).unwrap();
         assert_eq!(value["auto_check"], json!(true));
         assert_eq!(value["auto_install"]["apt"], json!("security"));
-        assert_eq!(value["sources"]["aur"], json!(false));
+        assert_eq!(value["sources"]["flathub"], json!(true));
         assert_eq!(value["max_concurrent_downloads"], json!(2));
     }
 
@@ -270,6 +276,15 @@ mod tests {
         assert_eq!(settings.auto_install.apt, AutoMode::Security);
         assert!(settings.first_run_done);
         assert_eq!(settings.extra["from_newer_build"], json!(7));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn reset_restores_defaults() {
+        let path = temp("reset");
+        std::fs::write(&path, r#"{"retries": 9, "first_run_done": true}"#).unwrap();
+        assert_eq!(reset(&path).unwrap(), Settings::default());
+        assert_eq!(load(&path), Settings::default());
         std::fs::remove_file(&path).ok();
     }
 
