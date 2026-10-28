@@ -1,4 +1,9 @@
+mod filters;
+mod logging;
+mod maintenance;
 mod settings;
+mod storage;
+mod updates;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -89,6 +94,9 @@ struct UpdateItem {
     current_version: Option<String>,
     available_version: Option<String>,
     managed_by_uni: bool,
+    /// Offered from a security suite; decides what `auto_install: security` takes.
+    #[serde(skip)]
+    security: bool,
 }
 
 fn settings_path() -> PathBuf {
@@ -130,10 +138,7 @@ fn icon_cache_info() -> Value {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .with_target(false)
-        .init();
+    logging::init(settings::load(&settings_path()).debug_logging);
 
     let args: Vec<String> = std::env::args().collect();
     let socket_path = socket_path();
@@ -213,6 +218,7 @@ async fn serve(socket_path: PathBuf) -> Result<()> {
 
     // Warm the catalog index in the background so searches are served from
     // memory; live providers cover the brief window before it's ready.
+    updates::spawn(state.clone());
     let warm_catalog = state.catalog.clone();
     tokio::spawn(async move { warm_catalog.warm().await });
 
@@ -354,8 +360,46 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
         })),
         "settings.get" => Ok(json!({ "settings": settings::load(&settings_path()) })),
         "settings.set" => {
-            Ok(json!({ "settings": settings::apply(&settings_path(), &request.params)? }))
+            let before = settings::load(&settings_path());
+            let after = settings::apply(&settings_path(), &request.params)?;
+            apply_setting_effects(&before, &after, state.fake_uni).await;
+            Ok(json!({ "settings": after }))
         }
+        "settings.reset" => {
+            let before = settings::load(&settings_path());
+            let after = settings::reset(&settings_path())?;
+            apply_setting_effects(&before, &after, state.fake_uni).await;
+            Ok(json!({ "settings": after }))
+        }
+        "system.storageInfo" => Ok(storage::info()),
+        "system.clearDownloadCache" => {
+            // While operations run, keep their fresh files; otherwise clear all.
+            let busy = !state.running_ops.lock().await.is_empty();
+            let min_age = if busy { Duration::from_secs(120) } else { Duration::ZERO };
+            let freed = storage::clear(&storage::download_dir(), min_age);
+            Ok(json!({ "freedBytes": freed }))
+        }
+        "maintenance.repairFlatpak" => maintenance::repair_flatpak(state.fake_uni).await,
+        "maintenance.fixApt" => maintenance::fix_apt(state.fake_uni).await,
+        "maintenance.refreshLists" => maintenance::refresh_lists(state.fake_uni).await,
+        "system.listsAge" => Ok(maintenance::lists_age()),
+        "apps.export" => maintenance::apps_export().await,
+        "apps.importPreview" => maintenance::import_preview(&request.params).await,
+        "apps.importApply" => maintenance::import_apply(&request.params, &state).await,
+        "logs.info" => Ok(json!({
+            "dir": logging::log_dir().to_string_lossy(),
+            "debug": logging::is_debug()
+        })),
+        "holds.list" => maintenance::holds_list().await,
+        "holds.set" => maintenance::holds_set(&request.params, state.fake_uni).await,
+        "remotes.list" => maintenance::remotes_list().await,
+        "remotes.addFlatpak" => maintenance::remotes_add_flatpak(&request.params, state.fake_uni).await,
+        "remotes.removeFlatpak" => {
+            maintenance::remotes_remove_flatpak(&request.params, state.fake_uni).await
+        }
+        "updates.status" => Ok(updates::status().await),
+        "updates.checkNow" => Ok(updates::check_now(&state).await),
+        "flatpak.permissions" => maintenance::flatpak_permissions(&request.params, state.fake_uni).await,
         "sources.list" => store_uni::sources::list().await,
         "sources.probe" => store_uni::sources::probe(source_param(&request.params)?).await,
         "sources.setActive" => {
@@ -419,6 +463,7 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
         "catalog.search" => {
             let params: SearchParams = serde_json::from_value(request.params)?;
             let mut response = state.catalog.search(params).await;
+            filters::apply(&mut response.results, &settings::load(&settings_path()));
             mark_installed(&mut response.results).await;
             let mut cache = state.recent_apps.lock().await;
             for app in &response.results {
@@ -431,6 +476,10 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
         }
         "catalog.discover" => {
             let mut collections = state.catalog.discover();
+            let settings = settings::load(&settings_path());
+            for collection in &mut collections {
+                filters::apply(&mut collection.apps, &settings);
+            }
             let installed = installed_package_ids().await;
             for collection in &mut collections {
                 set_installed(&mut collection.apps, &installed);
@@ -602,6 +651,23 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
         )),
         "operations.enqueue" => enqueue_operation(request.params, state).await,
         _ => Err(anyhow::anyhow!("unknown method {}", request.method)),
+    }
+}
+
+/// Side effects of a settings change that cannot wait for the next read of
+/// the file: log level, the flathub-beta remote, cache pruning.
+async fn apply_setting_effects(before: &settings::Settings, after: &settings::Settings, fake: bool) {
+    if before.debug_logging != after.debug_logging {
+        logging::set_debug(after.debug_logging);
+    }
+    if fake {
+        return;
+    }
+    if before.prerelease.flathub_beta != after.prerelease.flathub_beta {
+        maintenance::set_flathub_beta(after.prerelease.flathub_beta).await;
+    }
+    if before.keep_downloads != after.keep_downloads || before.cache_limit_mb != after.cache_limit_mb {
+        storage::apply_policy(&storage::download_dir(), after.keep_downloads, after.cache_limit_mb);
     }
 }
 
@@ -1111,7 +1177,11 @@ fn parse_apt_upgradable_line(line: &str) -> Option<UpdateItem> {
     }
 
     let mut parts = line.split_whitespace();
-    let pkg = parts.next()?.split('/').next()?.trim();
+    let name_and_suites = parts.next()?;
+    let pkg = name_and_suites.split('/').next()?.trim();
+    let security = name_and_suites
+        .split_once('/')
+        .is_some_and(|(_, suites)| suites.contains("security"));
     if pkg.is_empty() {
         return None;
     }
@@ -1131,6 +1201,7 @@ fn parse_apt_upgradable_line(line: &str) -> Option<UpdateItem> {
         current_version,
         available_version: Some(available_version),
         managed_by_uni: false,
+        security,
     })
 }
 
@@ -1178,6 +1249,7 @@ fn parse_flatpak_update_line(line: &str) -> Option<UpdateItem> {
         current_version: None,
         available_version,
         managed_by_uni: false,
+        security: false,
     })
 }
 
@@ -1246,12 +1318,21 @@ async fn fetch_github_latest(name: &str, repo_id: &str) -> Option<UpdateItem> {
         current_version: None,
         available_version: Some(tag_name),
         managed_by_uni: true,
+        security: false,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_apt_line_flags_security_suites() {
+        let sec = "openssl/stable-security 3.0.2 amd64 [upgradable from: 3.0.1]";
+        assert!(parse_apt_upgradable_line(sec).unwrap().security);
+        let plain = "vim/stable 9.1 amd64 [upgradable from: 9.0]";
+        assert!(!parse_apt_upgradable_line(plain).unwrap().security);
+    }
 
     #[test]
     fn parse_apt_line_extracts_current_and_available_versions() {

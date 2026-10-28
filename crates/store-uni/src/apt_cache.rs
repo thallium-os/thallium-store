@@ -202,6 +202,12 @@ fn last_line(stderr: &str) -> String {
 /// the case where a refresh finds nothing changed. It is an approximation of
 /// "when did we last see the archive" -- good enough to print, not something
 /// to branch on.
+/// Seconds since apt's lists were last written, or None when there are none.
+pub fn lists_age_seconds() -> Option<u64> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    checked_at().map(|at| now.saturating_sub(at))
+}
+
 fn checked_at() -> Option<u64> {
     let dir = std::path::Path::new(LISTS_DIR);
     let mut newest = std::fs::metadata(dir).ok().and_then(|m| m.modified().ok());
