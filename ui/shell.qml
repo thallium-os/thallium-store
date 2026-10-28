@@ -608,7 +608,7 @@ ShellRoot {
         if (op) {
             if (op.action === "remove")
                 return "Removing…"
-            return op.percent > 0 ? op.percent + "%" : "Queued"
+            return op.percent > 0 ? downloadPercent(op) + "%" : "Queued"
         }
         return app && app.installed ? "Installed" : "Get"
     }
@@ -983,6 +983,78 @@ ShellRoot {
         return "Not provided"
     }
 
+    // A transfer is the backend's byte count for a download in flight. Only
+    // trusted when it knows the total; a bare percentage stays a percentage.
+    function hasTransfer(op) {
+        return !!op && !!op.transfer && op.transfer.bytes_total > 0
+    }
+
+    // While bytes are moving, progress is bytes moved; the backend's own
+    // percentage also covers install steps and can run ahead of the download.
+    function downloadPercent(op) {
+        if (!op)
+            return 0
+        if (op.state === "downloading" && hasTransfer(op))
+            return Math.floor(op.transfer.bytes_done * 100 / op.transfer.bytes_total)
+        return op.percent
+    }
+
+    function clockLabel(seconds) {
+        const s = Math.max(0, Math.round(seconds))
+        const m = Math.floor(s / 60)
+        if (m >= 60)
+            return Math.floor(m / 60) + "h " + (m % 60) + "m"
+        return m + ":" + String(s % 60).padStart(2, "0")
+    }
+
+    function speedLabel(op) {
+        if (!hasTransfer(op) || op.transfer.bytes_per_sec <= 0)
+            return "\u2014"
+        return formatBytes(op.transfer.bytes_per_sec) + "/s"
+    }
+
+    function etaLabel(op) {
+        if (!hasTransfer(op) || op.transfer.bytes_per_sec <= 0)
+            return "\u2014"
+        const t = op.transfer
+        return clockLabel(Math.max(0, t.bytes_total - t.bytes_done) / t.bytes_per_sec)
+    }
+
+    // "52.0 MB of 137.0 MB · 12.4 MB/s · 0:07 left" -- the one line an
+    // Activity row has room for.
+    function transferLine(op) {
+        if (!hasTransfer(op))
+            return ""
+        const t = op.transfer
+        let line = (t.bytes_done > 0 ? formatBytes(t.bytes_done) : "0 MB") + " of " + formatBytes(t.bytes_total)
+        if (t.bytes_per_sec > 0 && op.state === "downloading")
+            line += " \u00b7 " + speedLabel(op) + " \u00b7 " + etaLabel(op) + " left"
+        return line
+    }
+
+    // Parts of a download in fetch order, or the whole download as one part
+    // when the backend fetched a single file.
+    function transferParts(op) {
+        if (!hasTransfer(op))
+            return []
+        const t = op.transfer
+        if (t.parts && t.parts.length > 0)
+            return t.parts
+        return [{ name: op.app_name || "Download", bytes_done: t.bytes_done, bytes_total: t.bytes_total }]
+    }
+
+    function partStatus(part) {
+        if (part.bytes_total > 0 && part.bytes_done >= part.bytes_total)
+            return "DONE"
+        if (part.bytes_done > 0 && part.bytes_total > 0)
+            return Math.floor(part.bytes_done * 100 / part.bytes_total) + "%"
+        return "QUEUED"
+    }
+
+    // Segment shades for a download ring: one accent at falling strength, so
+    // the parts read apart without bringing in a second hue.
+    readonly property var partOpacity: [1.0, 0.62, 0.4, 0.24]
+
     function compactDeveloper(app) {
         if (!app)
             return "Unknown"
@@ -1245,7 +1317,10 @@ ShellRoot {
         repeat: true
         running: true
         onTriggered: {
-            if (root.activeView === "installed")
+            // The details page shows its app's download too; without this its
+            // ring and Get button froze at whatever state they opened with.
+            if (root.activeView === "installed"
+                    || (root.activeView === "details" && root.liveOpFor(root.selectedApp)))
                 root.request("operations.list", {})
         }
     }
@@ -1591,6 +1666,86 @@ ShellRoot {
         onLanguagesChanged: ringCanvas.requestPaint()
         onWidthChanged: ringCanvas.requestPaint()
         onHeightChanged: ringCanvas.requestPaint()
+    }
+
+    // One arc per part of a download, sized by its bytes and filled by its
+    // progress. Flatpak fetches a ref per runtime, extension and app, so its
+    // ring has a segment for each; a single-file download is one full ring.
+    component DownloadRing: Item {
+        id: dring
+        property var parts: []
+        property real percent: 0
+        property string stateText: ""
+        property bool held: false
+
+        Canvas {
+            id: dringCanvas
+            anchors.fill: parent
+            onPaint: {
+                const ctx = getContext("2d")
+                ctx.reset()
+                const cx = width / 2
+                const cy = height / 2
+                const stroke = Math.max(6, Math.round(Math.min(width, height) * 0.07))
+                const r = Math.min(width, height) / 2 - stroke / 2 - 1
+                let total = 0
+                for (let i = 0; i < dring.parts.length; i++)
+                    total += dring.parts[i].bytes_total
+                if (total <= 0)
+                    return
+                const gap = dring.parts.length > 1 ? 0.06 : 0
+                ctx.lineWidth = stroke
+                ctx.lineCap = "butt"
+                let start = -Math.PI / 2
+                for (let i = 0; i < dring.parts.length; i++) {
+                    const part = dring.parts[i]
+                    const sweep = (part.bytes_total / total) * Math.PI * 2
+                    const a0 = start + gap / 2
+                    const a1 = start + Math.max(gap / 2 + 0.01, sweep - gap / 2)
+                    ctx.beginPath()
+                    ctx.arc(cx, cy, r, a0, a1, false)
+                    ctx.strokeStyle = root.cDead
+                    ctx.stroke()
+                    const frac = part.bytes_total > 0 ? Math.min(1, part.bytes_done / part.bytes_total) : 0
+                    if (frac > 0) {
+                        ctx.beginPath()
+                        ctx.arc(cx, cy, r, a0, a0 + (a1 - a0) * frac, false)
+                        ctx.globalAlpha = root.partOpacity[i % root.partOpacity.length]
+                        ctx.strokeStyle = dring.held ? root.cMuted : root.cGreen
+                        ctx.stroke()
+                        ctx.globalAlpha = 1
+                    }
+                    start += sweep
+                }
+            }
+        }
+
+        ColumnLayout {
+            anchors.centerIn: parent
+            spacing: 4
+            Label {
+                text: Math.floor(dring.percent) + "%"
+                color: root.cFg
+                font.family: root.fontMono
+                font.pixelSize: Math.round(Math.min(dring.width, dring.height) * 0.16)
+                font.bold: true
+                Layout.alignment: Qt.AlignHCenter
+            }
+            Label {
+                text: dring.stateText
+                visible: text.length > 0
+                color: dring.held ? root.cMuted : root.cGreen
+                font.family: root.fontMono
+                font.pixelSize: 9
+                font.letterSpacing: 2
+                Layout.alignment: Qt.AlignHCenter
+            }
+        }
+
+        onPartsChanged: dringCanvas.requestPaint()
+        onHeldChanged: dringCanvas.requestPaint()
+        onWidthChanged: dringCanvas.requestPaint()
+        onHeightChanged: dringCanvas.requestPaint()
     }
 
     // Source + trust readout: a source-hued dot, mono source tag, trust dot.
@@ -3146,6 +3301,133 @@ ShellRoot {
                                     }
                                 }
 
+                                // The download in flight for this app, part by part. The Apps tab
+                                // keeps it to one line per download; this is where it opens up.
+                                Rectangle {
+                                    id: dlPanel
+                                    readonly property var op: root.liveOpFor(root.selectedApp)
+                                    // Without byte counts (apt, or before the first
+                                    // progress line) the ring is the plain percentage.
+                                    readonly property var parts: root.hasTransfer(op)
+                                        ? root.transferParts(op)
+                                        : [{ name: "", bytes_done: op ? op.percent : 0, bytes_total: 100 }]
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: dlRow.implicitHeight + 40
+                                    color: root.cPanel
+                                    border.color: root.cGreen
+                                    radius: 0
+                                    visible: !!op && op.action !== "remove"
+
+                                    RowLayout {
+                                        id: dlRow
+                                        anchors.fill: parent
+                                        anchors.margins: 20
+                                        spacing: 28
+
+                                        DownloadRing {
+                                            Layout.preferredWidth: Math.round(200 * root.uiScale())
+                                            Layout.preferredHeight: Math.round(200 * root.uiScale())
+                                            Layout.alignment: Qt.AlignVCenter
+                                            parts: dlPanel.parts
+                                            percent: root.downloadPercent(dlPanel.op)
+                                            stateText: dlPanel.op ? dlPanel.op.state.replace("_", " ").toUpperCase() : ""
+                                            held: !!dlPanel.op && (dlPanel.op.state === "pending" || dlPanel.op.state === "awaiting_authentication")
+                                        }
+
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            Layout.alignment: Qt.AlignVCenter
+                                            spacing: 14
+
+                                            RowLayout {
+                                                spacing: 28
+                                                visible: root.hasTransfer(dlPanel.op)
+                                                Repeater {
+                                                    model: [
+                                                        { t: "FETCHED", v: root.hasTransfer(dlPanel.op) ? root.transferLine(dlPanel.op).split(" \u00b7 ")[0] : "" },
+                                                        { t: "SPEED", v: root.speedLabel(dlPanel.op) },
+                                                        { t: "TIME LEFT", v: root.etaLabel(dlPanel.op) }
+                                                    ]
+                                                    delegate: ColumnLayout {
+                                                        spacing: 4
+                                                        Label {
+                                                            text: modelData.t
+                                                            color: root.cMuted
+                                                            font.family: root.fontMono
+                                                            font.pixelSize: 9
+                                                            font.letterSpacing: 2
+                                                        }
+                                                        Label {
+                                                            text: modelData.v
+                                                            color: root.cFg
+                                                            font.family: root.fontMono
+                                                            font.pixelSize: 13
+                                                            font.bold: true
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            Label {
+                                                visible: dlPanel.parts.length > 1
+                                                text: "PARTS \u00b7 FETCHED IN THIS ORDER"
+                                                color: root.cMuted
+                                                font.family: root.fontMono
+                                                font.pixelSize: 9
+                                                font.letterSpacing: 2
+                                            }
+
+                                            Repeater {
+                                                model: dlPanel.parts.length > 1 ? dlPanel.parts : []
+                                                delegate: RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 12
+                                                    Rectangle {
+                                                        width: 10
+                                                        height: 10
+                                                        radius: 0
+                                                        color: root.cGreen
+                                                        opacity: root.partOpacity[index % root.partOpacity.length]
+                                                        Layout.alignment: Qt.AlignVCenter
+                                                    }
+                                                    Label {
+                                                        text: modelData.name
+                                                        color: root.cFg
+                                                        font.family: root.fontMono
+                                                        font.pixelSize: 11
+                                                        elide: Text.ElideMiddle
+                                                        Layout.fillWidth: true
+                                                    }
+                                                    Label {
+                                                        text: modelData.bytes_total > 0 ? root.formatBytes(modelData.bytes_total) : "\u2014"
+                                                        color: root.cMuted
+                                                        font.family: root.fontMono
+                                                        font.pixelSize: 11
+                                                    }
+                                                    Label {
+                                                        text: root.partStatus(modelData)
+                                                        color: text === "DONE" ? root.cGreen : root.cMuted
+                                                        font.family: root.fontMono
+                                                        font.pixelSize: 9
+                                                        font.letterSpacing: 2
+                                                        horizontalAlignment: Text.AlignRight
+                                                        Layout.preferredWidth: 56
+                                                    }
+                                                }
+                                            }
+
+                                            ActionButton {
+                                                label: "Cancel"
+                                                fill: root.cDim
+                                                textColor: root.cFg
+                                                height: 32
+                                                Layout.preferredWidth: 96
+                                                onClicked: root.cancelOperation(dlPanel.op)
+                                            }
+                                        }
+                                    }
+                                }
+
                                 // Developer / licence / homepage / identifier on one line. These are
                                 // reference details, not headline numbers, so they get a strip rather
                                 // than a panel of their own.
@@ -4213,6 +4495,8 @@ ShellRoot {
                                                 // action/source/state breadcrumb.
                                                 text: opRow.op.state === "failed"
                                                     ? root.operationProblem(opRow.op)
+                                                    : opRow.op.state === "downloading" && root.hasTransfer(opRow.op)
+                                                    ? root.transferLine(opRow.op)
                                                     : opRow.op.action + " · " + root.sourceLabel(root.operationSource(opRow.op.source)) + " · " + opRow.op.state
                                                 color: opRow.op.state === "failed" ? root.cRed : root.cMuted
                                                 font.family: root.fontMono
@@ -4224,7 +4508,7 @@ ShellRoot {
 
                                             ProgressRail {
                                                 visible: !opRow.terminal
-                                                percent: opRow.op.percent
+                                                percent: root.downloadPercent(opRow.op)
                                                 // Pending and resolving have no
                                                 // measurable progress yet; a bar
                                                 // pinned at 0 reads as stuck.
@@ -4237,7 +4521,7 @@ ShellRoot {
 
                                             Label {
                                                 visible: !opRow.terminal
-                                                text: opRow.op.percent > 0 ? opRow.op.percent + "%" : "··"
+                                                text: opRow.op.percent > 0 ? root.downloadPercent(opRow.op) + "%" : "··"
                                                 color: root.cGreen
                                                 font.family: root.fontMono
                                                 font.pixelSize: 11

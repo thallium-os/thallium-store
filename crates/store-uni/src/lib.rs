@@ -9,7 +9,7 @@ pub use backends::appimage_local::{inspect as inspect_appimage, Inspection as Ap
 pub use backends::StagePermits;
 
 use serde::{Deserialize, Serialize};
-use store_core::{OperationAction, OperationState, SourceKind, Transfer};
+use store_core::{OperationAction, OperationState, SourceKind, Transfer, TransferPart};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
@@ -161,7 +161,76 @@ async fn run_fake(
                 transfer: None,
             }))
             .await;
+        if state == OperationState::Downloading
+            && action != OperationAction::Remove
+            && !fake_transfer(app_name, &tx, &token).await
+        {
+            return;
+        }
     }
+}
+
+/// A Flatpak-shaped download (runtime, GL extension, app) at a steady
+/// 40 MB/s, so fake mode exercises byte progress and the per-part ring.
+/// Returns false when cancelled.
+async fn fake_transfer(
+    app_name: &str,
+    tx: &mpsc::Sender<Result<UniProgress, String>>,
+    token: &CancellationToken,
+) -> bool {
+    const SPEED: u64 = 40_000_000;
+    const TICK_MS: u64 = 400;
+    let sizes = [
+        ("org.freedesktop.Platform", 210_000_000),
+        ("org.freedesktop.Platform.GL.default", 140_000_000),
+        (app_name, 137_000_000),
+    ];
+    let total: u64 = sizes.iter().map(|(_, size)| size).sum();
+    let mut done = 0;
+    while done < total {
+        tokio::select! {
+            _ = sleep(Duration::from_millis(TICK_MS)) => {}
+            _ = token.cancelled() => {
+                let _ = tx
+                    .send(Ok(UniProgress {
+                        state: OperationState::Cancelled,
+                        percent: 0,
+                        message: format!("Cancelled {app_name}"),
+                        transfer: None,
+                    }))
+                    .await;
+                return false;
+            }
+        }
+        done = (done + SPEED * TICK_MS / 1000).min(total);
+        let mut before = 0;
+        let parts = sizes
+            .iter()
+            .map(|(name, size)| {
+                let part_done = done.saturating_sub(before).min(*size);
+                before += size;
+                TransferPart {
+                    name: name.to_string(),
+                    bytes_done: part_done,
+                    bytes_total: *size,
+                }
+            })
+            .collect();
+        let _ = tx
+            .send(Ok(UniProgress {
+                state: OperationState::Downloading,
+                percent: (35 + done * 35 / total) as u8,
+                message: format!("Downloading {app_name}"),
+                transfer: Some(Transfer {
+                    bytes_done: done,
+                    bytes_total: total,
+                    bytes_per_sec: SPEED,
+                    parts,
+                }),
+            }))
+            .await;
+    }
+    true
 }
 
 #[cfg(test)]
