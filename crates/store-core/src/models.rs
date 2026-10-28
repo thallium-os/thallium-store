@@ -153,8 +153,32 @@ pub struct Operation {
     pub state: OperationState,
     pub percent: u8,
     pub message: String,
+    /// Byte-level progress while something is downloading. Absent for
+    /// backends that only report a percentage and for rows written before
+    /// this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<Transfer>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Bytes moved so far. `bytes_total` is 0 when the size is not known yet.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct Transfer {
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub bytes_per_sec: u64,
+    /// The separately fetched pieces, in fetch order. Flatpak pulls a ref per
+    /// runtime, extension and app; a single-file download leaves this empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<TransferPart>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct TransferPart {
+    pub name: String,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

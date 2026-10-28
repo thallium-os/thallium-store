@@ -6,13 +6,13 @@
 //! registry. Removal deletes the file, desktop entry and registry row.
 
 use super::download::download;
-use super::{emit, fail, ProgressSender};
+use super::{emit, emit_transfer, fail, ProgressSender};
 use crate::registry;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use store_core::{OperationAction, OperationState};
+use store_core::{OperationAction, OperationState, Transfer};
 use tokio::sync::Semaphore;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
@@ -208,6 +208,7 @@ fn spawn_progress_ticker(
     span: u8,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let mut rate = Rate::default();
         loop {
             sleep(Duration::from_millis(200)).await;
             let total = total.load(Ordering::Relaxed);
@@ -217,15 +218,44 @@ fn spawn_progress_ticker(
                 None => base,
             };
             let mib = done as f64 / (1024.0 * 1024.0);
-            emit(
+            emit_transfer(
                 &tx,
                 OperationState::Downloading,
                 percent,
                 format!("Downloaded {mib:.1} MiB"),
+                Transfer {
+                    bytes_done: done,
+                    bytes_total: total,
+                    bytes_per_sec: rate.sample(done, 0.2),
+                    parts: Vec::new(),
+                },
             )
             .await;
         }
     })
+}
+
+/// Download speed smoothed over the last few seconds, so the speed and the
+/// time left the UI derives from it do not jump on every tick.
+#[derive(Default)]
+struct Rate {
+    last: u64,
+    smoothed: f64,
+}
+
+impl Rate {
+    /// Feed the byte counter after `secs` seconds; returns bytes per second.
+    fn sample(&mut self, done: u64, secs: f64) -> u64 {
+        let instant = done.saturating_sub(self.last) as f64 / secs;
+        self.last = done;
+        // ~2 s time constant at a 200 ms tick.
+        self.smoothed = if self.smoothed == 0.0 {
+            instant
+        } else {
+            self.smoothed * 0.9 + instant * 0.1
+        };
+        self.smoothed as u64
+    }
 }
 
 pub(super) fn sanitize(name: &str) -> String {
@@ -275,4 +305,17 @@ pub(super) fn spawn_ticker(
     span: u8,
 ) -> tokio::task::JoinHandle<()> {
     spawn_progress_ticker(tx, done, total, base, span)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_smooths_bursts() {
+        let mut rate = Rate::default();
+        assert_eq!(rate.sample(2_000_000, 0.2), 10_000_000);
+        // A stalled tick only pulls the estimate down a tenth of the way.
+        assert_eq!(rate.sample(2_000_000, 0.2), 9_000_000);
+    }
 }

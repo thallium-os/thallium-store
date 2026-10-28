@@ -15,7 +15,7 @@ mod github;
 
 use crate::UniProgress;
 use std::sync::Arc;
-use store_core::{OperationAction, OperationState, SourceKind};
+use store_core::{OperationAction, OperationState, SourceKind, Transfer};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -100,6 +100,25 @@ pub(crate) async fn emit(
             state,
             percent,
             message: message.into(),
+            transfer: None,
+        }))
+        .await;
+}
+
+/// Emit a progress event that carries byte counts.
+pub(crate) async fn emit_transfer(
+    tx: &ProgressSender,
+    state: OperationState,
+    percent: u8,
+    message: impl Into<String>,
+    transfer: Transfer,
+) {
+    let _ = tx
+        .send(Ok(UniProgress {
+            state,
+            percent,
+            message: message.into(),
+            transfer: Some(transfer),
         }))
         .await;
 }

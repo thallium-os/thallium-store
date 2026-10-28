@@ -1,3 +1,5 @@
+mod settings;
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -107,22 +109,6 @@ fn str_param<'a>(params: &'a Value, key: &str) -> Result<&'a str> {
 
 fn source_param(params: &Value) -> Result<store_uni::sources::SourceId> {
     store_uni::sources::SourceId::parse(str_param(params, "source")?)
-}
-
-fn load_settings() -> Value {
-    std::fs::read_to_string(settings_path())
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| json!({}))
-}
-
-fn save_settings(settings: &Value) -> Result<()> {
-    let path = settings_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, serde_json::to_string_pretty(settings)?)?;
-    Ok(())
 }
 
 fn icon_cache_info() -> Value {
@@ -366,18 +352,9 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
             "protocolVersion": 1,
             "fakeUni": state.fake_uni
         })),
-        "settings.get" => Ok(json!({ "settings": load_settings() })),
+        "settings.get" => Ok(json!({ "settings": settings::load(&settings_path()) })),
         "settings.set" => {
-            let mut settings = load_settings();
-            if let (Some(target), Some(patch)) =
-                (settings.as_object_mut(), request.params.as_object())
-            {
-                for (key, value) in patch {
-                    target.insert(key.clone(), value.clone());
-                }
-            }
-            save_settings(&settings)?;
-            Ok(json!({ "settings": settings }))
+            Ok(json!({ "settings": settings::apply(&settings_path(), &request.params)? }))
         }
         "sources.list" => store_uni::sources::list().await,
         "sources.probe" => store_uni::sources::probe(source_param(&request.params)?).await,
@@ -699,6 +676,7 @@ async fn enqueue_operation(params: Value, state: AppState) -> Result<Value> {
         state: OperationState::Pending,
         percent: 0,
         message: "Queued".to_string(),
+        transfer: None,
         created_at: now,
         updated_at: now,
     };
@@ -768,6 +746,12 @@ async fn run_operation(
                 operation.state = progress.state;
                 operation.percent = progress.percent;
                 operation.message = progress.message;
+                // Events without byte counts (install and finalize steps)
+                // keep the last transfer, so the UI's totals do not blank out
+                // between the download finishing and the install starting.
+                if progress.transfer.is_some() {
+                    operation.transfer = progress.transfer;
+                }
             }
             Err(message) => {
                 operation.state = OperationState::Failed;

@@ -9,7 +9,7 @@ pub use backends::appimage_local::{inspect as inspect_appimage, Inspection as Ap
 pub use backends::StagePermits;
 
 use serde::{Deserialize, Serialize};
-use store_core::{OperationAction, OperationState, SourceKind};
+use store_core::{OperationAction, OperationState, SourceKind, Transfer};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
@@ -24,6 +24,8 @@ pub struct UniProgress {
     pub state: OperationState,
     pub percent: u8,
     pub message: String,
+    #[serde(default)]
+    pub transfer: Option<Transfer>,
 }
 
 /// Native backend/privilege readiness reported by `system.health`.
@@ -145,6 +147,7 @@ async fn run_fake(
                         state: OperationState::Cancelled,
                         percent,
                         message: format!("Cancelled {app_name}"),
+                        transfer: None,
                     }))
                     .await;
                 return;
@@ -155,6 +158,7 @@ async fn run_fake(
                 state,
                 percent,
                 message: format!("{verb} {app_name}: {message}"),
+                transfer: None,
             }))
             .await;
     }
