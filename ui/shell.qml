@@ -2,6 +2,7 @@ import Quickshell
 import Quickshell.Io
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import QtQuick.Layouts
 
 ShellRoot {
@@ -74,6 +75,120 @@ ShellRoot {
     property string activeSource: ""
     property bool setupOpen: false
     property int setupStep: 0
+    // First-run setup: welcome, then every settings page grouped into steps,
+    // then done. Pages render through buildPageFor, so new settings show up
+    // here without touching the setup.
+    readonly property var setupSteps: [
+        { title: "Look and privacy", desc: "Where the store opens. Nothing you do here leaves this computer.", pages: ["interface", "general"],
+          presets: [
+            { label: "Discover", note: "Open on Home with picks and collections.", lines: ["Opens on Home"], patch: { default_tab: "discover" } },
+            { label: "My apps", note: "Open on what is already installed.", lines: ["Opens on Apps"], patch: { default_tab: "apps" } },
+            { label: "Updates", note: "Open on what needs updating.", lines: ["Opens on Updates"], patch: { default_tab: "updates" } }] },
+        { title: "Updates", desc: "When to check, and what may install on its own.", pages: ["autoupd", "updates"],
+          presets: [
+            { label: "Hands-off", note: "Stay current without thinking about it.", lines: ["Checks daily", "Security fixes and Flatpaks install themselves"],
+              patch: { auto_check: true, check_frequency: "daily", notify_updates: true, auto_install: { apt: "security", flathub: "all", github: "off", appimage: "off" } } },
+            { label: "Ask me first", note: "Find updates, wait for a yes.", lines: ["Checks daily", "Nothing installs on its own"],
+              patch: { auto_check: true, check_frequency: "daily", notify_updates: true, auto_install: { apt: "off", flathub: "off", github: "off", appimage: "off" } } },
+            { label: "Manual", note: "Only look when you open Updates.", lines: ["No background checks", "No notifications"],
+              patch: { auto_check: false, notify_updates: false, auto_install: { apt: "off", flathub: "off", github: "off", appimage: "off" } } }] },
+        { title: "Sources", desc: "Where apps come from. On a slow Flathub, run Find fastest server below.", pages: ["sources", "src_system", "src_flathub", "src_github", "src_appimage"],
+          presets: [
+            { label: "Everything", note: "Every app the sources offer.", lines: ["Proprietary apps shown"], patch: { show_proprietary: true } },
+            { label: "Open source only", note: "Hide apps without a free licence.", lines: ["Proprietary apps hidden"], patch: { show_proprietary: false } }] },
+        { title: "Your own sources", desc: "Add APT repositories, Flatpak remotes and mirrors, or install a .deb or AppImage file. Optional.", pages: ["repos", "mirrors"], presets: [] },
+        { title: "Downloads", desc: "Pick what your connection is like.", pages: ["downloads"],
+          presets: [
+            { label: "Fast", note: "Fibre or a good Wi-Fi.", lines: ["4 downloads at once", "No speed limit"],
+              patch: { max_concurrent_downloads: 4, bandwidth_limit_kbps: 0, retries: 3, timeout_secs: 30 }, parallel: false },
+            { label: "Slow or unreliable", note: "Drops, stalls, congested routes.", lines: ["8 connections per Flathub file", "5 retries, 60 s timeout"],
+              patch: { max_concurrent_downloads: 2, bandwidth_limit_kbps: 0, retries: 5, timeout_secs: 60 }, parallel: true },
+            { label: "Metered or shared", note: "Hotspot or a busy home line.", lines: ["One download at a time", "Capped at 1 MB/s"],
+              patch: { max_concurrent_downloads: 1, bandwidth_limit_kbps: 1024, retries: 3, timeout_secs: 30 }, parallel: false }] },
+        { title: "Installing", desc: "How installs behave and how careful the store is.", pages: ["defaults", "safety", "cleanup"],
+          presets: [
+            { label: "Careful", note: "Asks before anything unusual.", lines: ["Flatpaks for you only", "Warns on unverified apps", "Shows Flatpak permissions"],
+              patch: { flatpak_scope: "user", menu_shortcuts: true, warn_unverified: true, review_permissions: true, remove_unused_deps: true, remove_unused_runtimes: true } },
+            { label: "Quiet", note: "Fewer questions, same cleanup.", lines: ["Flatpaks for you only", "No extra warnings"],
+              patch: { flatpak_scope: "user", menu_shortcuts: true, warn_unverified: false, review_permissions: false, remove_unused_deps: true, remove_unused_runtimes: true } },
+            { label: "Whole system", note: "Shared with every user here.", lines: ["Flatpaks system-wide", "Asks for your password"],
+              patch: { flatpak_scope: "system", menu_shortcuts: true, warn_unverified: true, review_permissions: true, remove_unused_deps: true, remove_unused_runtimes: true } }] },
+        { title: "Storage and logs", desc: "How much disk the store may keep.", pages: ["storage", "logs"],
+          presets: [
+            { label: "Lean", note: "Delete installers once used.", lines: ["Cache up to 1 GB", "Downloads removed after install"],
+              patch: { cache_limit_mb: 1000, keep_downloads: false } },
+            { label: "Keep installers", note: "Reinstall offline later.", lines: ["Cache up to 5 GB", "Downloads kept"],
+              patch: { cache_limit_mb: 5000, keep_downloads: true } }] }
+    ]
+    readonly property int setupLast: setupSteps.length + 1
+    // Furthest step reached; the rail only jumps to steps already seen.
+    property int setupReached: 0
+    // Opened again from Settings, so it may be closed without finishing.
+    property bool setupRerun: false
+    property bool setupFine: false
+
+    function setupSourcesNote() {
+        const remotes = replies["remotes.list"]
+        const custom = remotes ? remotes.apt.filter(r => r.custom).length : 0
+        return custom > 0 ? custom + " APT repositor" + (custom === 1 ? "y" : "ies") + " added" : "nothing added"
+    }
+
+    // Whether every value a preset sets is the current one.
+    function presetOn(preset) {
+        const walk = (obj, prefix) => Object.keys(obj).every(k => {
+            const v = obj[k]
+            return v !== null && typeof v === "object" ? walk(v, prefix + k + ".") : settingsGet(prefix + k) === v
+        })
+        if (preset.parallel !== undefined) {
+            const flathub = sourcesList.find(x => x.id === "flathub")
+            if (flathub && (flathub.parallel === true) !== preset.parallel)
+                return false
+        }
+        return walk(preset.patch, "")
+    }
+
+    // Several settings in one settings.set, merged deep like settingsPut.
+    function settingsApply(patch, parallel) {
+        const merge = (into, from) => {
+            for (const k of Object.keys(from)) {
+                const v = from[k]
+                if (v !== null && typeof v === "object") {
+                    if (typeof into[k] !== "object" || into[k] === null)
+                        into[k] = {}
+                    merge(into[k], v)
+                } else {
+                    into[k] = v
+                }
+            }
+        }
+        const next = JSON.parse(JSON.stringify(storeSettings))
+        merge(next, patch)
+        storeSettings = next
+        request("settings.set", patch)
+        const flathub = sourcesList.find(x => x.id === "flathub")
+        if (parallel !== undefined && flathub && (flathub.parallel === true) !== parallel)
+            request("sources.setParallel", { source: "flathub", enabled: parallel })
+    }
+    onSetupStepChanged: {
+        setupReached = Math.max(setupReached, setupStep)
+        setupFine = false
+        if (setupOpen && setupStep === setupLast) {
+            // The review reads presets (Downloads needs the Flathub entry) and added repos.
+            request("sources.list", {})
+            request("remotes.list", {})
+        }
+        if (!setupOpen || setupStep < 1 || setupStep > setupSteps.length)
+            return
+        // The source pages share one sources.list answer; ask once.
+        const asked = {}
+        for (const id of setupSteps[setupStep - 1].pages) {
+            const key = id === "sources" || id === "mirrors" || id === "downloads" || id.indexOf("src_") === 0 ? "sources" : id
+            if (!asked[key]) {
+                asked[key] = true
+                settingsLoad(id)
+            }
+        }
+    }
     // The Apps view is two pages behind one tab: what is on this machine, and
     // what is out of date. They were stacked on one screen, where the updates
     // section had to be capped at two rows so it did not bury the app grid --
@@ -89,6 +204,528 @@ ShellRoot {
         const stamp = Qt.formatDateTime(new Date(), "HH:mm:ss")
         const next = [stamp + "  " + msg].concat(root.storeLog)
         root.storeLog = next.slice(0, 120)
+    }
+
+    // ---- Settings hubs ---------------------------------------------------
+    property string settingsHub: "general"
+    property string settingsSub: ""
+    // How the page change animates: "u" hub switch, "r" into a sub-page,
+    // "l" back out of one.
+    property string settingsDir: "u"
+    // "reset", "flatpak" or "apt"; empty means no sheet.
+    property string settingsSheet: ""
+    // Last answer per RPC for the pages that list backend data, and the error
+    // text when a method failed. A backend build without a method answers with
+    // an error, which each page turns into a line instead of an empty screen.
+    property var replies: ({})
+    property var replyErrors: ({})
+    property bool defaultTabApplied: false
+    readonly property var settingsHubs: [
+        { id: "general", label: "GENERAL", hint: "About, interface, privacy" },
+        { id: "updates", label: "UPDATES", hint: "Checking and auto-install" },
+        { id: "sources", label: "SOURCES", hint: "APT, Flathub, GitHub, AppImage" },
+        { id: "installs", label: "INSTALLS & STORAGE", hint: "Defaults, cache, downloads" },
+        { id: "maintenance", label: "MAINTENANCE", hint: "Refresh, repair, reset" }
+    ]
+    readonly property var settingsParents: ({
+        about: "general", interface: "general", setup: "general",
+        autoupd: "updates", held: "updates",
+        src_system: "sources", src_flathub: "sources", src_github: "sources", src_appimage: "sources",
+        repos: "sources", mirrors: "sources",
+        defaults: "installs", cleanup: "installs", storage: "installs", downloads: "installs", safety: "installs",
+        repair: "maintenance", export: "maintenance", logs: "maintenance"
+    })
+    // Backend answers that only the settings pages read. Everything else keeps
+    // going through the shape-based dispatch in the rpc handler.
+    readonly property var replyMethods: [
+        "updates.status", "updates.checkNow", "holds.list", "holds.set",
+        "remotes.list", "remotes.addFlatpak", "remotes.removeFlatpak", "remotes.addApt", "remotes.removeApt",
+        "system.storageInfo", "system.clearDownloadCache", "system.listsAge",
+        "maintenance.refreshLists", "maintenance.repairFlatpak", "maintenance.fixApt",
+        "apps.export", "apps.importPreview", "apps.importApply", "logs.info",
+        "flatpak.permissions", "operations.pause", "operations.resume"
+    ]
+    readonly property var settingsPage: buildSettingsPage()
+
+    function settingsGet(path, fallback) {
+        let v = storeSettings
+        const parts = path.split(".")
+        for (let i = 0; i < parts.length; i++) {
+            if (v === undefined || v === null)
+                return fallback
+            v = v[parts[i]]
+        }
+        return v === undefined || v === null ? fallback : v
+    }
+
+    // Shows the new value at once and sends the nested patch; the backend's
+    // answer replaces the local copy, so a rejected value snaps back.
+    function settingsPut(path, value) {
+        const parts = path.split(".")
+        const patch = {}
+        const next = JSON.parse(JSON.stringify(storeSettings))
+        let p = patch, n = next
+        for (let i = 0; i < parts.length - 1; i++) {
+            p[parts[i]] = {}
+            p = p[parts[i]]
+            if (typeof n[parts[i]] !== "object" || n[parts[i]] === null)
+                n[parts[i]] = {}
+            n = n[parts[i]]
+        }
+        p[parts[parts.length - 1]] = value
+        n[parts[parts.length - 1]] = value
+        storeSettings = next
+        request("settings.set", patch)
+    }
+
+    function setReply(method, value, error) {
+        const r = Object.assign({}, replies)
+        const e = Object.assign({}, replyErrors)
+        if (error) {
+            e[method] = error
+        } else {
+            r[method] = value
+            delete e[method]
+        }
+        replies = r
+        replyErrors = e
+    }
+
+    function clearReply(method) {
+        const r = Object.assign({}, replies)
+        const e = Object.assign({}, replyErrors)
+        delete r[method]
+        delete e[method]
+        replies = r
+        replyErrors = e
+    }
+
+    // Follow-up fetches once a settings action has landed.
+    function afterReply(method) {
+        if (method === "holds.set")
+            request("holds.list", {})
+        else if (method.indexOf("remotes.") === 0 && method !== "remotes.list")
+            request("remotes.list", {})
+        else if (method === "system.clearDownloadCache")
+            request("system.storageInfo", {})
+        else if (method === "maintenance.refreshLists")
+            request("system.listsAge", {})
+        else if (method === "updates.checkNow")
+            request("updates.list", {})
+        else if (method === "operations.pause" || method === "operations.resume")
+            request("operations.list", {})
+        else if (method === "apps.importApply") {
+            request("installed.list", {})
+            request("operations.list", {})
+        }
+    }
+
+    function agoLabel(seconds) {
+        if (seconds < 90)
+            return "just now"
+        const m = Math.round(seconds / 60)
+        if (m < 90)
+            return m + " min ago"
+        const h = Math.round(m / 60)
+        if (h < 48)
+            return h + " h ago"
+        return Math.round(h / 24) + " days ago"
+    }
+
+    function sizeOrDash(bytes) {
+        return bytes === undefined ? "—" : bytes > 0 ? formatBytes(bytes) : "0 B"
+    }
+
+    // Pages load their own data when opened, so nothing is fetched for a page
+    // nobody looks at.
+    function settingsLoad(pageId) {
+        const id = pageId || settingsSub || settingsHub
+        if (id === "updates") request("updates.status", {})
+        else if (id === "held") request("holds.list", {})
+        else if (id === "repos") request("remotes.list", {})
+        else if (id === "logs") request("logs.info", {})
+        else if (id === "maintenance") request("system.listsAge", {})
+        else if (id === "storage" || id === "installs") request("system.storageInfo", {})
+        else if (id === "sources" || id.indexOf("src_") === 0 || id === "mirrors" || id === "downloads")
+            request("sources.list", {})
+    }
+
+    function settingsGo(hub, sub, dir) {
+        settingsDir = dir
+        settingsHub = hub
+        settingsSub = sub
+        settingsLoad()
+    }
+
+    // Opening Settings at a page from elsewhere in the store (a failed row's
+    // fix button).
+    function openSettings(hub, sub) {
+        activeView = "settings"
+        settingsGo(hub, sub, "r")
+    }
+
+    function applyDefaultTab(tab) {
+        if (tab === "apps" || tab === "updates") {
+            appsTab = tab
+            activeView = "installed"
+        }
+    }
+
+    function settingsToggle(row, value) {
+        if (row.act === "parallel")
+            request("sources.setParallel", { source: "flathub", enabled: value })
+        else
+            settingsPut(row.key, value)
+    }
+
+    function settingsRun(act) {
+        const at = act.indexOf(":")
+        const verb = at < 0 ? act : act.substring(0, at)
+        const arg = at < 0 ? "" : act.substring(at + 1)
+        if (verb === "go") {
+            settingsGo(settingsParents[arg] || arg, settingsParents[arg] ? arg : "", "r")
+        } else if (verb === "back") {
+            settingsGo(settingsHub, "", "l")
+        } else if (verb === "checkNow") {
+            request("updates.checkNow", {})
+        } else if (verb === "refreshLists") {
+            request("maintenance.refreshLists", {})
+        } else if (verb === "unhold") {
+            const item = (replies["holds.list"] || { items: [] }).items[Number(arg)]
+            if (item)
+                request("holds.set", { source: item.source, packageId: item.package_id, held: false })
+        } else if (verb === "probe") {
+            setSourceKey("sourcesBusy", arg, true)
+            setSourceKey("sourcesErrors", arg, null)
+            request("sources.probe", { source: arg })
+        } else if (verb === "findNode") {
+            setSourceKey("sourcesScanning", arg, true)
+            setSourceKey("sourcesErrors", arg, null)
+            request("sources.findNode", { source: arg })
+        } else if (verb === "clearNode") {
+            request("sources.clearNode", { source: arg })
+        } else if (verb === "mirror") {
+            const parts = arg.split("/")
+            request("sources.setActive", { source: parts[0], mirrorId: parts[1] })
+        } else if (verb === "rmMirror") {
+            const parts = arg.split("/")
+            request("sources.removeMirror", { source: parts[0], mirrorId: parts[1] })
+        } else if (verb === "rmApt") {
+            const item = ((replies["remotes.list"] || { apt: [] }).apt || [])[Number(arg)]
+            if (item)
+                request("remotes.removeApt", { file: item.file })
+        } else if (verb === "rmRemote") {
+            const item = ((replies["remotes.list"] || { flatpak: [] }).flatpak || [])[Number(arg)]
+            if (item)
+                request("remotes.removeFlatpak", { name: item.name, scope: item.scope })
+        } else if (verb === "clearIcons") {
+            request("system.clearIconCache", {})
+            request("system.storageInfo", {})
+        } else if (verb === "clearDownloads") {
+            request("system.clearDownloadCache", {})
+        } else if (verb === "repair") {
+            const method = arg === "flatpak" ? "maintenance.repairFlatpak" : "maintenance.fixApt"
+            clearReply(method)
+            settingsSheet = arg
+            request(method, {})
+        } else if (verb === "sheet") {
+            settingsSheet = arg
+        } else if (verb === "reset") {
+            settingsSheet = ""
+            request("settings.reset", {})
+        } else if (verb === "export") {
+            request("apps.export", {})
+        } else if (verb === "openLogs") {
+            const dir = (replies["logs.info"] || {}).dir
+            if (dir)
+                Qt.openUrlExternally("file://" + dir)
+        } else if (verb === "walkthrough") {
+            setupRerun = true
+            setupReached = setupLast
+            setupStep = 0
+            setupOpen = true
+        }
+    }
+
+    // One page of the settings hubs as data: title, banner, groups of rows and
+    // an optional form. The view renders whatever this returns, so a row's
+    // look and its backend key live in one place.
+    function buildSettingsPage() {
+        return buildPageFor(settingsSub || settingsHub)
+    }
+
+    // One settings page by id; Settings and the first-run setup both draw from it.
+    function buildPageFor(id) {
+        const get = (key, fallback) => settingsGet(key, fallback)
+        const word = list => list.map(w => ({ label: w, value: w.toLowerCase() }))
+        const num = list => list.map(n => ({ label: String(n), value: n }))
+        const cap = s => s.charAt(0).toUpperCase() + s.slice(1)
+        const tog = (key, label, note) => ({ kind: "toggle", key: key, on: get(key, false) === true, label: label, note: note })
+        const choice = (key, label, opts, note) => ({ kind: "choice", key: key, cur: get(key), opts: opts, label: label, note: note })
+        const nav = (to, label, value, note) => ({ kind: "nav", act: "go:" + to, label: label, value: value, note: note })
+        const info = (label, value, note, extra) => Object.assign({ kind: "info", label: label, value: value, note: note }, extra || {})
+        const btn = (label, text, act, note, extra) => Object.assign({ kind: "btn", label: label, btn: text, btnAct: act, note: note }, extra || {})
+        const unavailable = method => replyErrors[method] !== undefined
+
+        const FREQ = word(["DAILY", "WEEKLY"])
+        const TAB = word(["DISCOVER", "APPS", "UPDATES"])
+        const SCOPE = word(["USER", "SYSTEM"])
+        const CACHE = [{ label: "1 GB", value: 1000 }, { label: "5 GB", value: 5000 }, { label: "NONE", value: 0 }]
+        const BANDWIDTH = [{ label: "NONE", value: 0 }, { label: "5 MB/S", value: 5120 }, { label: "1 MB/S", value: 1024 }]
+        const TIMEOUT = [{ label: "15 S", value: 15 }, { label: "30 S", value: 30 }, { label: "60 S", value: 60 }]
+
+        const sources = sourcesList
+        const entryOf = id => sources.find(s => s.id === id)
+        const flathub = entryOf("flathub")
+        const storage = replies["system.storageInfo"]
+
+        // One download source's page: its mirrors, the Fastly pin where it
+        // applies, and the pre-release channel the settings carry for it.
+        const sourcePage = (srcId, title, channelKey, channelLabel, channelNote) => {
+            const entry = entryOf(srcId)
+            const groups = []
+            if (entry) {
+                const probes = sourcesProbe[srcId] || {}
+                const fastest = fastestMirror(srcId)
+                const rows = entry.mirrors.map(m => {
+                    const probe = probes[m.id]
+                    const active = entry.active === m.id
+                    const parts = []
+                    if (probe)
+                        parts.push(probe.ok ? formatSpeed(probe.bytesPerSec || 0).toUpperCase() : "FAILED")
+                    if (fastest === m.id)
+                        parts.push("FASTEST")
+                    if (active)
+                        parts.push("IN USE")
+                    return {
+                        kind: "info", label: m.name, note: m.url === "" ? "direct" : m.url,
+                        value: parts.join("  ·  "), hot: active,
+                        act: active ? "" : "mirror:" + srcId + "/" + m.id,
+                        btn: m.builtin === false ? "REMOVE" : "", btnAct: "rmMirror:" + srcId + "/" + m.id,
+                        danger: true, confirm: true
+                    }
+                })
+                const busy = sourcesBusy[srcId] === true
+                rows.push(btn("Test mirror speed", busy ? "TESTING…" : "TEST SPEED", "probe:" + srcId,
+                              "Times a small download from each mirror.", { disabled: busy }))
+                groups.push({
+                    header: "MIRROR", rows: rows,
+                    footer: sourcesErrors[srcId] || (entry.needsAdmin ? "Changing this asks for your password." : "")
+                })
+                if (entry.nodeHost !== undefined) {
+                    const scanning = sourcesScanning[srcId] === true
+                    const found = sourcesNode[srcId]
+                    const nodeRows = [
+                        info(entry.node ? "Pinned to " + entry.node : "Not pinned", entry.node ? "PINNED" : "",
+                             entry.node && found && found.ip === entry.node
+                                 ? formatSpeed(found.bytesPerSec) + ", best of " + found.tested : "", { hot: !!entry.node }),
+                        btn("Find fastest server", scanning ? "SCANNING…" : entry.node ? "FIND AGAIN" : "FIND", "findNode:" + srcId,
+                            scanning ? "Testing Fastly servers from your connection. Takes about 30 seconds."
+                                     : entry.nodeHost + " is on Fastly, whose nearest server can be congested on some ISPs.",
+                            { disabled: scanning })
+                    ]
+                    if (entry.node && !scanning)
+                        nodeRows.push(btn("Remove the pin", "UNPIN", "clearNode:" + srcId, "", { danger: true }))
+                    groups.push({ header: "FASTEST SERVER", rows: nodeRows,
+                                  footer: "Writes a pinned entry to /etc/hosts. Changing it asks for your password." })
+                }
+            }
+            if (channelKey)
+                groups.push({ header: "CHANNELS", rows: [tog(channelKey, channelLabel, channelNote)] })
+            return {
+                hub: "sources", title: title, desc: "Mirror and channels for " + title + ".", groups: groups
+            }
+        }
+
+        switch (id) {
+        case "general":
+            return { hub: "general", title: "General", desc: "About the store, how it looks, and what it sends.", groups: [
+                { rows: [nav("about", "About", storeVersion || "—"),
+                         nav("interface", "Interface", cap(get("default_tab", "discover"))),
+                         nav("setup", "Setup")] },
+                { header: "PRIVACY", rows: [info("No data is sent", "NONE SENT", "Only apt, Flathub and latest.json are contacted. No usage or crash reports.")] }
+            ] }
+        case "updates": {
+            const st = replies["updates.status"]
+            const count = st ? st.count : updateItems.length
+            let when = "Not checked yet"
+            if (st && st.lastChecked)
+                when = "Last checked " + agoLabel(Math.max(0, (Date.now() - Date.parse(st.lastChecked)) / 1000))
+            else if (!st && updatesCheckedAt > 0)
+                when = "Apt lists " + updatesCheckedLabel()
+            const held = replies["holds.list"]
+            return { hub: "updates", title: "Updates", desc: "When the store checks, what it installs on its own, and what it leaves alone.",
+                banner: { tag: count + (count === 1 ? " UPDATE" : " UPDATES"), text: when, btn: "CHECK NOW", act: "checkNow" },
+                groups: [
+                    { rows: [nav("autoupd", "Automatic Updates",
+                                 get("auto_check", true) ? cap(get("check_frequency", "daily")) + (get("notify_updates", true) ? " · Notify" : "") : "Off"),
+                             nav("held", "Held Apps", held ? held.items.length + " held" : ""),
+                             tog("respect_metered", "Respect metered connections",
+                                 "Follows the metered flag on the network connection. Nothing downloads while it is set.")] },
+                    { header: "SYSTEM", rows: [info("System updates", "IN SETTINGS", "Settings › General › Software Update opens this page. One place controls updating.")] }
+                ] }
+        }
+        case "sources": {
+            const host = srcId => {
+                const e = entryOf(srcId)
+                const m = e ? e.mirrors.find(x => x.id === e.active) : null
+                return m && m.url ? originHost(m.url) : ""
+            }
+            const src = (to, key, label, note) => Object.assign(nav(to, label, "", note), { key: "sources." + key, on: get("sources." + key, true) === true })
+            return { hub: "sources", title: "Sources", desc: "Where apps come from. Turn a source off to hide its apps everywhere.", groups: [
+                { header: "SOURCES", rows: [
+                    src("src_system", "apt", "APT", "System packages" + (host("system") ? " · " + host("system") : "")),
+                    src("src_flathub", "flathub", "Flathub", flathub && flathub.node ? "Pinned to " + flathub.node : "Flatpak apps" + (host("flathub") ? " · " + host("flathub") : "")),
+                    src("src_github", "github", "GitHub", "Releases with checksums"),
+                    src("src_appimage", "appimage", "AppImage", "Local and GitHub AppImages")
+                ] },
+                { header: "MANAGE", rows: [
+                    nav("repos", "Repositories", replies["remotes.list"] ? replies["remotes.list"].apt.length + " APT · " + replies["remotes.list"].flatpak.length + " remote" : ""),
+                    nav("mirrors", "Custom Mirrors", String(sources.reduce((n, s) => n + s.mirrors.filter(m => m.builtin === false).length, 0))),
+                    tog("show_proprietary", "Show proprietary apps")
+                ] }
+            ] }
+        }
+        case "installs":
+            return { hub: "installs", title: "Installs & Storage", desc: "How apps are installed, cleaned up and downloaded.", groups: [
+                { rows: [nav("defaults", "Install Defaults", cap(get("flatpak_scope", "user"))),
+                         nav("cleanup", "Cleanup", "After uninstall"),
+                         nav("storage", "Storage", storage ? formatBytes((storage.iconBytes || 0) + (storage.downloadBytes || 0)) : ""),
+                         nav("downloads", "Downloads", get("max_concurrent_downloads", 2) + " at once"),
+                         nav("safety", "Content & Safety")] }
+            ] }
+        case "maintenance": {
+            const age = replies["system.listsAge"]
+            return { hub: "maintenance", title: "Maintenance", desc: "Refresh, repair, export and reset.", groups: [
+                { rows: [btn("Refresh package lists", "REFRESH", "refreshLists",
+                             age && age.ageSeconds !== null && age.ageSeconds !== undefined ? "Lists " + agoLabel(age.ageSeconds).replace(" ago", " old") : unavailable("maintenance.refreshLists") ? "Not available in this build." : ""),
+                         nav("repair", "Repair"), nav("export", "Installed Apps", "Export · Import"),
+                         nav("logs", "Logs", get("debug_logging", false) ? "Debug on" : "")] },
+                { rows: [btn("Reset all settings", "RESET", "sheet:reset", "Puts every setting back to its default. Installed apps stay.", { danger: true, dangerLabel: true })] }
+            ] }
+        }
+        case "about":
+            return { hub: "general", title: "About", desc: "Read-only.", groups: [
+                { rows: [info("Version", storeVersion || "—"), info("Backend", backendReadiness()), info("Sources", "APT · FLATHUB · GITHUB · APPIMAGE")] }
+            ] }
+        case "interface":
+            return { hub: "general", title: "Interface", desc: "What the store shows when it opens.", groups: [
+                { rows: [choice("default_tab", "Default tab on launch", TAB),
+                         tog("source_badges", "Source badge on app cards", "Shows APT, FLATHUB or GITHUB on each card.")] }
+            ] }
+        case "setup":
+            return { hub: "general", title: "Setup", desc: "The first-launch walkthrough.", groups: [
+                { rows: [btn("First-launch walkthrough", "RUN AGAIN", "walkthrough", "Replay the welcome tour and source overview.")] }
+            ] }
+        case "autoupd":
+            return { hub: "updates", title: "Automatic Updates", desc: "Checking and installing, per source.", groups: [
+                { header: "CHECKING", rows: [tog("auto_check", "Check automatically"),
+                                              choice("check_frequency", "How often", FREQ),
+                                              tog("notify_updates", "Notify when updates are available")] },
+                { header: "INSTALL ON ITS OWN", footer: "Security only works where the source marks security updates, which today is APT.", rows: [
+                    choice("auto_install.apt", "APT", word(["OFF", "SECURITY", "ALL"])),
+                    choice("auto_install.flathub", "Flathub", word(["OFF", "ALL"])),
+                    choice("auto_install.github", "GitHub", word(["OFF", "ALL"])),
+                    choice("auto_install.appimage", "AppImage", word(["OFF", "ALL"]))] }
+            ] }
+        case "held": {
+            const held = replies["holds.list"]
+            return { hub: "updates", title: "Held Apps", desc: "Apps kept at their current version. Updates skip them.", groups: [
+                { footer: unavailable("holds.list") ? "Held apps are not available in this build."
+                                                    : held && held.items.length === 0 ? "Nothing is held." : "",
+                  rows: held ? held.items.map((h, i) => btn(h.name, "UNHOLD", "unhold:" + i,
+                                  "Held at " + (h.version || "current version") + " · " + sourceLabel(h.source))) : [] }
+            ] }
+        }
+        case "src_system":
+            return sourcePage("system", "APT", "", "", "")
+        case "src_flathub":
+            return sourcePage("flathub", "Flathub", "prerelease.flathub_beta", "Flathub Beta", "Offer beta builds where an app publishes them.")
+        case "src_github":
+            return sourcePage("github", "GitHub", "prerelease.github", "Pre-release versions", "Offer releases marked pre-release.")
+        case "src_appimage":
+            return sourcePage("appimage", "AppImage", "prerelease.appimage", "Pre-release versions", "")
+        case "repos": {
+            const remotes = replies["remotes.list"]
+            return { hub: "sources", title: "Repositories", desc: "APT repositories and Flatpak remotes the store reads from. Add your own below, or install a .deb or AppImage file.",
+                form: unavailable("remotes.list") ? "" : "remoteAdd",
+                groups: remotes ? [
+                    { header: "APT REPOSITORIES", rows: remotes.apt.map((r, i) => r.custom
+                                  ? btn(r.uri, "REMOVE", "rmApt:" + i, (r.suites || []).concat(r.components || []).join(" ")
+                                        + " · " + (r.signed ? "signed" : "unsigned") + " · added here", { danger: true, confirm: true })
+                                  : info(r.uri, r.signed ? "SIGNED" : "UNSIGNED",
+                                  (r.suites || []).concat(r.components || []).join(" "), { hot: r.signed })) },
+                    { header: "FLATPAK REMOTES", rows: remotes.flatpak.map((r, i) => btn(r.name, "REMOVE", "rmRemote:" + i,
+                                  r.url + " · " + r.scope, { danger: true, confirm: true })) }
+                ] : [{ footer: unavailable("remotes.list") ? "Repositories are not available in this build." : "", rows: [] }] }
+        }
+        case "mirrors": {
+            const rows = []
+            for (const s of sources)
+                for (const m of s.mirrors)
+                    if (m.builtin === false)
+                        rows.push(btn(m.name, "REMOVE", "rmMirror:" + s.id + "/" + m.id, m.url + " · " + s.name, { danger: true, confirm: true }))
+            return { hub: "sources", title: "Custom Mirrors", desc: "Extra places to fetch release files from.", form: "mirrorAdd",
+                groups: [{ footer: "Mirrors are only used for files GitHub publishes a checksum for. Each download is verified.",
+                           rows: rows.length > 0 ? rows : [info("No custom mirrors", "", "Add one below.")] }] }
+        }
+        case "defaults":
+            return { hub: "installs", title: "Install Defaults", desc: "Where new apps go.", groups: [
+                { rows: [choice("flatpak_scope", "Flatpak install scope", SCOPE, "System installs ask for your password."),
+                         tog("menu_shortcuts", "Create menu shortcuts", "Adds an application menu entry for installed AppImages.")] }
+            ] }
+        case "cleanup":
+            return { hub: "installs", title: "Cleanup", desc: "What goes away after an uninstall.", groups: [
+                { rows: [tog("remove_unused_deps", "Remove unused dependencies", "apt autoremove"),
+                         tog("remove_unused_runtimes", "Remove unused runtimes", "flatpak uninstall --unused")] }
+            ] }
+        case "storage":
+            return { hub: "installs", title: "Storage", desc: "Caches the store keeps on disk.", groups: [
+                { rows: [btn("Icon cache", "CLEAR", "clearIcons", "Icons load instantly, even offline.",
+                             { value: sizeOrDash(storage ? storage.iconBytes : cacheInfo.iconBytes), danger: true }),
+                         btn("Download cache", "CLEAR", "clearDownloads",
+                             unavailable("system.storageInfo") ? "Not available in this build." : "Debs and AppImages kept after install.",
+                             { value: sizeOrDash(storage ? storage.downloadBytes : undefined), danger: true, disabled: !storage }),
+                         choice("cache_limit_mb", "Cache size limit", CACHE),
+                         tog("keep_downloads", "Keep downloaded files after install")] }
+            ] }
+        case "downloads":
+            return { hub: "installs", title: "Downloads", desc: "Speed and reliability of downloads.", groups: [
+                { rows: (flathub ? [Object.assign(tog("", "Parallel connections", "Opens 8 connections instead of one. Helps on slow routes."),
+                                                  { act: "parallel", on: flathub.parallel === true })] : []).concat([
+                    choice("max_concurrent_downloads", "Downloads at once", num([1, 2, 4])),
+                    choice("bandwidth_limit_kbps", "Bandwidth limit", BANDWIDTH),
+                    choice("retries", "Retries", num([0, 3, 5])),
+                    choice("timeout_secs", "Timeout", TIMEOUT)]) },
+                { header: "PROXY", rows: [info("Using system proxy", "SYSTEM", "Change it in Settings › Connectivity › Proxy.")] }
+            ] }
+        case "safety":
+            return { hub: "installs", title: "Content & Safety", desc: "What the store checks before installing.", groups: [
+                { rows: [tog("warn_unverified", "Warn before unverified apps"),
+                         tog("review_permissions", "Review Flatpak permissions before install")] }
+            ] }
+        case "repair":
+            return { hub: "maintenance", title: "Repair", desc: "Fix broken installs. Output opens in a sheet.", groups: [
+                { rows: [btn("Repair Flatpak", "RUN", "repair:flatpak", "flatpak repair"),
+                         btn("Fix broken packages", "RUN", "repair:apt", "apt --fix-broken install")] }
+            ] }
+        case "export": {
+            const exp = replies["apps.export"]
+            return { hub: "maintenance", title: "Installed Apps", desc: "Move your app list to another machine.", form: "appsImport", groups: [
+                { rows: [btn("Export app list", "EXPORT", "export",
+                             exp ? "Saved " + exp.count + " app" + (exp.count === 1 ? "" : "s") + " to " + exp.path
+                                 : unavailable("apps.export") ? "Not available in this build." : "Saves every installed app and its source to a .json file.")] }
+            ] }
+        }
+        case "logs": {
+            const logs = replies["logs.info"]
+            return { hub: "maintenance", title: "Logs", desc: "For bug reports.", groups: [
+                { rows: [btn("Open logs", "OPEN", "openLogs", logs ? logs.dir : unavailable("logs.info") ? "Not available in this build." : "", { disabled: !logs }),
+                         tog("debug_logging", "Debug logging", "Writes every backend request. Turn off when done.")] }
+            ] }
+        }
+        }
+        return { hub: "general", title: "", desc: "", groups: [] }
     }
 
     // Thallium 81 design tokens — Everforest palette, retro sci-fi HUD grown
@@ -824,6 +1461,8 @@ ShellRoot {
     function operationProblem(operation) {
         if (!operation)
             return ""
+        if (operation.state === "failed" && operation.problem && operation.problem.title)
+            return operation.problem.title
         if (operation.state === "failed")
             return operation.message && operation.message.length > 0 ? "Problem: " + operation.message : "Problem: install failed without a detailed backend message."
         if (operation.state === "cancelled")
@@ -831,6 +1470,19 @@ ShellRoot {
         if (operation.state === "succeeded")
             return operation.action === "remove" ? "Completed: app was removed." : "Completed: app is installed."
         return operation.message || "Working"
+    }
+
+    // The extra button a failed row offers when retrying alone will not help.
+    function problemFixLabel(operation) {
+        const fix = operation && operation.problem ? operation.problem.fix : ""
+        return fix === "free_space" ? "Free space" : fix === "switch_mirror" ? "Switch mirror" : ""
+    }
+
+    function runProblemFix(operation) {
+        if (operation.problem.fix === "free_space")
+            openSettings("installs", "storage")
+        else if (operation.problem.fix === "switch_mirror")
+            openSettings("sources", "")
     }
 
     function sourceLabel(source) {
@@ -871,18 +1523,40 @@ ShellRoot {
         root.installOpen = true
     }
 
+    // A package file from the file manager or the Repositories page: .deb goes
+    // to dpkg/apt, anything else is treated as an AppImage.
     function openAppImage(path) {
         if (!path)
             return
+        path = path.replace(/^file:\/\//, "")
         pushLog("inspect » " + path)
         status = "Inspecting " + path.split("/").pop()
-        request("appimage.inspect", { path: path })
+        if (path.toLowerCase().endsWith(".deb"))
+            request("deb.inspect", { path: path })
+        else
+            request("appimage.inspect", { path: path })
     }
 
     function confirmLocalInstall() {
         const img = root.localImage
         if (!img)
             return
+        if (img.kind === "deb") {
+            // apt-get installs the file by path and pulls in its dependencies;
+            // the package name is what it is known by afterwards.
+            request("operations.enqueue", {
+                app_id: "deb-local:" + img.name,
+                variant_id: "deb-local",
+                action: img.already_installed ? "reinstall" : "install",
+                app_name: img.name,
+                package_id: img.path,
+                source: "system"
+            })
+            root.localOpen = false
+            root.localImage = null
+            activeView = "installed"
+            return
+        }
         request("operations.enqueue", {
             app_id: "appimage-local:" + (img.sha256 || img.file_name),
             variant_id: "appimage-local",
@@ -1183,6 +1857,10 @@ ShellRoot {
                             root.setSourceKey("sourcesErrors", root.activeSource, message.error.message)
                             root.setSourceKey("sourcesBusy", root.activeSource, false)
                         }
+                        if (root.replyMethods.indexOf(root.activeMethod) >= 0 || root.activeMethod === "deb.inspect")
+                            root.setReply(root.activeMethod, null, message.error.message)
+                        else if (root.activeMethod === "settings.set" || root.activeMethod === "settings.reset")
+                            root.request("settings.get", {})
                         root.status = message.error.message
                         pushLog("✗ " + message.error.message)
                         return
@@ -1190,6 +1868,13 @@ ShellRoot {
                     const result = message.result
                     if (!result)
                         return
+                    if (root.replyMethods.indexOf(root.activeMethod) >= 0) {
+                        root.setReply(root.activeMethod, result)
+                        if (root.activeMethod === "updates.checkNow")
+                            root.setReply("updates.status", result)
+                        root.afterReply(root.activeMethod)
+                        return
+                    }
                     if (result.sources !== undefined) {
                         root.sourcesList = result.sources
                         if (root.activeSource !== "")
@@ -1254,6 +1939,12 @@ ShellRoot {
                         // search results so the next search reflects reality.
                         root.searchCache = ({})
                         root.request("operations.list", {})
+                    } else if (result.deb !== undefined) {
+                        root.setReply("deb.inspect", result)
+                        root.localImage = result.deb
+                        root.localOpen = true
+                        root.status = "Ready to install " + result.deb.name
+                        pushLog("inspected « " + result.deb.file_name)
                     } else if (result.appimage !== undefined) {
                         root.localImage = result.appimage
                         root.localOpen = true
@@ -1275,7 +1966,13 @@ ShellRoot {
                         root.request("operations.list", {})
                     } else if (result.settings !== undefined) {
                         root.storeSettings = result.settings
+                        if (root.activeMethod === "settings.get" && !root.defaultTabApplied) {
+                            root.defaultTabApplied = true
+                            root.applyDefaultTab(result.settings.default_tab)
+                        }
                         if (root.activeMethod === "settings.get" && result.settings.first_run_done !== true) {
+                            root.setupRerun = false
+                            root.setupReached = 0
                             root.setupStep = 0
                             root.setupOpen = true
                         }
@@ -1393,6 +2090,224 @@ ShellRoot {
         function openFile(path: string): void { root.openAppImage(path) }
     }
 
+    // OFF|ON and option cells for settings rows: parallelogram cells at the
+    // shared shear, label kept upright, selected cell filled green.
+    component SegCells: Row {
+        id: cells
+        property var options: []
+        property var current
+        signal picked(var value)
+        spacing: 2
+
+        Repeater {
+            model: cells.options
+            delegate: Item {
+                id: cell
+                readonly property bool selected: cells.current === modelData.value
+                implicitWidth: cellLabel.implicitWidth + 26
+                implicitHeight: 26
+
+                Rectangle {
+                    anchors.fill: parent
+                    color: cell.selected ? root.cGreen : "transparent"
+                    border.color: cell.selected || cellHover.hovered ? root.cGreen : root.cDead
+                    transform: Matrix4x4 {
+                        matrix: Qt.matrix4x4(1, root.shear, 0, -root.shear * cell.height / 2,
+                                             0, 1, 0, 0,
+                                             0, 0, 1, 0,
+                                             0, 0, 0, 1)
+                    }
+                    Behavior on color { ColorAnimation { duration: root.tFast } }
+                }
+                Label {
+                    id: cellLabel
+                    anchors.centerIn: parent
+                    text: modelData.label
+                    color: cell.selected ? root.cBase : cellHover.hovered ? root.cFg : root.cMuted
+                    font.family: root.fontMono
+                    font.pixelSize: 9
+                    font.letterSpacing: 3
+                }
+                HoverHandler { id: cellHover }
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: cells.picked(modelData.value)
+                }
+            }
+        }
+    }
+
+    // Outlined mono button with the small cut corner. A destructive one arms
+    // on the first press, like ActionButton, and fires on the second.
+    component SettingsButton: Item {
+        id: sbtn
+        property string label: ""
+        property bool danger: false
+        property bool confirm: false
+        property bool armed: false
+        signal clicked()
+
+        implicitWidth: sbtnText.implicitWidth + 28
+        implicitHeight: 30
+        opacity: enabled ? 1 : 0.5
+
+        Timer { id: sbtnDisarm; interval: 3000; onTriggered: sbtn.armed = false }
+
+        ChamferPanel {
+            anchors.fill: parent
+            cut: 8
+            accentEdge: false
+            fill: root.cBase
+            stroke: sbtn.armed || sbtnHover.hovered ? (sbtn.danger ? root.cRed : root.cGreen)
+                                                    : (sbtn.danger ? "#5f3a3c" : root.cLine)
+        }
+        Label {
+            id: sbtnText
+            anchors.centerIn: parent
+            text: sbtn.armed ? "CONFIRM?" : sbtn.label
+            color: sbtn.danger ? root.cRed : root.cFg
+            font.family: root.fontMono
+            font.pixelSize: 10
+            font.letterSpacing: 2
+        }
+        HoverHandler { id: sbtnHover }
+        MouseArea {
+            anchors.fill: parent
+            enabled: sbtn.enabled
+            cursorShape: Qt.PointingHandCursor
+            onClicked: {
+                if (sbtn.confirm && !sbtn.armed) {
+                    sbtn.armed = true
+                    sbtnDisarm.restart()
+                    return
+                }
+                sbtn.armed = false
+                sbtnDisarm.stop()
+                sbtn.clicked()
+            }
+        }
+    }
+
+    // One line of a settings plate. The row object comes from
+    // buildSettingsPage(): its kind picks the control on the right.
+    component SettingsRow: Item {
+        id: srow
+        property var row: ({})
+        property bool first: false
+        readonly property bool clickable: (row.act || "") !== ""
+
+        implicitHeight: Math.max(58, srowContent.implicitHeight + 20)
+
+        Rectangle {
+            visible: !srow.first
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: 1
+            color: root.cDead
+        }
+        Rectangle {
+            anchors.fill: parent
+            anchors.margins: 1
+            color: "transparent"
+            border.color: root.cGreen
+            visible: srow.clickable && srowHover.hovered
+        }
+        HoverHandler { id: srowHover }
+        MouseArea {
+            anchors.fill: parent
+            enabled: srow.clickable
+            cursorShape: srow.clickable ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: root.settingsRun(srow.row.act)
+        }
+
+        RowLayout {
+            id: srowContent
+            anchors.fill: parent
+            anchors.leftMargin: 16
+            anchors.rightMargin: 12
+            spacing: 14
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 3
+                Label {
+                    text: srow.row.label || ""
+                    color: srow.row.dangerLabel ? root.cRed : root.cFg
+                    font.family: root.fontHuman
+                    font.pixelSize: 14
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+                Label {
+                    visible: (srow.row.note || "") !== ""
+                    text: srow.row.note || ""
+                    color: root.cMuted
+                    font.family: root.fontHuman
+                    font.pixelSize: 12
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+            }
+            Label {
+                visible: (srow.row.value || "") !== ""
+                text: srow.row.value || ""
+                color: srow.row.hot ? root.cGreen : root.cMuted
+                font.family: root.fontMono
+                font.pixelSize: 12
+                Layout.alignment: Qt.AlignVCenter
+            }
+            SegCells {
+                visible: srow.row.on !== undefined
+                options: [{ label: "OFF", value: false }, { label: "ON", value: true }]
+                current: srow.row.on === true
+                Layout.alignment: Qt.AlignVCenter
+                onPicked: value => root.settingsToggle(srow.row, value)
+            }
+            SegCells {
+                visible: srow.row.kind === "choice"
+                options: srow.row.opts || []
+                current: srow.row.cur
+                Layout.alignment: Qt.AlignVCenter
+                onPicked: value => root.settingsPut(srow.row.key, value)
+            }
+            SettingsButton {
+                visible: (srow.row.btn || "") !== ""
+                label: srow.row.btn || ""
+                danger: srow.row.danger === true
+                confirm: srow.row.confirm === true
+                enabled: srow.row.disabled !== true
+                Layout.alignment: Qt.AlignVCenter
+                onClicked: root.settingsRun(srow.row.btnAct)
+            }
+            Label {
+                visible: srow.row.kind === "nav"
+                text: "›"
+                color: root.cMuted
+                font.family: root.fontMono
+                font.pixelSize: 16
+                Layout.alignment: Qt.AlignVCenter
+            }
+        }
+    }
+
+    component SettingsField: TextField {
+        id: sfield
+        color: root.cFg
+        placeholderTextColor: root.cMuted
+        font.family: root.fontHuman
+        font.pixelSize: 13
+        leftPadding: 10
+        rightPadding: 10
+        Layout.preferredHeight: 34
+        background: Rectangle {
+            color: root.cDim
+            border.color: sfield.activeFocus ? root.cGreen : root.cLine
+            radius: 0
+        }
+    }
+
     // Top-bar navigation tab: mono uppercase label, green underline when
     // active, optional live badge (queue count).
     component TopTab: Item {
@@ -1466,6 +2381,7 @@ ShellRoot {
                     root.request("system.cacheInfo", {})
                     root.request("settings.get", {})
                     root.request("sources.list", {})
+                    root.settingsLoad()
                 }
             }
         }
@@ -1479,7 +2395,10 @@ ShellRoot {
         property color stroke: root.cLine
         property bool accentEdge: true
         property int cut: root.chamfer
+        onFillChanged: panelCanvas.requestPaint()
+        onStrokeChanged: panelCanvas.requestPaint()
         Canvas {
+            id: panelCanvas
             anchors.fill: parent
             antialiasing: true
             onWidthChanged: requestPaint()
@@ -2373,11 +3292,21 @@ ShellRoot {
                         searchField.selectAll()
                     }
                 }
-                // Esc backs out one level: details -> where it came from.
+                // Esc backs out one level: a focused field lets go first, then
+                // details -> where it came from, a settings page -> its hub,
+                // any other view -> Home. The search field and the image
+                // viewer keep their own Esc.
                 Shortcut {
                     sequence: "Esc"
-                    enabled: root.activeView === "details" && !searchField.activeFocus && !root.installOpen
-                    onActivated: root.activeView = root.detailsFrom
+                    enabled: !searchField.activeFocus && !root.installOpen && root.viewerSource === "" && !root.setupOpen
+                             && root.activeView !== "discover"
+                    onActivated: {
+                        const field = window.activeFocusItem
+                        if (field && field.cursorPosition !== undefined) field.focus = false
+                        else if (root.activeView === "details") root.activeView = root.detailsFrom
+                        else if (root.activeView === "settings" && root.settingsSub !== "") root.settingsRun("back")
+                        else root.activeView = "discover"
+                    }
                 }
 
                 StackLayout {
@@ -2488,6 +3417,8 @@ ShellRoot {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
+                                // Pin the width or a wide child's implicitWidth lets Home slide sideways.
+                                contentWidth: availableWidth
                                 visible: !discoverPage.onSearch
                                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                                 ScrollBar.vertical.policy: ScrollBar.AlwaysOff
@@ -2506,6 +3437,9 @@ ShellRoot {
 
                                         ListView {
                                             id: featuredCarousel
+                                            // Nothing to slide to with one pick.
+                                            interactive: count > 1
+                                            boundsBehavior: Flickable.StopAtBounds
                                             anchors.top: parent.top
                                             anchors.left: parent.left
                                             anchors.right: parent.right
@@ -2736,6 +3670,9 @@ ShellRoot {
 
                                             ListView {
                                                 id: railView
+                                                // Only drag when the row actually overflows; no rubber-band at the ends.
+                                                interactive: contentWidth > width
+                                                boundsBehavior: Flickable.StopAtBounds
                                                 Layout.fillWidth: true
                                                 Layout.preferredHeight: 246
                                                 orientation: ListView.Horizontal
@@ -3331,7 +4268,7 @@ ShellRoot {
                                             parts: dlPanel.parts
                                             percent: root.downloadPercent(dlPanel.op)
                                             stateText: dlPanel.op ? dlPanel.op.state.replace("_", " ").toUpperCase() : ""
-                                            held: !!dlPanel.op && (dlPanel.op.state === "pending" || dlPanel.op.state === "awaiting_authentication")
+                                            held: !!dlPanel.op && (dlPanel.op.state === "pending" || dlPanel.op.state === "paused" || dlPanel.op.state === "awaiting_authentication")
                                         }
 
                                         ColumnLayout {
@@ -3520,6 +4457,8 @@ ShellRoot {
                                             snapMode: ListView.SnapToItem
                                             clip: true
                                             spacing: 14
+                                            interactive: contentWidth > width
+                                            boundsBehavior: Flickable.StopAtBounds
                                             model: root.selectedApp ? root.selectedApp.screenshots : []
                                             delegate: Rectangle {
                                                 width: shotList.cardWidth
@@ -3717,38 +4656,143 @@ ShellRoot {
                     }
 
                     Item {
+                        id: settingsView
+                        readonly property string pageKey: root.settingsHub + "/" + root.settingsSub
+                        readonly property var page: root.settingsPage
+                        // Sheet text comes from the backend's answer when there is one.
+                        readonly property var sheet: {
+                            const kind = root.settingsSheet
+                            if (kind === "reset")
+                                return { tag: "RESET", title: "Reset all settings?", reset: true,
+                                         body: "Every setting goes back to its default. Installed apps, held versions and the Flathub pin are not touched.", lines: [] }
+                            const method = kind === "flatpak" ? "maintenance.repairFlatpak" : "maintenance.fixApt"
+                            const answer = root.replies[method]
+                            const failure = root.replyErrors[method]
+                            const lines = []
+                            if (failure)
+                                lines.push({ t: failure, color: root.cRed })
+                            else if (!answer)
+                                lines.push({ t: "Running…", color: root.cMuted })
+                            else
+                                for (const line of answer.lines || [])
+                                    lines.push({ t: line, color: root.cFg })
+                            if (answer)
+                                lines.push({ t: answer.ok ? "Done" : "Failed", color: answer.ok ? root.cGreen : root.cRed })
+                            return kind === "flatpak"
+                                ? { tag: "REPAIR", title: "Repair Flatpak", reset: false, lines: lines,
+                                    body: "Checks every installed object and fetches missing ones again." }
+                                : { tag: "REPAIR", title: "Fix broken packages", reset: false, lines: lines,
+                                    body: "Finishes interrupted installs and fills in missing dependencies. Asks for your password." }
+                        }
+
                         opacity: root.activeView === "settings" ? 1 : 0
                         transform: Translate {
                             y: root.activeView === "settings" ? 0 : 12
                             Behavior on y { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                         }
                         Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
-                        ColumnLayout {
+
+                        // Page change: fade and slide in from the side it came
+                        // from, or rise a few pixels when the hub itself changes.
+                        onPageKeyChanged: {
+                            pageShift.x = root.settingsDir === "r" ? 18 : root.settingsDir === "l" ? -18 : 0
+                            pageShift.y = root.settingsDir === "u" ? 8 : 0
+                            pageCol.opacity = 0
+                            pageIn.restart()
+                        }
+                        ParallelAnimation {
+                            id: pageIn
+                            NumberAnimation { target: pageCol; property: "opacity"; to: 1; duration: root.tMed; easing.type: Easing.OutCubic }
+                            NumberAnimation { target: pageShift; property: "x"; to: 0; duration: root.tMed; easing.type: Easing.OutCubic }
+                            NumberAnimation { target: pageShift; property: "y"; to: 0; duration: root.tMed; easing.type: Easing.OutCubic }
+                        }
+
+                        RowLayout {
                             anchors.fill: parent
-                            anchors.leftMargin: root.contentSideMargin()
-                            anchors.rightMargin: root.contentSideMargin()
-                            anchors.topMargin: root.pagePad()
-                            anchors.bottomMargin: root.pagePad()
-                            spacing: 14
+                            spacing: 0
 
                             ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 3
-                                Label {
-                                    text: "Settings"
-                                    color: root.cFg
-                                    font.family: root.fontBrand
-                                    font.pixelSize: Math.round(32 * root.uiScale())
-                                    font.bold: true
+                                // Layouts fill by default; without this the hub list eats the page column.
+                                Layout.fillWidth: false
+                                Layout.preferredWidth: Math.max(220, Math.min(290, Math.round(settingsView.width * 0.22)))
+                                Layout.fillHeight: true
+                                Layout.margins: 20
+                                Layout.topMargin: root.pagePad()
+                                spacing: 8
+
+                                ColumnLayout {
                                     Layout.fillWidth: true
+                                    Layout.bottomMargin: 12
+                                    spacing: 4
+                                    Label {
+                                        text: "THALLIUM STORE"
+                                        color: root.cGreen
+                                        font.family: root.fontMono
+                                        font.pixelSize: 10
+                                        font.letterSpacing: 2
+                                    }
+                                    Label {
+                                        text: "Settings"
+                                        color: root.cFg
+                                        font.family: root.fontBrand
+                                        font.pixelSize: 22
+                                        font.bold: true
+                                    }
                                 }
-                                Label {
-                                    text: "Storage, setup and store information."
-                                    color: root.cMuted
-                                    font.family: root.fontHuman
-                                    font.pixelSize: 15
-                                    Layout.fillWidth: true
+
+                                Repeater {
+                                    model: root.settingsHubs
+                                    delegate: Item {
+                                        id: hubButton
+                                        readonly property bool current: root.settingsHub === modelData.id
+                                        Layout.fillWidth: true
+                                        implicitHeight: hubText.implicitHeight + 24
+
+                                        ChamferPanel {
+                                            anchors.fill: parent
+                                            cut: 12
+                                            accentEdge: false
+                                            fill: root.cBase
+                                            stroke: hubButton.current || hubHover.hovered ? root.cGreen : root.cDead
+                                        }
+                                        ColumnLayout {
+                                            id: hubText
+                                            anchors.fill: parent
+                                            anchors.margins: 12
+                                            anchors.leftMargin: 14
+                                            spacing: 3
+                                            Label {
+                                                text: modelData.label
+                                                color: hubButton.current ? root.cGreen : root.cMuted
+                                                font.family: root.fontMono
+                                                font.pixelSize: 10
+                                                font.letterSpacing: 2
+                                            }
+                                            Label {
+                                                text: modelData.hint
+                                                color: root.cMuted
+                                                font.family: root.fontHuman
+                                                font.pixelSize: 12
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+                                        HoverHandler { id: hubHover }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.settingsGo(modelData.id, "", "u")
+                                        }
+                                    }
                                 }
+
+                                Item { Layout.fillHeight: true }
+                            }
+
+                            Rectangle {
+                                Layout.fillHeight: true
+                                width: 1
+                                color: root.cDead
                             }
 
                             ScrollView {
@@ -3759,485 +4803,600 @@ ShellRoot {
                                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                                 ScrollBar.vertical.policy: ScrollBar.AlwaysOff
 
-                                ColumnLayout {
+                                Item {
                                     width: settingsScroll.availableWidth
-                                    spacing: 16
+                                    implicitHeight: pageCol.implicitHeight + root.pagePad() + 48
 
-                                    HudRailHeader { title: "Storage" }
-
-                                    Rectangle {
-                                        Layout.fillWidth: true
-                                        color: root.cPanel
-                                        border.color: root.cLine
-                                        radius: 0
-                                        implicitHeight: 72
-
-                                        RowLayout {
-                                            anchors.fill: parent
-                                            anchors.leftMargin: 18
-                                            anchors.rightMargin: 18
-                                            spacing: 14
-
-                                            ColumnLayout {
-                                                Layout.fillWidth: true
-                                                spacing: 3
-                                                Label {
-                                                    text: "Icon cache"
-                                                    color: root.cFg
-                                                    font.family: root.fontHuman
-                                                    font.pixelSize: 14
-                                                    font.bold: true
-                                                }
-                                                Label {
-                                                    text: (root.cacheInfo.iconBytes > 0 ? root.formatBytes(root.cacheInfo.iconBytes) : "0 B") + " · " + root.cacheInfo.iconCount + " files · ~/.local/share/thallium-store/icons"
-                                                    color: root.cMuted
-                                                    font.family: root.fontMono
-                                                    font.pixelSize: 11
-                                                    elide: Text.ElideRight
-                                                    Layout.fillWidth: true
-                                                }
-                                            }
-
-                                            ActionButton {
-                                                label: "Clear cache"
-                                                fill: root.cDim
-                                                textColor: root.cRed
-                                                Layout.preferredWidth: 118
-                                                onClicked: root.request("system.clearIconCache", {})
-                                            }
-                                        }
-                                    }
-
-                                    HudRailHeader { title: "Download sources" }
-
-                                    Repeater {
-                                        model: root.sourcesList
-                                        delegate: Rectangle {
-                                            id: srcCard
-                                            property var src: modelData
-                                            property bool adding: false
-                                            property bool busy: root.sourcesBusy[src.id] === true
-                                            property string fastestId: root.fastestMirror(src.id)
-
-                                            Layout.fillWidth: true
-                                            color: root.cPanel
-                                            border.color: root.cLine
-                                            radius: 0
-                                            implicitHeight: srcCol.implicitHeight + 36
-
-                                            ColumnLayout {
-                                                id: srcCol
-                                                anchors.left: parent.left
-                                                anchors.right: parent.right
-                                                anchors.top: parent.top
-                                                anchors.margins: 18
-                                                spacing: 10
-
-                                                RowLayout {
-                                                    Layout.fillWidth: true
-                                                    spacing: 14
-
-                                                    ColumnLayout {
-                                                        Layout.fillWidth: true
-                                                        spacing: 3
-                                                        Label {
-                                                            text: srcCard.src.name
-                                                            color: root.cFg
-                                                            font.family: root.fontHuman
-                                                            font.pixelSize: 14
-                                                            font.bold: true
-                                                            Layout.fillWidth: true
-                                                        }
-                                                        Label {
-                                                            visible: srcCard.src.needsAdmin === true
-                                                            text: "Changing this asks for your password"
-                                                            color: root.cMuted
-                                                            font.family: root.fontHuman
-                                                            font.pixelSize: 12
-                                                            Layout.fillWidth: true
-                                                        }
-                                                    }
-
-                                                    ActionButton {
-                                                        label: srcCard.busy ? "Testing…" : "Test speed"
-                                                        fill: root.cDim
-                                                        textColor: root.cGreen
-                                                        height: 32
-                                                        active: !srcCard.busy
-                                                        Layout.preferredWidth: 118
-                                                        Layout.alignment: Qt.AlignVCenter
-                                                        onClicked: {
-                                                            root.setSourceKey("sourcesBusy", srcCard.src.id, true)
-                                                            root.setSourceKey("sourcesErrors", srcCard.src.id, null)
-                                                            root.request("sources.probe", { source: srcCard.src.id })
-                                                        }
-                                                    }
-                                                }
-
-                                                Repeater {
-                                                    model: srcCard.src.mirrors
-                                                    delegate: Rectangle {
-                                                        id: mirrorRow
-                                                        property var m: modelData
-                                                        property bool isActive: srcCard.src.active === m.id
-                                                        property var probe: (root.sourcesProbe[srcCard.src.id] || {})[m.id]
-
-                                                        Layout.fillWidth: true
-                                                        implicitHeight: 48
-                                                        color: isActive ? root.cBlueSoft : mirrorHover.hovered ? root.cDim : root.cPanel
-                                                        border.color: isActive ? root.cGreen : root.cLine
-                                                        radius: 0
-                                                        Behavior on color { ColorAnimation { duration: root.tFast } }
-
-                                                        HoverHandler { id: mirrorHover }
-                                                        MouseArea {
-                                                            anchors.fill: parent
-                                                            enabled: !mirrorRow.isActive
-                                                            cursorShape: mirrorRow.isActive ? Qt.ArrowCursor : Qt.PointingHandCursor
-                                                            onClicked: root.request("sources.setActive", { source: srcCard.src.id, mirrorId: mirrorRow.m.id })
-                                                        }
-
-                                                        RowLayout {
-                                                            anchors.fill: parent
-                                                            anchors.leftMargin: 14
-                                                            anchors.rightMargin: 10
-                                                            spacing: 12
-
-                                                            ColumnLayout {
-                                                                Layout.fillWidth: true
-                                                                spacing: 2
-                                                                Label {
-                                                                    text: mirrorRow.m.name
-                                                                    color: root.cFg
-                                                                    font.family: root.fontHuman
-                                                                    font.pixelSize: 13
-                                                                    font.bold: true
-                                                                    elide: Text.ElideRight
-                                                                    Layout.fillWidth: true
-                                                                }
-                                                                Label {
-                                                                    text: mirrorRow.m.url === "" ? "direct" : mirrorRow.m.url
-                                                                    color: root.cMuted
-                                                                    font.family: root.fontMono
-                                                                    font.pixelSize: 11
-                                                                    elide: Text.ElideRight
-                                                                    Layout.fillWidth: true
-                                                                }
-                                                            }
-
-                                                            Label {
-                                                                visible: mirrorRow.probe !== undefined
-                                                                text: mirrorRow.probe === undefined ? ""
-                                                                      : mirrorRow.probe.ok ? root.formatSpeed(mirrorRow.probe.bytesPerSec || 0)
-                                                                      : "failed"
-                                                                color: mirrorRow.probe !== undefined && !mirrorRow.probe.ok ? root.cRed : root.cFg
-                                                                font.family: root.fontMono
-                                                                font.pixelSize: 11
-                                                            }
-
-                                                            Label {
-                                                                visible: srcCard.fastestId === mirrorRow.m.id
-                                                                text: "FASTEST"
-                                                                color: root.cGreen
-                                                                font.family: root.fontMono
-                                                                font.pixelSize: 10
-                                                                font.letterSpacing: 2
-                                                            }
-
-                                                            Label {
-                                                                visible: mirrorRow.isActive
-                                                                text: "IN USE"
-                                                                color: root.cGreen
-                                                                font.family: root.fontMono
-                                                                font.pixelSize: 10
-                                                                font.letterSpacing: 2
-                                                            }
-
-                                                            ActionButton {
-                                                                visible: mirrorRow.m.builtin === false
-                                                                label: "Remove"
-                                                                fill: root.cDim
-                                                                textColor: root.cRed
-                                                                confirm: true
-                                                                height: 30
-                                                                Layout.preferredWidth: 88
-                                                                onClicked: root.request("sources.removeMirror", { source: srcCard.src.id, mirrorId: mirrorRow.m.id })
-                                                            }
-                                                        }
-                                                    }
-                                                }
-
-                                                RowLayout {
-                                                    visible: srcCard.src.nodeHost !== undefined
-                                                    Layout.fillWidth: true
-                                                    spacing: 12
-                                                    property bool scanning: root.sourcesScanning[srcCard.src.id] === true
-                                                    property var found: root.sourcesNode[srcCard.src.id]
-
-                                                    ColumnLayout {
-                                                        Layout.fillWidth: true
-                                                        spacing: 2
-                                                        Label {
-                                                            text: "Fastest server"
-                                                            color: root.cFg
-                                                            font.family: root.fontHuman
-                                                            font.pixelSize: 13
-                                                            font.bold: true
-                                                        }
-                                                        Label {
-                                                            text: parent.parent.scanning
-                                                                  ? "Testing Fastly servers from your connection. Takes about 30 seconds."
-                                                                  : srcCard.src.node
-                                                                    ? "Pinned to " + srcCard.src.node
-                                                                      + (parent.parent.found && parent.parent.found.ip === srcCard.src.node
-                                                                         ? " (" + root.formatSpeed(parent.parent.found.bytesPerSec) + ", best of " + parent.parent.found.tested + ")" : "")
-                                                                      + ". If downloads slow down again, find a new one."
-                                                                    : srcCard.src.nodeHost + " is on Fastly, whose nearest server can be congested on some ISPs. Finds a faster one and pins it; asks for your password."
-                                                            color: root.cMuted
-                                                            font.family: root.fontHuman
-                                                            font.pixelSize: 12
-                                                            wrapMode: Text.WordWrap
-                                                            Layout.fillWidth: true
-                                                        }
-                                                    }
-                                                    ActionButton {
-                                                        visible: srcCard.src.node !== null && srcCard.src.node !== undefined && !parent.scanning
-                                                        label: "Unpin"
-                                                        fill: root.cDim
-                                                        textColor: root.cRed
-                                                        height: 32
-                                                        Layout.preferredWidth: 88
-                                                        Layout.alignment: Qt.AlignVCenter
-                                                        onClicked: root.request("sources.clearNode", { source: srcCard.src.id })
-                                                    }
-                                                    ActionButton {
-                                                        label: parent.scanning ? "Scanning…" : (srcCard.src.node ? "Find again" : "Find fastest")
-                                                        fill: root.cDim
-                                                        textColor: root.cGreen
-                                                        height: 32
-                                                        active: !parent.scanning
-                                                        Layout.preferredWidth: 118
-                                                        Layout.alignment: Qt.AlignVCenter
-                                                        onClicked: {
-                                                            root.setSourceKey("sourcesScanning", srcCard.src.id, true)
-                                                            root.setSourceKey("sourcesErrors", srcCard.src.id, null)
-                                                            root.request("sources.findNode", { source: srcCard.src.id })
-                                                        }
-                                                    }
-                                                }
-
-                                                RowLayout {
-                                                    visible: srcCard.src.id === "flathub"
-                                                    Layout.fillWidth: true
-                                                    spacing: 12
-
-                                                    SelectBox {
-                                                        checked: srcCard.src.parallel === true
-                                                        Layout.alignment: Qt.AlignVCenter
-                                                        MouseArea {
-                                                            anchors.fill: parent
-                                                            cursorShape: Qt.PointingHandCursor
-                                                            onClicked: root.request("sources.setParallel", { source: srcCard.src.id, enabled: srcCard.src.parallel !== true })
-                                                        }
-                                                    }
-                                                    ColumnLayout {
-                                                        Layout.fillWidth: true
-                                                        spacing: 2
-                                                        Label {
-                                                            text: "Parallel connections"
-                                                            color: root.cFg
-                                                            font.family: root.fontHuman
-                                                            font.pixelSize: 13
-                                                            font.bold: true
-                                                        }
-                                                        Label {
-                                                            text: "Opens 8 connections instead of one. Helps on slow routes."
-                                                            color: root.cMuted
-                                                            font.family: root.fontHuman
-                                                            font.pixelSize: 12
-                                                            wrapMode: Text.WordWrap
-                                                            Layout.fillWidth: true
-                                                        }
-                                                    }
-                                                }
-
-                                                Label {
-                                                    visible: srcCard.src.id === "github"
-                                                    text: "Mirrors are only used for files GitHub publishes a checksum for; each download is verified."
-                                                    color: root.cMuted
-                                                    font.family: root.fontHuman
-                                                    font.pixelSize: 12
-                                                    wrapMode: Text.WordWrap
-                                                    Layout.fillWidth: true
-                                                }
-
-                                                RowLayout {
-                                                    visible: srcCard.adding
-                                                    Layout.fillWidth: true
-                                                    spacing: 8
-
-                                                    TextField {
-                                                        id: mirrorNameField
-                                                        placeholderText: "Name"
-                                                        color: root.cFg
-                                                        placeholderTextColor: root.cMuted
-                                                        font.family: root.fontHuman
-                                                        font.pixelSize: 13
-                                                        leftPadding: 10
-                                                        rightPadding: 10
-                                                        Layout.preferredWidth: 180
-                                                        Layout.preferredHeight: 34
-                                                        background: Rectangle {
-                                                            color: root.cDim
-                                                            border.color: mirrorNameField.activeFocus ? root.cGreen : root.cLine
-                                                            radius: 0
-                                                        }
-                                                    }
-                                                    TextField {
-                                                        id: mirrorUrlField
-                                                        placeholderText: "https://mirror.example/path"
-                                                        color: root.cFg
-                                                        placeholderTextColor: root.cMuted
-                                                        font.family: root.fontMono
-                                                        font.pixelSize: 12
-                                                        leftPadding: 10
-                                                        rightPadding: 10
-                                                        Layout.fillWidth: true
-                                                        Layout.preferredHeight: 34
-                                                        background: Rectangle {
-                                                            color: root.cDim
-                                                            border.color: mirrorUrlField.activeFocus ? root.cGreen : root.cLine
-                                                            radius: 0
-                                                        }
-                                                    }
-                                                    ActionButton {
-                                                        label: "Add"
-                                                        fill: root.cGreen
-                                                        textColor: root.cBase
-                                                        height: 34
-                                                        active: mirrorNameField.text.trim().length > 0 && mirrorUrlField.text.trim().length > 0
-                                                        Layout.preferredWidth: 72
-                                                        onClicked: {
-                                                            root.request("sources.addMirror", {
-                                                                source: srcCard.src.id,
-                                                                name: mirrorNameField.text.trim(),
-                                                                url: mirrorUrlField.text.trim()
-                                                            })
-                                                            srcCard.adding = false
-                                                            mirrorNameField.text = ""
-                                                            mirrorUrlField.text = ""
-                                                        }
-                                                    }
-                                                    ActionButton {
-                                                        label: "Cancel"
-                                                        fill: root.cDim
-                                                        textColor: root.cMuted
-                                                        height: 34
-                                                        Layout.preferredWidth: 80
-                                                        onClicked: {
-                                                            srcCard.adding = false
-                                                            mirrorNameField.text = ""
-                                                            mirrorUrlField.text = ""
-                                                        }
-                                                    }
-                                                }
-
-                                                ActionButton {
-                                                    visible: !srcCard.adding
-                                                    label: "Add mirror"
-                                                    fill: root.cDim
-                                                    textColor: root.cGreen
-                                                    height: 32
-                                                    Layout.preferredWidth: 118
-                                                    onClicked: srcCard.adding = true
-                                                }
-
-                                                Label {
-                                                    visible: (root.sourcesErrors[srcCard.src.id] || "") !== ""
-                                                    text: root.sourcesErrors[srcCard.src.id] || ""
-                                                    color: root.cRed
-                                                    font.family: root.fontHuman
-                                                    font.pixelSize: 12
-                                                    wrapMode: Text.WordWrap
-                                                    Layout.fillWidth: true
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    HudRailHeader { title: "Setup" }
-
-                                    Rectangle {
-                                        Layout.fillWidth: true
-                                        color: root.cPanel
-                                        border.color: root.cLine
-                                        radius: 0
-                                        implicitHeight: 72
-
-                                        RowLayout {
-                                            anchors.fill: parent
-                                            anchors.leftMargin: 18
-                                            anchors.rightMargin: 18
-                                            spacing: 14
-
-                                            ColumnLayout {
-                                                Layout.fillWidth: true
-                                                spacing: 3
-                                                Label {
-                                                    text: "First-launch walkthrough"
-                                                    color: root.cFg
-                                                    font.family: root.fontHuman
-                                                    font.pixelSize: 14
-                                                    font.bold: true
-                                                }
-                                                Label {
-                                                    text: "Replay the welcome tour and source overview."
-                                                    color: root.cMuted
-                                                    font.family: root.fontHuman
-                                                    font.pixelSize: 12
-                                                    Layout.fillWidth: true
-                                                }
-                                            }
-
-                                            ActionButton {
-                                                label: "Run again"
-                                                fill: root.cDim
-                                                textColor: root.cGreen
-                                                Layout.preferredWidth: 118
-                                                onClicked: {
-                                                    root.setupStep = 0
-                                                    root.setupOpen = true
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    HudRailHeader { title: "About" }
-
-                                    Rectangle {
-                                        Layout.fillWidth: true
-                                        color: root.cPanel
-                                        border.color: root.cLine
-                                        radius: 0
-                                        implicitHeight: aboutSettingsCol.implicitHeight + 36
+                                    ColumnLayout {
+                                        id: pageCol
+                                        y: root.pagePad()
+                                        x: Math.round((parent.width - width) / 2)
+                                        width: Math.min(780, parent.width - 64)
+                                        spacing: 22
+                                        transform: Translate { id: pageShift }
 
                                         ColumnLayout {
-                                            id: aboutSettingsCol
-                                            anchors.left: parent.left
-                                            anchors.right: parent.right
-                                            anchors.top: parent.top
-                                            anchors.margins: 18
-                                            spacing: 10
-                                            // Version comes from the backend's own crate version.
-                                            // It was a literal here and had been reading 0.1.0 for
-                                            // five releases; "MVP" outlived the MVP.
-                                            StatRow { name: "Version"; value: root.storeVersion || "—" }
-                                            StatRow { name: "Backend"; value: root.backendReadiness() }
-                                            StatRow { name: "Sources"; value: "APT · Flathub · GitHub · AppImage" }
+                                            Layout.fillWidth: true
+                                            spacing: 6
+                                            Label {
+                                                visible: root.settingsSub !== ""
+                                                text: "‹ " + (root.settingsHubs.find(h => h.id === root.settingsHub) || { label: "" }).label
+                                                color: backHover.hovered ? root.cFg : root.cMuted
+                                                font.family: root.fontMono
+                                                font.pixelSize: 10
+                                                font.letterSpacing: 2
+                                                topPadding: 4
+                                                bottomPadding: 4
+                                                HoverHandler { id: backHover }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: root.settingsRun("back")
+                                                }
+                                            }
+                                            Label {
+                                                text: settingsView.page.title
+                                                color: root.cFg
+                                                font.family: root.fontBrand
+                                                font.pixelSize: 26
+                                                font.bold: true
+                                                Layout.fillWidth: true
+                                            }
+                                            Label {
+                                                text: settingsView.page.desc
+                                                color: root.cMuted
+                                                font.family: root.fontHuman
+                                                font.pixelSize: 14
+                                                wrapMode: Text.WordWrap
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+
+                                        Item {
+                                            visible: !!settingsView.page.banner
+                                            Layout.fillWidth: true
+                                            implicitHeight: 56
+
+                                            ChamferPanel {
+                                                anchors.fill: parent
+                                                cut: 14
+                                                accentEdge: false
+                                                fill: root.cBase
+                                                stroke: root.cDead
+                                            }
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 16
+                                                anchors.rightMargin: 16
+                                                spacing: 14
+                                                Label {
+                                                    text: settingsView.page.banner ? settingsView.page.banner.tag : ""
+                                                    color: root.cGreen
+                                                    font.family: root.fontMono
+                                                    font.pixelSize: 10
+                                                    font.letterSpacing: 2
+                                                }
+                                                Label {
+                                                    text: settingsView.page.banner ? settingsView.page.banner.text : ""
+                                                    color: root.cFg
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: 14
+                                                    Layout.fillWidth: true
+                                                }
+                                                SettingsButton {
+                                                    label: settingsView.page.banner ? settingsView.page.banner.btn : ""
+                                                    onClicked: root.settingsRun(settingsView.page.banner.act)
+                                                }
+                                            }
+                                        }
+
+                                        Loader {
+                                            Layout.fillWidth: true
+                                            property var page: settingsView.page
+                                            sourceComponent: settingsGroups
                                         }
                                     }
+                                }
+                            }
+                        }
 
-                                    Item { Layout.preferredHeight: 4 }
+                        Component {
+                            id: mirrorAddForm
+                            ColumnLayout {
+                                id: mirrorForm
+                                property string src: "github"
+                                spacing: 8
+                                Label {
+                                    text: "ADD A MIRROR"
+                                    color: root.cMuted
+                                    font.family: root.fontMono
+                                    font.pixelSize: 10
+                                    font.letterSpacing: 2
+                                    leftPadding: 2
+                                }
+                                SegCells {
+                                    options: root.sourcesList.map(s => ({ label: s.id.toUpperCase(), value: s.id }))
+                                    current: mirrorForm.src
+                                    onPicked: value => mirrorForm.src = value
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    SettingsField {
+                                        id: mirrorName
+                                        placeholderText: "Name"
+                                        Layout.preferredWidth: 180
+                                    }
+                                    SettingsField {
+                                        id: mirrorUrl
+                                        placeholderText: "https://mirror.example/path"
+                                        font.family: root.fontMono
+                                        font.pixelSize: 12
+                                        Layout.fillWidth: true
+                                    }
+                                    ActionButton {
+                                        label: "Add"
+                                        height: 34
+                                        active: mirrorName.text.trim().length > 0 && mirrorUrl.text.trim().length > 0
+                                        Layout.preferredWidth: 72
+                                        onClicked: {
+                                            root.request("sources.addMirror", { source: mirrorForm.src, name: mirrorName.text.trim(), url: mirrorUrl.text.trim() })
+                                            mirrorName.text = ""
+                                            mirrorUrl.text = ""
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // A page's groups, rows and add-form. Loaded with `page` (and
+                        // `wizard` for the first-run setup) set on the Loader.
+                        Component {
+                            id: settingsGroups
+                            ColumnLayout {
+                                id: groupsView
+                                readonly property var page: parent && parent.page ? parent.page : ({ groups: [] })
+                                readonly property bool wizard: !!parent && parent.wizard === true
+                                spacing: 22
+
+                                        Repeater {
+                                            model: groupsView.page.groups
+                                            delegate: ColumnLayout {
+                                                id: groupCol
+                                                // The setup has its own step order, so drop rows that navigate.
+                                                property var group: groupsView.wizard
+                                                    ? Object.assign({}, modelData, { rows: modelData.rows.filter(r => r.kind !== "nav") })
+                                                    : modelData
+                                                Layout.fillWidth: true
+                                                spacing: 8
+                                                visible: group.rows.length > 0 || (group.footer || "") !== ""
+
+                                                Label {
+                                                    visible: (groupCol.group.header || "") !== ""
+                                                    text: groupCol.group.header || ""
+                                                    color: root.cMuted
+                                                    font.family: root.fontMono
+                                                    font.pixelSize: 10
+                                                    font.letterSpacing: 2
+                                                    leftPadding: 2
+                                                }
+                                                Item {
+                                                    visible: groupCol.group.rows.length > 0
+                                                    Layout.fillWidth: true
+                                                    implicitHeight: rowsCol.implicitHeight + 2
+
+                                                    ChamferPanel {
+                                                        anchors.fill: parent
+                                                        cut: 14
+                                                        accentEdge: false
+                                                        fill: root.cBase
+                                                        stroke: root.cDead
+                                                    }
+                                                    ColumnLayout {
+                                                        id: rowsCol
+                                                        anchors.left: parent.left
+                                                        anchors.right: parent.right
+                                                        anchors.top: parent.top
+                                                        anchors.margins: 1
+                                                        spacing: 0
+                                                        Repeater {
+                                                            model: groupCol.group.rows
+                                                            delegate: SettingsRow {
+                                                                row: modelData
+                                                                first: index === 0
+                                                                Layout.fillWidth: true
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Label {
+                                                    visible: (groupCol.group.footer || "") !== ""
+                                                    text: groupCol.group.footer || ""
+                                                    color: root.cMuted
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: 12
+                                                    wrapMode: Text.WordWrap
+                                                    leftPadding: 2
+                                                    Layout.fillWidth: true
+                                                }
+                                            }
+                                        }
+
+                                        Loader {
+                                            Layout.fillWidth: true
+                                            sourceComponent: groupsView.page.form === "mirrorAdd" ? mirrorAddForm
+                                                : groupsView.page.form === "remoteAdd" ? remoteAddForm
+                                                : groupsView.page.form === "appsImport" ? appsImportForm : null
+                                        }
+                            }
+                        }
+
+                        Component {
+                            id: remoteAddForm
+                            ColumnLayout {
+                                spacing: 8
+                                Label {
+                                    text: "INSTALL A PACKAGE FILE"
+                                    color: root.cMuted
+                                    font.family: root.fontMono
+                                    font.pixelSize: 10
+                                    font.letterSpacing: 2
+                                    leftPadding: 2
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    SettingsField {
+                                        id: localPath
+                                        placeholderText: "/path/to/app.deb or .AppImage"
+                                        font.family: root.fontMono
+                                        font.pixelSize: 12
+                                        Layout.fillWidth: true
+                                        onAccepted: if (text.trim().length > 0) root.openAppImage(text.trim())
+                                    }
+                                    ActionButton {
+                                        label: "Browse"
+                                        height: 34
+                                        Layout.preferredWidth: 84
+                                        onClicked: packagePicker.open()
+                                    }
+                                    ActionButton {
+                                        label: "Open"
+                                        height: 34
+                                        active: localPath.text.trim().length > 0
+                                        Layout.preferredWidth: 72
+                                        onClicked: root.openAppImage(localPath.text.trim())
+                                    }
+                                }
+                                FileDialog {
+                                    id: packagePicker
+                                    title: "Install a package file"
+                                    nameFilters: ["Packages (*.deb *.AppImage *.appimage)", "Debian packages (*.deb)", "AppImages (*.AppImage *.appimage)"]
+                                    onAccepted: {
+                                        const path = decodeURIComponent(String(selectedFile).replace(/^file:\/\//, ""))
+                                        localPath.text = path
+                                        root.openAppImage(path)
+                                    }
+                                }
+                                Label {
+                                    visible: root.replyErrors["deb.inspect"] !== undefined
+                                    text: root.replyErrors["deb.inspect"] || ""
+                                    color: root.cRed
+                                    font.family: root.fontHuman
+                                    font.pixelSize: 12
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+
+                                Label {
+                                    text: "ADD AN APT REPOSITORY"
+                                    color: root.cMuted
+                                    font.family: root.fontMono
+                                    font.pixelSize: 10
+                                    font.letterSpacing: 2
+                                    leftPadding: 2
+                                    topPadding: 14
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    SettingsField {
+                                        id: aptName
+                                        placeholderText: "Name"
+                                        Layout.preferredWidth: 180
+                                    }
+                                    SettingsField {
+                                        id: aptUri
+                                        placeholderText: "https://packages.example.org/apt"
+                                        font.family: root.fontMono
+                                        font.pixelSize: 12
+                                        Layout.fillWidth: true
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    SettingsField {
+                                        id: aptSuites
+                                        placeholderText: "Suite (stable)"
+                                        font.family: root.fontMono
+                                        font.pixelSize: 12
+                                        Layout.preferredWidth: 180
+                                    }
+                                    SettingsField {
+                                        id: aptComponents
+                                        placeholderText: "Components (main)"
+                                        font.family: root.fontMono
+                                        font.pixelSize: 12
+                                        Layout.preferredWidth: 180
+                                    }
+                                    SettingsField {
+                                        id: aptKey
+                                        placeholderText: "Signing key URL (https, optional)"
+                                        font.family: root.fontMono
+                                        font.pixelSize: 12
+                                        Layout.fillWidth: true
+                                    }
+                                    ActionButton {
+                                        label: "Add"
+                                        height: 34
+                                        active: aptName.text.trim().length > 0 && aptUri.text.trim().length > 0 && aptSuites.text.trim().length > 0
+                                        Layout.preferredWidth: 72
+                                        onClicked: {
+                                            root.request("remotes.addApt", { name: aptName.text.trim(), uri: aptUri.text.trim(),
+                                                         suites: aptSuites.text.trim(), components: aptComponents.text.trim(),
+                                                         keyUrl: aptKey.text.trim() })
+                                            for (const f of [aptName, aptUri, aptSuites, aptComponents, aptKey])
+                                                f.text = ""
+                                        }
+                                    }
+                                }
+                                Label {
+                                    text: root.replyErrors["remotes.addApt"] !== undefined ? root.replyErrors["remotes.addApt"]
+                                          : "Asks for your password, then checks the repository. One that apt cannot read is removed again."
+                                    color: root.replyErrors["remotes.addApt"] !== undefined ? root.cRed : root.cMuted
+                                    font.family: root.fontHuman
+                                    font.pixelSize: 12
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+
+                                Label {
+                                    topPadding: 14
+                                    text: "ADD A FLATPAK REMOTE"
+                                    color: root.cMuted
+                                    font.family: root.fontMono
+                                    font.pixelSize: 10
+                                    font.letterSpacing: 2
+                                    leftPadding: 2
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    SettingsField {
+                                        id: remoteName
+                                        placeholderText: "Name"
+                                        Layout.preferredWidth: 180
+                                    }
+                                    SettingsField {
+                                        id: remoteUrl
+                                        placeholderText: "https://example.org/repo.flatpakrepo"
+                                        font.family: root.fontMono
+                                        font.pixelSize: 12
+                                        Layout.fillWidth: true
+                                    }
+                                    ActionButton {
+                                        label: "Add"
+                                        height: 34
+                                        active: remoteName.text.trim().length > 0 && remoteUrl.text.trim().length > 0
+                                        Layout.preferredWidth: 72
+                                        onClicked: {
+                                            root.request("remotes.addFlatpak", { name: remoteName.text.trim(), url: remoteUrl.text.trim() })
+                                            remoteName.text = ""
+                                            remoteUrl.text = ""
+                                        }
+                                    }
+                                }
+                                Label {
+                                    visible: root.replyErrors["remotes.addFlatpak"] !== undefined
+                                    text: root.replyErrors["remotes.addFlatpak"] || ""
+                                    color: root.cRed
+                                    font.family: root.fontHuman
+                                    font.pixelSize: 12
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+                            }
+                        }
+
+                        // Import has no file picker: the export prints its path
+                        // on the Export row, and that path is what lands here.
+                        Component {
+                            id: appsImportForm
+                            ColumnLayout {
+                                id: importForm
+                                readonly property var preview: root.replies["apps.importPreview"]
+                                spacing: 8
+                                Label {
+                                    text: "IMPORT AN APP LIST"
+                                    color: root.cMuted
+                                    font.family: root.fontMono
+                                    font.pixelSize: 10
+                                    font.letterSpacing: 2
+                                    leftPadding: 2
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    SettingsField {
+                                        id: importPath
+                                        placeholderText: "~/Downloads/thallium-apps.json"
+                                        text: (root.replies["apps.export"] || {}).path || ""
+                                        font.family: root.fontMono
+                                        font.pixelSize: 12
+                                        Layout.fillWidth: true
+                                    }
+                                    ActionButton {
+                                        label: "Preview"
+                                        fill: root.cDim
+                                        textColor: root.cGreen
+                                        height: 34
+                                        active: importPath.text.trim().length > 0
+                                        Layout.preferredWidth: 96
+                                        onClicked: {
+                                            root.clearReply("apps.importApply")
+                                            root.request("apps.importPreview", { path: importPath.text.trim() })
+                                        }
+                                    }
+                                }
+                                Label {
+                                    visible: root.replyErrors["apps.importPreview"] !== undefined
+                                    text: root.replyErrors["apps.importPreview"] || ""
+                                    color: root.cRed
+                                    font.family: root.fontHuman
+                                    font.pixelSize: 12
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+                                Repeater {
+                                    model: importForm.preview ? importForm.preview.items : []
+                                    delegate: RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 12
+                                        Label {
+                                            text: modelData.name
+                                            color: root.cFg
+                                            font.family: root.fontHuman
+                                            font.pixelSize: 13
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
+                                        Label {
+                                            text: root.sourceLabel(modelData.source).toUpperCase()
+                                            color: root.cMuted
+                                            font.family: root.fontMono
+                                            font.pixelSize: 10
+                                            font.letterSpacing: 1
+                                        }
+                                        Label {
+                                            text: modelData.installed ? "INSTALLED" : "WILL INSTALL"
+                                            color: modelData.installed ? root.cMuted : root.cGreen
+                                            font.family: root.fontMono
+                                            font.pixelSize: 10
+                                            font.letterSpacing: 1
+                                            Layout.preferredWidth: 96
+                                        }
+                                    }
+                                }
+                                RowLayout {
+                                    visible: importForm.preview !== undefined
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Label {
+                                        text: root.replies["apps.importApply"] ? root.replies["apps.importApply"].queued + " queued" : ""
+                                        color: root.cGreen
+                                        font.family: root.fontMono
+                                        font.pixelSize: 11
+                                        Layout.fillWidth: true
+                                    }
+                                    ActionButton {
+                                        label: "Install missing"
+                                        height: 34
+                                        active: importForm.preview !== undefined && importForm.preview.items.some(i => !i.installed)
+                                        Layout.preferredWidth: 140
+                                        onClicked: root.request("apps.importApply", { path: importPath.text.trim() })
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            visible: root.settingsSheet !== ""
+                            color: "#b80d0d0f"
+                            z: 10
+
+                            MouseArea { anchors.fill: parent }
+
+                            ChamferPanel {
+                                anchors.centerIn: parent
+                                width: Math.min(560, parent.width - 48)
+                                height: sheetCol.implicitHeight + 44
+                                fill: root.cBase
+                                stroke: root.cGreen
+
+                                ColumnLayout {
+                                    id: sheetCol
+                                    anchors.fill: parent
+                                    anchors.margins: 22
+                                    spacing: 14
+                                    Label {
+                                        text: settingsView.sheet.tag
+                                        color: root.cGreen
+                                        font.family: root.fontMono
+                                        font.pixelSize: 10
+                                        font.letterSpacing: 2
+                                    }
+                                    Label {
+                                        text: settingsView.sheet.title
+                                        color: root.cFg
+                                        font.family: root.fontBrand
+                                        font.pixelSize: 16
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        text: settingsView.sheet.body
+                                        color: root.cMuted
+                                        font.family: root.fontHuman
+                                        font.pixelSize: 14
+                                        wrapMode: Text.WordWrap
+                                        Layout.fillWidth: true
+                                    }
+                                    Rectangle {
+                                        visible: settingsView.sheet.lines.length > 0
+                                        Layout.fillWidth: true
+                                        implicitHeight: Math.min(240, sheetLines.implicitHeight + 24)
+                                        color: root.cPanel
+                                        border.color: root.cDead
+                                        Flickable {
+                                            anchors.fill: parent
+                                            anchors.margins: 12
+                                            contentHeight: sheetLines.implicitHeight
+                                            boundsBehavior: Flickable.StopAtBounds
+                                            clip: true
+                                            ColumnLayout {
+                                                id: sheetLines
+                                                width: parent.width
+                                                spacing: 4
+                                                Repeater {
+                                                    model: settingsView.sheet.lines
+                                                    delegate: Label {
+                                                        text: modelData.t
+                                                        color: modelData.color
+                                                        font.family: root.fontMono
+                                                        font.pixelSize: 12
+                                                        wrapMode: Text.WrapAnywhere
+                                                        Layout.fillWidth: true
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+                                        Item { Layout.fillWidth: true }
+                                        SettingsButton {
+                                            label: settingsView.sheet.reset ? "CANCEL" : "CLOSE"
+                                            onClicked: root.settingsSheet = ""
+                                        }
+                                        SettingsButton {
+                                            visible: settingsView.sheet.reset
+                                            label: "RESET"
+                                            danger: true
+                                            onClicked: root.settingsRun("reset")
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -4495,6 +5654,10 @@ ShellRoot {
                                                 // action/source/state breadcrumb.
                                                 text: opRow.op.state === "failed"
                                                     ? root.operationProblem(opRow.op)
+                                                    : opRow.op.state === "pending" && opRow.op.message
+                                                    ? opRow.op.message
+                                                    : opRow.op.state === "paused"
+                                                    ? "Paused" + (root.hasTransfer(opRow.op) ? " \u00b7 " + root.transferLine(opRow.op) : "")
                                                     : opRow.op.state === "downloading" && root.hasTransfer(opRow.op)
                                                     ? root.transferLine(opRow.op)
                                                     : opRow.op.action + " · " + root.sourceLabel(root.operationSource(opRow.op.source)) + " · " + opRow.op.state
@@ -4529,6 +5692,26 @@ ShellRoot {
                                                 horizontalAlignment: Text.AlignRight
                                                 Layout.preferredWidth: 38
                                                 Layout.alignment: Qt.AlignVCenter
+                                            }
+
+                                            ActionButton {
+                                                visible: opRow.op.state === "downloading" || opRow.op.state === "paused"
+                                                label: opRow.op.state === "paused" ? "Resume" : "Pause"
+                                                fill: root.cDim
+                                                textColor: root.cGreen
+                                                height: 32
+                                                Layout.preferredWidth: 84
+                                                onClicked: root.request(opRow.op.state === "paused" ? "operations.resume" : "operations.pause", { operationId: opRow.op.id })
+                                            }
+
+                                            ActionButton {
+                                                visible: opRow.op.state === "failed" && root.problemFixLabel(opRow.op) !== ""
+                                                label: root.problemFixLabel(opRow.op)
+                                                fill: root.cDim
+                                                textColor: root.cGreen
+                                                height: 32
+                                                Layout.preferredWidth: 112
+                                                onClicked: root.runProblemFix(opRow.op)
                                             }
 
                                             ActionButton {
@@ -5128,7 +6311,9 @@ ShellRoot {
                 focus: root.viewerSource !== ""
             }
 
-            // First-launch setup — three-step brand walkthrough, shown once.
+            // First-launch setup: welcome, every settings page in steps, done.
+            // Mandatory the first time; Settings › General › Setup reopens it
+            // with a Close button.
             Rectangle {
                 anchors.fill: parent
                 visible: root.setupOpen
@@ -5139,21 +6324,187 @@ ShellRoot {
 
                 Rectangle {
                     anchors.centerIn: parent
-                    width: 580
-                    height: 440
+                    width: Math.min(1060, parent.width - 48)
+                    height: Math.min(780, parent.height - 48)
                     color: root.cPanel
-                    border.color: root.cGreen
+                    border.color: root.cLine
                     radius: 0
 
-                    ColumnLayout {
+                    RowLayout {
                         anchors.fill: parent
-                        anchors.margins: 30
-                        spacing: 14
+                        spacing: 0
 
-                        StackLayout {
+                        // Step rail: where you are, what is done. Seen steps are clickable.
+                        ColumnLayout {
+                            visible: root.setupStep > 0
+                            Layout.preferredWidth: 236
+                            Layout.fillWidth: false
+                            Layout.fillHeight: true
+                            Layout.margins: 24
+                            spacing: 6
+
+                            Label {
+                                text: "SET UP"
+                                color: root.cGreen
+                                font.family: root.fontMono
+                                font.pixelSize: 10
+                                font.letterSpacing: 3
+                            }
+                            Label {
+                                text: "Thallium Store"
+                                color: root.cFg
+                                font.family: root.fontBrand
+                                font.pixelSize: 18
+                                font.bold: true
+                                Layout.bottomMargin: 14
+                            }
+
+                            Repeater {
+                                model: root.setupSteps.length + 1
+                                delegate: Item {
+                                    id: railItem
+                                    required property int index
+                                    readonly property int step: index + 1
+                                    readonly property bool current: root.setupStep === step
+                                    readonly property bool done: root.setupReached > step && !current
+                                    readonly property bool open: step <= root.setupReached
+                                    Layout.fillWidth: true
+                                    implicitHeight: 40
+
+                                    ChamferPanel {
+                                        anchors.fill: parent
+                                        cut: 10
+                                        accentEdge: false
+                                        fill: railItem.current ? root.cBase : "transparent"
+                                        stroke: railItem.current ? root.cGreen : railHover.hovered && railItem.open ? root.cLine : "transparent"
+                                    }
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+                                        spacing: 10
+                                        Rectangle {
+                                            width: 22
+                                            height: 22
+                                            radius: 0
+                                            color: railItem.done ? root.cGreen : "transparent"
+                                            border.color: railItem.current || railItem.done ? root.cGreen : root.cDead
+                                            Label {
+                                                anchors.centerIn: parent
+                                                text: railItem.done ? "✓" : String(railItem.step)
+                                                color: railItem.done ? root.cBase : railItem.current ? root.cGreen : root.cMuted
+                                                font.family: root.fontMono
+                                                font.pixelSize: 11
+                                                font.bold: railItem.done
+                                            }
+                                        }
+                                        Label {
+                                            text: railItem.step <= root.setupSteps.length ? root.setupSteps[railItem.index].title : "Review"
+                                            color: railItem.current ? root.cFg : railItem.open ? root.cMuted : root.cLine
+                                            font.family: root.fontHuman
+                                            font.pixelSize: 13
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
+                                    }
+                                    HoverHandler { id: railHover }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        enabled: railItem.open && !railItem.current
+                                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                        onClicked: root.setupStep = railItem.step
+                                    }
+                                }
+                            }
+                            Item { Layout.fillHeight: true }
+
+                            // Progress as a full-outlined bar, filled to the furthest step.
+                            Rectangle {
+                                Layout.fillWidth: true
+                                height: 6
+                                color: "transparent"
+                                border.color: root.cDead
+                                radius: 0
+                                Rectangle {
+                                    x: 1
+                                    y: 1
+                                    height: parent.height - 2
+                                    width: (parent.width - 2) * Math.min(1, root.setupStep / root.setupLast)
+                                    color: root.cGreen
+                                    Behavior on width { NumberAnimation { duration: root.tMed; easing.type: Easing.OutCubic } }
+                                }
+                            }
+                            Label {
+                                text: Math.round(100 * Math.min(1, root.setupStep / root.setupLast)) + "% DONE"
+                                color: root.cMuted
+                                font.family: root.fontMono
+                                font.pixelSize: 10
+                                font.letterSpacing: 2
+                            }
+                        }
+
+                        Rectangle {
+                            visible: root.setupStep > 0
+                            Layout.fillHeight: true
+                            width: 1
+                            color: root.cDead
+                        }
+
+                        ColumnLayout {
+                            id: setupMain
                             Layout.fillWidth: true
                             Layout.fillHeight: true
-                            currentIndex: root.setupStep
+                            Layout.margins: 30
+                            spacing: 16
+
+                            readonly property var step: root.setupStep >= 1 && root.setupStep <= root.setupSteps.length
+                                ? root.setupSteps[root.setupStep - 1] : null
+                            readonly property bool hasPresets: !!step && step.presets.length > 0
+
+                            // Each step fades in; nothing slides or staggers.
+                            Connections {
+                                target: root
+                                function onSetupStepChanged() {
+                                    setupMain.opacity = 0
+                                    setupFade.restart()
+                                    setupScroll.contentItem.contentY = 0
+                                }
+                            }
+                            NumberAnimation { id: setupFade; target: setupMain; property: "opacity"; to: 1; duration: 180; easing.type: Easing.OutCubic }
+
+                            ColumnLayout {
+                                visible: setupMain.step !== null || root.setupStep === root.setupLast
+                                Layout.fillWidth: true
+                                spacing: 4
+                                Label {
+                                    text: root.setupStep === root.setupLast ? "REVIEW" : "STEP " + root.setupStep + " OF " + root.setupSteps.length
+                                    color: root.cGreen
+                                    font.family: root.fontMono
+                                    font.pixelSize: 10
+                                    font.letterSpacing: 2
+                                }
+                                Label {
+                                    text: root.setupStep === root.setupLast ? "Looks good?" : setupMain.step ? setupMain.step.title : ""
+                                    color: root.cFg
+                                    font.family: root.fontBrand
+                                    font.pixelSize: 26
+                                    font.bold: true
+                                }
+                                Label {
+                                    text: root.setupStep === root.setupLast ? "Everything is saved already. Jump back to any step to change it."
+                                          : setupMain.step ? setupMain.step.desc : ""
+                                    color: root.cMuted
+                                    font.family: root.fontHuman
+                                    font.pixelSize: 13
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+                            }
+
+                            StackLayout {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                currentIndex: root.setupStep === 0 ? 0 : root.setupStep === root.setupLast ? 2 : 1
 
                             // Step 0 — welcome.
                             ColumnLayout {
@@ -5190,142 +6541,325 @@ ShellRoot {
                                     horizontalAlignment: Text.AlignHCenter
                                     Layout.fillWidth: true
                                 }
-                                Item { Layout.fillHeight: true }
-                            }
-
-                            // Step 1 — sources and trust.
-                            ColumnLayout {
-                                spacing: 10
                                 Label {
-                                    text: "SOURCES & TRUST"
-                                    color: root.cFg
+                                    text: root.setupSteps.length + " QUICK STEPS · ABOUT A MINUTE · ALL CHANGEABLE LATER"
+                                    color: root.cLine
                                     font.family: root.fontMono
-                                    font.pixelSize: 13
-                                    font.bold: true
-                                    font.letterSpacing: 3
+                                    font.pixelSize: 10
+                                    font.letterSpacing: 2
+                                    Layout.alignment: Qt.AlignHCenter
+                                    Layout.topMargin: 6
                                 }
-                                Label {
-                                    text: "Every app can come from several channels. Thallium ranks them and recommends the safest."
-                                    color: root.cMuted
-                                    font.family: root.fontHuman
-                                    font.pixelSize: 12
-                                    wrapMode: Text.WordWrap
-                                    Layout.fillWidth: true
-                                }
-                                Repeater {
-                                    model: [
-                                        { s: "flathub",  n: "Flathub",  d: "Sandboxed flatpaks — the default recommendation." },
-                                        { s: "system",   n: "System",   d: "Native .deb packages with full system access." },
-                                        { s: "github",   n: "GitHub",   d: "Curated release binaries from upstream repos." },
-                                        { s: "appimage", n: "AppImage", d: "Portable single-file apps." }
-                                    ]
-                                    delegate: RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 12
-                                        Rectangle {
-                                            width: 10; height: 10; radius: 0
-                                            color: root.sourceAccent(modelData.s)
-                                            Layout.alignment: Qt.AlignVCenter
-                                        }
-                                        Label {
-                                            text: modelData.n
-                                            color: root.cFg
-                                            font.family: root.fontHuman
-                                            font.pixelSize: 13
-                                            font.bold: true
-                                            Layout.preferredWidth: 92
-                                        }
-                                        Label {
-                                            text: modelData.d
-                                            color: root.cMuted
-                                            font.family: root.fontHuman
-                                            font.pixelSize: 12
-                                            wrapMode: Text.WordWrap
-                                            Layout.fillWidth: true
+                                Flow {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    Layout.preferredWidth: Math.min(620, parent.width)
+                                    Layout.topMargin: 4
+                                    spacing: 8
+                                    Repeater {
+                                        model: root.setupSteps
+                                        delegate: Rectangle {
+                                            required property var modelData
+                                            required property int index
+                                            width: chipText.implicitWidth + 22
+                                            height: 28
+                                            color: "transparent"
+                                            border.color: root.cDead
+                                            radius: 0
+                                            Label {
+                                                id: chipText
+                                                anchors.centerIn: parent
+                                                text: (parent.index + 1) + "  " + parent.modelData.title
+                                                color: root.cMuted
+                                                font.family: root.fontHuman
+                                                font.pixelSize: 12
+                                            }
                                         }
                                     }
                                 }
                                 Item { Layout.fillHeight: true }
                             }
 
-                            // Step 2 — cache and privacy.
-                            ColumnLayout {
+                                // Steps: preset cards first, then every setting under Fine-tune.
+                                ScrollView {
+                                    id: setupScroll
+                                    clip: true
+                                    contentWidth: availableWidth
+                                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+                                    ColumnLayout {
+                                        width: setupScroll.availableWidth - 12
+                                        spacing: 22
+
+                                        GridLayout {
+                                            visible: setupMain.hasPresets
+                                            Layout.fillWidth: true
+                                            Layout.topMargin: 4
+                                            columns: setupMain.hasPresets ? setupMain.step.presets.length : 1
+                                            columnSpacing: 12
+                                            rowSpacing: 12
+
+                                            Repeater {
+                                                model: setupMain.hasPresets ? setupMain.step.presets : []
+                                                delegate: Item {
+                                                    id: presetCard
+                                                    required property var modelData
+                                                    readonly property bool on: root.presetOn(modelData)
+                                                    Layout.fillWidth: true
+                                                    Layout.preferredWidth: 1
+                                                    Layout.fillHeight: true
+                                                    implicitHeight: presetBody.implicitHeight + 36
+
+                                                    ChamferPanel {
+                                                        anchors.fill: parent
+                                                        cut: 14
+                                                        accentEdge: false
+                                                        fill: presetCard.on ? root.cDim : root.cBase
+                                                        stroke: presetCard.on ? root.cGreen : presetHover.hovered ? root.cLine : root.cDead
+                                                    }
+                                                    ColumnLayout {
+                                                        id: presetBody
+                                                        anchors.left: parent.left
+                                                        anchors.right: parent.right
+                                                        anchors.top: parent.top
+                                                        anchors.margins: 18
+                                                        spacing: 6
+                                                        RowLayout {
+                                                            Layout.fillWidth: true
+                                                            spacing: 8
+                                                            Label {
+                                                                text: presetCard.modelData.label
+                                                                color: root.cFg
+                                                                font.family: root.fontBrand
+                                                                font.pixelSize: 17
+                                                                font.bold: true
+                                                                Layout.fillWidth: true
+                                                                wrapMode: Text.WordWrap
+                                                            }
+                                                            Rectangle {
+                                                                width: 18
+                                                                height: 18
+                                                                radius: 0
+                                                                color: presetCard.on ? root.cGreen : "transparent"
+                                                                border.color: presetCard.on ? root.cGreen : root.cLine
+                                                                Label {
+                                                                    anchors.centerIn: parent
+                                                                    visible: presetCard.on
+                                                                    text: "✓"
+                                                                    color: root.cBase
+                                                                    font.pixelSize: 11
+                                                                    font.bold: true
+                                                                }
+                                                            }
+                                                        }
+                                                        Label {
+                                                            text: presetCard.modelData.note
+                                                            color: root.cMuted
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 12
+                                                            wrapMode: Text.WordWrap
+                                                            Layout.fillWidth: true
+                                                        }
+                                                        Rectangle { Layout.fillWidth: true; Layout.topMargin: 6; height: 1; color: root.cDead }
+                                                        Repeater {
+                                                            model: presetCard.modelData.lines
+                                                            delegate: Label {
+                                                                required property var modelData
+                                                                text: "·  " + modelData
+                                                                color: presetCard.on ? root.cFg : root.cMuted
+                                                                font.family: root.fontHuman
+                                                                font.pixelSize: 12
+                                                                wrapMode: Text.WordWrap
+                                                                Layout.fillWidth: true
+                                                                Behavior on color { ColorAnimation { duration: root.tFast } }
+                                                            }
+                                                        }
+                                                    }
+                                                    HoverHandler { id: presetHover }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: root.settingsApply(presetCard.modelData.patch, presetCard.modelData.parallel)
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Fine-tune: every setting of the step, collapsed when presets cover it.
+                                        Item {
+                                            visible: setupMain.hasPresets
+                                            Layout.fillWidth: true
+                                            implicitHeight: 38
+                                            ChamferPanel {
+                                                anchors.fill: parent
+                                                cut: 10
+                                                accentEdge: false
+                                                fill: "transparent"
+                                                stroke: fineHover.hovered ? root.cLine : root.cDead
+                                            }
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 14
+                                                anchors.rightMargin: 14
+                                                Label {
+                                                    text: (root.setupFine ? "▾" : "▸") + "  FINE-TUNE"
+                                                    color: root.cFg
+                                                    font.family: root.fontMono
+                                                    font.pixelSize: 11
+                                                    font.letterSpacing: 2
+                                                }
+                                                Label {
+                                                    text: root.setupFine ? "" : "every setting in this step"
+                                                    color: root.cMuted
+                                                    font.family: root.fontHuman
+                                                    font.pixelSize: 12
+                                                    Layout.fillWidth: true
+                                                    horizontalAlignment: Text.AlignRight
+                                                }
+                                            }
+                                            HoverHandler { id: fineHover }
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.setupFine = !root.setupFine
+                                            }
+                                        }
+
+                                        Repeater {
+                                            model: setupMain.step && (!setupMain.hasPresets || root.setupFine) ? setupMain.step.pages : []
+                                            delegate: ColumnLayout {
+                                                id: setupPage
+                                                required property var modelData
+                                                readonly property var page: root.buildPageFor(modelData)
+                                                readonly property bool several: setupMain.step && setupMain.step.pages.length > 1
+                                                Layout.fillWidth: true
+                                                spacing: 12
+                                                visible: !!page.form || (page.groups || []).some(g =>
+                                                    g.rows.some(r => r.kind !== "nav") || (g.footer || "") !== "")
+
+                                                Label {
+                                                    visible: setupPage.several
+                                                    text: (setupPage.page.title || "").toUpperCase()
+                                                    color: root.cFg
+                                                    font.family: root.fontMono
+                                                    font.pixelSize: 11
+                                                    font.letterSpacing: 2
+                                                }
+                                                Loader {
+                                                    Layout.fillWidth: true
+                                                    property var page: setupPage.page
+                                                    property bool wizard: true
+                                                    sourceComponent: settingsGroups
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Review: one line per step with what it is set to.
+                                ScrollView {
+                                    id: setupReview
+                                    clip: true
+                                    contentWidth: availableWidth
+                                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                                    ColumnLayout {
+                                        width: setupReview.availableWidth - 12
+                                        spacing: 8
+                                        Repeater {
+                                            model: root.setupSteps
+                                            delegate: Item {
+                                                id: reviewRow
+                                                required property var modelData
+                                                required property int index
+                                                readonly property var picked: modelData.presets.find(pr => root.presetOn(pr))
+                                                Layout.fillWidth: true
+                                                implicitHeight: 58
+                                                ChamferPanel {
+                                                    anchors.fill: parent
+                                                    cut: 12
+                                                    accentEdge: false
+                                                    fill: root.cBase
+                                                    stroke: root.cDead
+                                                }
+                                                RowLayout {
+                                                    anchors.fill: parent
+                                                    anchors.leftMargin: 16
+                                                    anchors.rightMargin: 12
+                                                    spacing: 14
+                                                    Label {
+                                                        text: String(reviewRow.index + 1).padStart(2, "0")
+                                                        color: root.cGreen
+                                                        font.family: root.fontMono
+                                                        font.pixelSize: 12
+                                                    }
+                                                    ColumnLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 2
+                                                        Label {
+                                                            text: reviewRow.modelData.title
+                                                            color: root.cFg
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 14
+                                                        }
+                                                        Label {
+                                                            text: reviewRow.modelData.presets.length === 0 ? "Optional · " + root.setupSourcesNote()
+                                                                  : reviewRow.picked ? reviewRow.picked.lines.join(" · ") : "Your own mix"
+                                                            color: root.cMuted
+                                                            font.family: root.fontHuman
+                                                            font.pixelSize: 12
+                                                            elide: Text.ElideRight
+                                                            Layout.fillWidth: true
+                                                        }
+                                                    }
+                                                    Label {
+                                                        text: reviewRow.modelData.presets.length === 0 ? ""
+                                                              : reviewRow.picked ? reviewRow.picked.label.toUpperCase() : "CUSTOM"
+                                                        color: reviewRow.picked ? root.cGreen : root.cWarn
+                                                        font.family: root.fontMono
+                                                        font.pixelSize: 10
+                                                        font.letterSpacing: 2
+                                                    }
+                                                    SettingsButton {
+                                                        label: "EDIT"
+                                                        onClicked: root.setupStep = reviewRow.index + 1
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
                                 spacing: 10
-                                Label {
-                                    text: "FAST & LOCAL"
-                                    color: root.cFg
-                                    font.family: root.fontMono
-                                    font.pixelSize: 13
-                                    font.bold: true
-                                    font.letterSpacing: 3
+                                Item { Layout.fillWidth: true }
+                                ActionButton {
+                                    visible: root.setupRerun
+                                    label: "Close"
+                                    fill: root.cDim
+                                    textColor: root.cMuted
+                                    Layout.preferredWidth: 96
+                                    onClicked: root.setupOpen = false
                                 }
-                                Repeater {
-                                    model: [
-                                        "App icons are cached on disk after first load, so the store paints instantly offline.",
-                                        "Detail pages are enriched from Flathub and GitHub on demand, then cached in the daemon.",
-                                        "Network is only touched for search, artwork and metadata — never in the background without you.",
-                                        "Storage and cache controls live in Settings."
-                                    ]
-                                    delegate: RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 10
-                                        Rectangle {
-                                            width: root.tickW; height: 12; color: root.cGreen
-                                            Layout.alignment: Qt.AlignTop
-                                            Layout.topMargin: 3
-                                        }
-                                        Label {
-                                            text: modelData
-                                            color: root.cMuted
-                                            font.family: root.fontHuman
-                                            font.pixelSize: 13
-                                            wrapMode: Text.WordWrap
-                                            Layout.fillWidth: true
-                                        }
+                                ActionButton {
+                                    visible: root.setupStep > 0
+                                    label: "Back"
+                                    fill: root.cDim
+                                    textColor: root.cFg
+                                    Layout.preferredWidth: 96
+                                    onClicked: root.setupStep = root.setupStep - 1
+                                }
+                                ActionButton {
+                                    label: root.setupStep === 0 ? "Start setup" : root.setupStep < root.setupLast ? "Continue" : "Finish"
+                                    fill: root.cGreen
+                                    textColor: root.cBase
+                                    Layout.preferredWidth: 140
+                                    onClicked: {
+                                        if (root.setupStep < root.setupLast)
+                                            root.setupStep = root.setupStep + 1
+                                        else
+                                            root.finishSetup()
                                     }
-                                }
-                                Item { Layout.fillHeight: true }
-                            }
-                        }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 10
-
-                            Row {
-                                spacing: 6
-                                Layout.alignment: Qt.AlignVCenter
-                                Repeater {
-                                    model: 3
-                                    delegate: Rectangle {
-                                        width: root.setupStep === index ? 16 : 6
-                                        height: 5
-                                        color: root.setupStep === index ? root.cGreen : root.cLine
-                                        Behavior on width { NumberAnimation { duration: root.tFast } }
-                                    }
-                                }
-                            }
-
-                            Item { Layout.fillWidth: true }
-
-                            ActionButton {
-                                visible: root.setupStep < 2
-                                label: "Skip"
-                                fill: root.cDim
-                                textColor: root.cMuted
-                                Layout.preferredWidth: 84
-                                onClicked: root.finishSetup()
-                            }
-                            ActionButton {
-                                label: root.setupStep < 2 ? "Continue" : "Get started"
-                                fill: root.cGreen
-                                textColor: root.cBase
-                                Layout.preferredWidth: 128
-                                onClicked: {
-                                    if (root.setupStep < 2)
-                                        root.setupStep = root.setupStep + 1
-                                    else
-                                        root.finishSetup()
                                 }
                             }
                         }
@@ -5414,7 +6948,7 @@ ShellRoot {
                 anchors.fill: parent
                 visible: root.localOpen && root.localImage !== null
                 color: "#cc07090a"
-                z: 910
+                z: 960
 
                 MouseArea {
                     anchors.fill: parent
@@ -5437,11 +6971,14 @@ ShellRoot {
                         anchors.margins: 16
                         spacing: 14
                         readonly property var img: root.localImage || ({})
+                        readonly property bool isDeb: img.kind === "deb"
+                        readonly property bool readable: isDeb || img.format === "type2"
                         readonly property bool signed: img.signed === true
                         readonly property string host: root.originHost(img.origin_url)
-                        readonly property string verdict: img.format !== "type2" ? "UNREADABLE"
+                        readonly property string verdict: isDeb ? "SYSTEM PACKAGE · RUNS AS ROOT"
+                            : img.format !== "type2" ? "UNREADABLE"
                             : (signed ? "SIGNED · NO SANDBOX" : "UNVERIFIED · NO SANDBOX")
-                        readonly property color verdictColor: img.format !== "type2" ? root.cRed
+                        readonly property color verdictColor: isDeb ? root.cWarn : img.format !== "type2" ? root.cRed
                             : (signed ? root.cWarn : root.cRed)
 
                         RowLayout {
@@ -5449,7 +6986,7 @@ ShellRoot {
                             spacing: 8
                             Rectangle { width: root.tickW; height: 15; radius: 0; color: root.cGreen; Layout.alignment: Qt.AlignVCenter }
                             Label {
-                                text: "INSTALL APPIMAGE"
+                                text: localCol.isDeb ? "INSTALL DEB PACKAGE" : "INSTALL APPIMAGE"
                                 color: root.cFg
                                 font.family: root.fontBrand
                                 font.pixelSize: 14
@@ -5552,6 +7089,17 @@ ShellRoot {
                                 model: {
                                     const img = localCol.img
                                     const rows = []
+                                    if (localCol.isDeb) {
+                                        rows.push({ tone: "bad", text: "Installs system-wide; its install scripts run as root" })
+                                        rows.push({ tone: "warn", text: "Not from a repository you added — it will not update on its own" })
+                                        if (img.maintainer)
+                                            rows.push({ tone: "warn", text: "Packaged by " + img.maintainer + " (not verified)" })
+                                        if (img.depends)
+                                            rows.push({ tone: "ok", text: "Missing dependencies come from your APT repositories" })
+                                        if (img.installed_version)
+                                            rows.push({ tone: "warn", text: "Version " + img.installed_version + " is installed; it will be replaced" })
+                                        return rows
+                                    }
                                     if (img.format !== "type2") {
                                         rows.push({ tone: "bad", text: "Not a readable AppImage — " + ((img.warnings || [])[0] || "unknown format") })
                                         return rows
@@ -5597,6 +7145,7 @@ ShellRoot {
                         }
 
                         Label {
+                            visible: !!localCol.img.sha256
                             text: "SHA-256  " + (localCol.img.sha256 || "").substring(0, 32) + "…"
                             color: root.cLine
                             font.family: root.fontMono
@@ -5605,7 +7154,9 @@ ShellRoot {
                         }
 
                         Label {
-                            text: "Installs to your home folder only — no password needed. Only install AppImages from publishers you trust."
+                            text: localCol.isDeb
+                                  ? "Asks for your password. Only install packages from publishers you trust."
+                                  : "Installs to your home folder only — no password needed. Only install AppImages from publishers you trust."
                             color: root.cMuted
                             font.family: root.fontHuman
                             font.pixelSize: 11
@@ -5626,11 +7177,11 @@ ShellRoot {
                             }
                             ActionButton {
                                 label: localCol.img.already_installed ? "Reinstall" : "Install"
-                                fill: localCol.img.format === "type2" ? root.cGreen : root.cDead
+                                fill: localCol.readable ? root.cGreen : root.cDead
                                 textColor: root.cBase
-                                active: localCol.img.format === "type2"
+                                active: localCol.readable
                                 Layout.preferredWidth: 128
-                                onClicked: if (localCol.img.format === "type2") root.confirmLocalInstall()
+                                onClicked: if (localCol.readable) root.confirmLocalInstall()
                             }
                         }
                     }
