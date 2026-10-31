@@ -7,4 +7,4 @@ Icon=io.thallium.Store
 Terminal=false
 Categories=System;PackageManager;
 StartupNotify=true
-MimeType=application/vnd.appimage;application/x-iso9660-appimage;
+MimeType=application/vnd.appimage;application/x-iso9660-appimage;application/vnd.debian.binary-package;

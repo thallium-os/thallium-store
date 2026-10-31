@@ -397,6 +397,11 @@ async fn handle_request(request: RpcRequest, state: AppState) -> Result<Value> {
         "remotes.removeFlatpak" => {
             maintenance::remotes_remove_flatpak(&request.params, state.fake_uni).await
         }
+        "remotes.addApt" => maintenance::remotes_add_apt(&request.params, state.fake_uni).await,
+        "remotes.removeApt" => maintenance::remotes_remove_apt(&request.params, state.fake_uni).await,
+        // A local .deb opened from the file manager. Read-only like
+        // appimage.inspect; installing goes through operations.enqueue.
+        "deb.inspect" => maintenance::deb_inspect(&request.params).await,
         "updates.status" => Ok(updates::status().await),
         "updates.checkNow" => Ok(updates::check_now(&state).await),
         "flatpak.permissions" => maintenance::flatpak_permissions(&request.params, state.fake_uni).await,

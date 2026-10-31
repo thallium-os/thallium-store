@@ -114,9 +114,12 @@ pub async fn run(
 }
 
 async fn record(action: OperationAction, app_name: &str, package_id: &str) {
+    // A local .deb is installed by path; apt knows it by its package name,
+    // which the caller passes as the app name.
+    let package = if package_id.ends_with(".deb") { app_name } else { package_id };
     let result = match action {
         OperationAction::Remove => registry::remove(app_name).await,
-        _ => registry::add(app_name, "apt", package_id).await,
+        _ => registry::add(app_name, "apt", package).await,
     };
     if let Err(err) = result {
         tracing::warn!("updating UNI registry after apt op failed: {err:#}");

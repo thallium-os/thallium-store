@@ -218,6 +218,8 @@ pub struct AptRemote {
     pub components: Vec<String>,
     pub file: String,
     pub signed: bool,
+    /// Added through the store, so the store may remove it again.
+    pub custom: bool,
 }
 
 fn words(value: &str) -> Vec<String> {
@@ -248,6 +250,7 @@ pub fn parse_deb822(text: &str, file: &str) -> Vec<AptRemote> {
                     components: words(get("Components").unwrap_or("")),
                     file: file.to_string(),
                     signed,
+                    custom: custom_apt_name(file).is_some(),
                 });
             }
         }
@@ -294,6 +297,7 @@ pub fn parse_one_line(text: &str, file: &str) -> Vec<AptRemote> {
                 components: parts.map(str::to_string).collect(),
                 file: file.to_string(),
                 signed,
+                custom: custom_apt_name(file).is_some(),
             })
         })
         .collect()
@@ -415,6 +419,258 @@ pub async fn remotes_remove_flatpak(params: &Value, fake: bool) -> Result<Value>
         bail!("{}", lines.join("; "));
     }
     Ok(json!({ "ok": true }))
+}
+
+// ---- custom APT repositories -------------------------------------------
+
+const APT_SOURCES_DIR: &str = "/etc/apt/sources.list.d";
+const APT_KEYRINGS_DIR: &str = "/etc/apt/keyrings";
+const CUSTOM_APT_PREFIX: &str = "thallium-custom-";
+const MAX_KEY_BYTES: usize = 256 * 1024;
+
+/// The name part of a sources file the store wrote, `None` for anything else.
+pub fn custom_apt_name(file: &str) -> Option<&str> {
+    let name = file
+        .strip_prefix(APT_SOURCES_DIR)?
+        .strip_prefix('/')?
+        .strip_prefix(CUSTOM_APT_PREFIX)?
+        .strip_suffix(".sources")?;
+    valid_remote_name(name).then_some(name)
+}
+
+/// One deb822 stanza. Every value is validated before it gets here, so no
+/// field can smuggle in a newline or a second stanza.
+pub fn custom_apt_stanza(uri: &str, suites: &[&str], components: &[&str], key: Option<&str>) -> String {
+    let mut text = format!("Types: deb\nURIs: {uri}\nSuites: {}\n", suites.join(" "));
+    if !components.is_empty() {
+        text.push_str(&format!("Components: {}\n", components.join(" ")));
+    }
+    if let Some(key) = key {
+        text.push_str(&format!("Signed-By: {key}\n"));
+    }
+    text
+}
+
+fn apt_words(value: &str) -> Result<Vec<&str>> {
+    let list: Vec<&str> = value.split_whitespace().collect();
+    if list.iter().any(|w| {
+        !w.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/' | '+'))
+    }) {
+        bail!("suites and components are plain words like `stable` or `main contrib`");
+    }
+    Ok(list)
+}
+
+async fn fetch_key(url: &str) -> Result<Vec<u8>> {
+    if !url.starts_with("https://") {
+        bail!("signing key URL must be https");
+    }
+    let bytes = reqwest::Client::new()
+        .get(url)
+        .timeout(QUERY_TIMEOUT)
+        .send()
+        .await
+        .context("fetching signing key")?
+        .error_for_status()
+        .context("fetching signing key")?
+        .bytes()
+        .await?;
+    if bytes.len() > MAX_KEY_BYTES {
+        bail!("signing key is larger than 256 KiB");
+    }
+    Ok(bytes.to_vec())
+}
+
+/// Write a deb822 source (and its key) under the `thallium-custom-` prefix,
+/// then refresh only that source. A source apt cannot read is rolled back so
+/// a typo never leaves every later `apt update` failing.
+pub async fn remotes_add_apt(params: &Value, fake: bool) -> Result<Value> {
+    let name = crate::str_param(params, "name")?;
+    let uri = crate::str_param(params, "uri")?.trim();
+    let suites = apt_words(crate::str_param(params, "suites")?)?;
+    let components = apt_words(params.get("components").and_then(Value::as_str).unwrap_or(""))?;
+    let key_url = params.get("keyUrl").and_then(Value::as_str).unwrap_or("").trim();
+    if !valid_remote_name(name) {
+        bail!("invalid repository name");
+    }
+    if !valid_remote_url(uri) {
+        bail!("repository URL must be http(s)");
+    }
+    if suites.is_empty() {
+        bail!("give at least one suite, like `stable`");
+    }
+    // A suite ending in `/` is a flat repository, which takes no components.
+    if suites.iter().any(|s| s.ends_with('/')) != components.is_empty() {
+        bail!("a flat suite (ending in /) takes no components; any other suite needs them");
+    }
+    let key = if key_url.is_empty() { None } else { Some(fetch_key(key_url).await?) };
+    if fake {
+        return Ok(json!({ "ok": true }));
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let staging = std::env::temp_dir().join(format!("thallium-apt-{}-{nanos}", std::process::id()));
+    std::fs::create_dir(&staging)?;
+    let result = add_apt_staged(&staging, name, uri, &suites, &components, key.as_deref()).await;
+    let _ = std::fs::remove_dir_all(&staging);
+    result
+}
+
+async fn add_apt_staged(
+    staging: &Path,
+    name: &str,
+    uri: &str,
+    suites: &[&str],
+    components: &[&str],
+    key: Option<&[u8]>,
+) -> Result<Value> {
+    let armored = key.is_some_and(|k| k.starts_with(b"-----BEGIN PGP"));
+    let key_dest = key
+        .map(|_| format!("{APT_KEYRINGS_DIR}/{CUSTOM_APT_PREFIX}{name}.{}", if armored { "asc" } else { "gpg" }));
+    let list_dest = format!("{APT_SOURCES_DIR}/{CUSTOM_APT_PREFIX}{name}.sources");
+    if Path::new(&list_dest).exists() {
+        bail!("a repository named {name} already exists");
+    }
+    let list_tmp = staging.join("list");
+    std::fs::write(&list_tmp, custom_apt_stanza(uri, suites, components, key_dest.as_deref()))?;
+    let key_tmp = staging.join("key");
+    if let Some(key) = key {
+        std::fs::write(&key_tmp, key)?;
+    }
+
+    // One root prompt for the whole thing. Paths ride in as positional
+    // arguments, never spliced into the script.
+    const SCRIPT: &str = r#"set -eu
+list_tmp=$1 list_dest=$2 key_tmp=$3 key_dest=$4
+if [ -n "$key_dest" ]; then install -D -m 0644 "$key_tmp" "$key_dest"; fi
+install -m 0644 "$list_tmp" "$list_dest"
+out=$(apt-get update -o Dir::Etc::sourcelist="$list_dest" -o Dir::Etc::sourceparts=- \
+      -o APT::Get::List-Cleanup=0 2>&1) || true
+printf '%s\n' "$out"
+if printf '%s\n' "$out" | grep -q -E '^(E:|W: (GPG|The repository|Failed))'; then
+  rm -f "$list_dest"
+  if [ -n "$key_dest" ]; then rm -f "$key_dest"; fi
+  exit 3
+fi
+"#;
+    let key_dest_arg = key_dest.clone().unwrap_or_default();
+    let args = [
+        "-c",
+        SCRIPT,
+        "sh",
+        list_tmp.to_str().context("temp path")?,
+        &list_dest,
+        key_tmp.to_str().context("temp path")?,
+        &key_dest_arg,
+    ];
+    let (ok, lines) = run_lines(store_uni::privileged("sh", &args), REPAIR_TIMEOUT).await;
+    if !ok {
+        let reason = lines
+            .iter()
+            .rev()
+            .find(|l| l.starts_with("E:") || l.starts_with("W:"))
+            .cloned()
+            .unwrap_or_else(|| lines.join("; "));
+        bail!("repository not added: {reason}");
+    }
+    Ok(json!({ "ok": true }))
+}
+
+/// Remove a repository the store added, with its key. Anything else in
+/// sources.list.d belongs to the system or another tool and is refused.
+pub async fn remotes_remove_apt(params: &Value, fake: bool) -> Result<Value> {
+    let file = crate::str_param(params, "file")?;
+    let Some(name) = custom_apt_name(file) else {
+        bail!("only repositories added in the store can be removed here");
+    };
+    if fake {
+        return Ok(json!({ "ok": true }));
+    }
+    let asc = format!("{APT_KEYRINGS_DIR}/{CUSTOM_APT_PREFIX}{name}.asc");
+    let gpg = format!("{APT_KEYRINGS_DIR}/{CUSTOM_APT_PREFIX}{name}.gpg");
+    let (ok, lines) = run_lines(
+        store_uni::privileged("rm", &["-f", file, &asc, &gpg]),
+        QUERY_TIMEOUT * 3,
+    )
+    .await;
+    if !ok {
+        bail!("{}", lines.join("; "));
+    }
+    Ok(json!({ "ok": true }))
+}
+
+// ---- local .deb ----------------------------------------------------------
+
+/// Control fields of a `.deb` on disk. Read with `dpkg-deb -f`, which only
+/// parses the archive: no maintainer script runs until the person installs.
+pub async fn deb_inspect(params: &Value) -> Result<Value> {
+    let path = Path::new(crate::str_param(params, "path")?);
+    if !path.is_absolute() || path.extension().and_then(|e| e.to_str()) != Some("deb") {
+        bail!("not a .deb file");
+    }
+    let size = std::fs::metadata(path).context("reading the .deb")?.len();
+    let fields = [
+        "Package", "Version", "Architecture", "Maintainer", "Description",
+        "Depends", "Installed-Size", "Homepage",
+    ];
+    let mut cmd = Command::new("dpkg-deb");
+    cmd.arg("-f").arg(path).args(fields);
+    let (ok, lines) = run_lines(cmd, QUERY_TIMEOUT).await;
+    if !ok {
+        bail!("not a readable .deb: {}", lines.join("; "));
+    }
+    let control = parse_control(&lines.join("\n"));
+    let field = |k: &str| control.get(k).cloned().unwrap_or_default();
+    let package = field("Package");
+    if package.is_empty() {
+        bail!("not a readable .deb: no Package field");
+    }
+    let installed = query("dpkg-query", &["-W", "-f=${db:Status-Abbrev}\t${Version}", &package])
+        .await
+        .and_then(|out| {
+            let (status, version) = out.trim().split_once('\t')?;
+            status.starts_with("ii").then(|| version.to_string())
+        });
+    let description = field("Description");
+    let (summary, _) = description.split_once('\n').unwrap_or((&description, ""));
+    Ok(json!({ "deb": {
+        "kind": "deb",
+        "path": path.to_string_lossy(),
+        "file_name": path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+        "name": package,
+        "version": field("Version"),
+        "architecture": field("Architecture"),
+        "maintainer": field("Maintainer"),
+        "summary": summary.trim(),
+        "depends": field("Depends"),
+        "homepage": field("Homepage"),
+        "size": size,
+        "installed_size_kb": field("Installed-Size").parse::<u64>().ok(),
+        "installed_version": installed,
+        "already_installed": installed.is_some(),
+    }}))
+}
+
+/// `Key: value` control text, continuation lines folded into the value.
+pub fn parse_control(text: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let mut last: Option<String> = None;
+    for line in text.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if let Some(key) = &last {
+                let value: &mut String = map.entry(key.clone()).or_default();
+                value.push('\n');
+                value.push_str(line.trim());
+            }
+        } else if let Some((key, value)) = line.split_once(':') {
+            map.insert(key.trim().to_string(), value.trim().to_string());
+            last = Some(key.trim().to_string());
+        }
+    }
+    map
 }
 
 const FLATHUB_BETA_URL: &str = "https://flathub.org/beta-repo/flathub-beta.flatpakrepo";
@@ -668,6 +924,32 @@ pub async fn import_apply(params: &Value, state: &AppState) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_apt_names_only_match_store_files() {
+        assert_eq!(custom_apt_name("/etc/apt/sources.list.d/thallium-custom-vscode.sources"), Some("vscode"));
+        assert_eq!(custom_apt_name("/etc/apt/sources.list.d/debian.sources"), None);
+        assert_eq!(custom_apt_name("/etc/apt/sources.list.d/thallium-custom-a b.sources"), None);
+        assert_eq!(custom_apt_name("/etc/apt/sources.list.d/thallium-custom-x.list"), None);
+    }
+
+    #[test]
+    fn custom_apt_stanza_is_deb822() {
+        let text = custom_apt_stanza("https://ex.org/apt", &["stable"], &["main"], Some("/etc/apt/keyrings/k.asc"));
+        assert_eq!(text, "Types: deb\nURIs: https://ex.org/apt\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/k.asc\n");
+        let flat = custom_apt_stanza("https://ex.org/apt", &["./"], &[], None);
+        assert_eq!(flat, "Types: deb\nURIs: https://ex.org/apt\nSuites: ./\n");
+        assert!(apt_words("main\nTypes: deb-src").is_err());
+        assert!(apt_words("main;rm").is_err());
+    }
+
+    #[test]
+    fn control_folds_continuations() {
+        let map = parse_control("Package: zed\nDescription: Editor\n fast one\nVersion: 1.0");
+        assert_eq!(map["Package"], "zed");
+        assert_eq!(map["Description"], "Editor\nfast one");
+        assert_eq!(map["Version"], "1.0");
+    }
 
     #[test]
     fn deb822_one_entry_per_uri_and_skips_disabled() {
