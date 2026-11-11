@@ -1,0 +1,22 @@
+#!/usr/bin/make -f
+
+# The Rust toolchain comes from rustup in CI (trixie's rustc is too old), so
+# it is deliberately not in Build-Depends. cargo needs the network for crates.
+VERSION := $(shell dpkg-parsechangelog -S Version)
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# The backend reports this over system.health; keep it equal to the
+	# version stamped into the control file.
+	THALLIUM_STORE_VERSION=$(VERSION) cargo build --release
+
+override_dh_auto_test:
+
+# The old package shipped unstripped binaries and no -dbgsym package.
+override_dh_strip:
+
+# Docs were shipped as plain .md.
+override_dh_compress:
+	dh_compress -X.md

@@ -1,0 +1,12 @@
+target/release/thallium-store-backend usr/bin
+scripts/thallium-store usr/bin
+ui/* usr/share/thallium-store/ui
+data/github-apps.json usr/share/thallium-store/data
+data/appimages.json usr/share/thallium-store/data
+data/canonical-aliases.json usr/share/thallium-store/data
+data/icons/io.thallium.Store.svg usr/share/icons/hicolor/scalable/apps
+data/io.thallium.Store.desktop usr/share/applications
+data/mimeapps.list usr/share/applications
+data/io.thallium.Store.metainfo.xml usr/share/metainfo
+README.md usr/share/doc/thallium-store
+docs/known-limitations.md usr/share/doc/thallium-store
