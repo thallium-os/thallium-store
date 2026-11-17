@@ -1,0 +1,8 @@
+thallium-store (0.1.13-1) unstable; urgency=medium
+
+  * Package for the thallium-apt pipeline (dpkg-buildpackage); replaces
+    scripts/build-deb as the way the archive builds this package.
+  * Same contents, Depends and postinst as 0.1.12+20261031095410.gc61f38d.
+  * Version is above the one already published so installed machines upgrade.
+
+ -- Thallium Project <36neelansh@gmail.com>  Wed, 11 Nov 2026 12:00:00 +0000

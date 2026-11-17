@@ -1,0 +1,17 @@
+Source: thallium-store
+Section: admin
+Priority: optional
+Maintainer: Thallium OS <maintainers@thallium.local>
+Build-Depends: debhelper-compat (= 13), build-essential, pkg-config
+Standards-Version: 4.6.2
+Homepage: https://github.com/thallium-os/thallium-store
+Rules-Requires-Root: no
+
+Package: thallium-store
+Architecture: any
+# No ${shlibs:Depends} on purpose: the pre-conversion package had none.
+Depends: ${misc:Depends}, quickshell, bash, curl, flatpak, apt, dpkg, pkexec,
+ squashfs-tools, coreutils
+Description: Graphical application store for Thallium OS
+ Thallium Store searches system packages, Flathub, and curated GitHub
+ applications, then delegates package changes to a JSON-capable UNI backend.
