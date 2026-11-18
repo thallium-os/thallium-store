@@ -66,7 +66,7 @@ Section: admin
 Priority: optional
 Architecture: $arch
 Maintainer: Thallium OS <maintainers@thallium.local>
-Depends: quickshell, bash, curl, flatpak, apt, dpkg, pkexec, squashfs-tools, coreutils
+Depends: quickshell, bash, curl, flatpak, apt, dpkg, pkexec, squashfs-tools, coreutils, libfuse2t64 | libfuse2, libfile-mimeinfo-perl
 Description: Graphical application store for Thallium OS
  Thallium Store searches system packages, Flathub, and curated GitHub
  applications, then delegates package changes to a JSON-capable UNI backend.
