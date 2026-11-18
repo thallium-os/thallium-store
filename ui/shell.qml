@@ -2087,7 +2087,10 @@ ShellRoot {
     // of starting a second one.
     IpcHandler {
         target: "store"
-        function openFile(path: string): void { root.openAppImage(path) }
+        function openFile(path: string): void {
+            window.visible = true
+            root.openAppImage(path)
+        }
     }
 
     // OFF|ON and option cells for settings rows: parallelogram cells at the
@@ -3124,6 +3127,11 @@ ShellRoot {
         visible: true
         title: "Thallium Store"
         color: root.cBase
+
+        // Closing the window has to end the store. Quickshell keeps a shell running with no
+        // window left, and the `thallium-store <file>` wrapper then hands every later file to
+        // that windowless instance over IPC, so opening an AppImage shows nothing.
+        onVisibleChanged: if (!visible) Qt.quit()
 
         Rectangle {
             anchors.fill: parent
